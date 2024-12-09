@@ -1,158 +1,155 @@
 from ib_insync import *
 import pandas as pd
 import numpy as np
+from itertools import product
 
 # Connect to Interactive Brokers TWS or Gateway
 ib = IB()
-ib.connect('127.0.0.1', 7497, clientId=1)  # Use port 7497 for paper trading (7496 for live accounts)
+ib.connect('127.0.0.1', 7497, clientId=1)
 
-# Define the MES futures contract with correct specifications
-mes_contract = Future(
-    symbol='MES',              # Micro E-mini S&P 500 symbol
-    exchange='CME',            # Correct exchange for Interactive Brokers
-    currency='USD',            # USD currency
-    lastTradeDateOrContractMonth='202409'  # Example expiry (September 2024)
-)
+# Define Contracts
+es_contract = Future(symbol='ES', exchange='CME', currency='USD', lastTradeDateOrContractMonth='202412')
+mes_contract = Future(symbol='MES', exchange='CME', currency='USD', lastTradeDateOrContractMonth='202412')
 
-# Qualify the contract to ensure it is valid and tradable
-ib.qualifyContracts(mes_contract)
+# Qualify contracts
+ib.qualifyContracts(es_contract, mes_contract)
 
-# Strategy Parameters
-stop_loss_points = 10  # Stop loss in points
-take_profit_points = 20  # Take profit in points
-commission_per_side = 0.62  # Commission per contract per side
-total_commission = commission_per_side * 2  # Total commission per round trip (buy and sell)
-
-# Retrieve historical data for backtesting from 01/01/2024 to 09/01/2024 with 30-minute bars
+# Retrieve Historical Data for ES
 bars = ib.reqHistoricalData(
-    mes_contract,
-    endDateTime='20240901 23:59:59',  # End date for historical data
-    durationStr='12 M',  # Duration covering 8 months (January to September)
-    barSizeSetting='30 mins',  # 30-minute bars
+    es_contract,
+    endDateTime='20241208 23:59:59',
+    durationStr='12 M',
+    barSizeSetting='30 mins',
     whatToShow='TRADES',
-    useRTH=False,  # Use all trading hours, including extended trading hours
+    useRTH=False,
     formatDate=1
 )
 
-# Convert historical data to pandas DataFrame
+# Convert historical data to DataFrame
 df = util.df(bars)
-df.index = pd.to_datetime(df.index)
+df['date'] = pd.to_datetime(df['date'])
+df.set_index('date', inplace=True)
 
-def backtest_bollinger(bollinger_period, bollinger_stddev):
-    df['ma'] = df['close'].rolling(window=bollinger_period).mean()
-    df['std'] = df['close'].rolling(window=bollinger_period).std()
-    df['upper_band'] = df['ma'] + (bollinger_stddev * df['std'])
-    df['lower_band'] = df['ma'] - (bollinger_stddev * df['std'])
+# Optimization Ranges
+lookback_periods = range(10, 51, 5)
+stop_losses = range(5, 21, 5)
+take_profits = range(10, 31, 5)
 
-    # Initialize variables to track positions, PnL, and trades
+# Initialize Best Config
+best_config = None
+best_sharpe_ratio = -float('inf')
+
+# Backtesting and Optimization
+for lookback, stop_loss, take_profit in product(lookback_periods, stop_losses, take_profits):
+    # Calculate Bollinger Bands
+    df['ma'] = df['close'].rolling(window=lookback).mean()
+    df['std'] = df['close'].rolling(window=lookback).std()
+    df['upper_band'] = df['ma'] + (2 * df['std'])
+    df['lower_band'] = df['ma'] - (2 * df['std'])
+
+    # Initialize Variables
     position_size = 0
     entry_price = None
-    position_type = None  # 'long' or 'short'
-    initial_cash = 10000  # Set initial cash to $10,000 for backtesting
+    position_type = None
+    initial_cash = 5000
     cash = initial_cash
     trade_results = []
+    exposure_bars = 0
 
-    # Backtesting loop
-    for i in range(bollinger_period, len(df)):
+    # Backtesting Loop
+    for i in range(lookback, len(df)):
         current_price = df['close'].iloc[i]
-        high_price = df['high'].iloc[i]  # High price of the current bar
-        low_price = df['low'].iloc[i]    # Low price of the current bar
+        high_price = df['high'].iloc[i]
+        low_price = df['low'].iloc[i]
 
+        # Track Exposure
+        if position_size != 0:
+            exposure_bars += 1
+
+        # Entry Logic
         if position_size == 0:
-            # Check for a long entry signal
             if current_price < df['lower_band'].iloc[i]:
-                # Buy 1 contract (long position)
                 position_size = 1
                 entry_price = current_price
                 position_type = 'long'
 
-            # Check for a short entry signal
             elif current_price > df['upper_band'].iloc[i]:
-                # Sell 1 contract (short position)
                 position_size = 1
                 entry_price = current_price
                 position_type = 'short'
 
+        # Exit Logic - Long
         elif position_type == 'long':
-            # Calculate the maximum adverse price movement for a long position
             price_change_profit = high_price - entry_price
             price_change_loss = entry_price - low_price
 
-            # Check for take profit or stop loss conditions
-            if price_change_profit >= take_profit_points:
-                pnl = (take_profit_points * position_size * 5) - total_commission  # Profit per contract
-                cash += pnl  # Update cash with PnL only
-                trade_results.append(pnl)  # Record trade result
-                position_size = 0  # Exit position
-                entry_price = None
-                position_type = None
-            elif price_change_loss >= stop_loss_points:
-                pnl = (-stop_loss_points * position_size * 5) - total_commission  # Loss per contract
-                cash += pnl  # Update cash with PnL only
-                trade_results.append(pnl)  # Record trade result
-                position_size = 0  # Exit position
-                entry_price = None
-                position_type = None
+            if price_change_profit >= take_profit:
+                pnl = (take_profit * position_size * 5) - 0.94
+                cash += pnl
+                trade_results.append(pnl)
+                position_size = 0
 
+            elif price_change_loss >= stop_loss:
+                pnl = (-stop_loss * position_size * 5) - 0.94
+                cash += pnl
+                trade_results.append(pnl)
+                position_size = 0
+
+        # Exit Logic - Short
         elif position_type == 'short':
-            # Calculate the maximum favorable price movement for a short position
             price_change_profit = entry_price - low_price
             price_change_loss = high_price - entry_price
 
-            # Check for take profit or stop loss conditions
-            if price_change_profit >= take_profit_points:
-                pnl = (take_profit_points * position_size * 5) - total_commission  # Profit per contract
-                cash += pnl  # Update cash with PnL only
-                trade_results.append(pnl)  # Record trade result
-                position_size = 0  # Exit position
-                entry_price = None
-                position_type = None
-            elif price_change_loss >= stop_loss_points:
-                pnl = (-stop_loss_points * position_size * 5) - total_commission  # Loss per contract
-                cash += pnl  # Update cash with PnL only
-                trade_results.append(pnl)  # Record trade result
-                position_size = 0  # Exit position
-                entry_price = None
-                position_type = None
+            if price_change_profit >= take_profit:
+                pnl = (take_profit * position_size * 5) - 0.94
+                cash += pnl
+                trade_results.append(pnl)
+                position_size = 0
 
-    # Calculate performance metrics
-    total_return = cash - initial_cash
-    winning_trades = [result for result in trade_results if result > 0]
-    losing_trades = [result for result in trade_results if result <= 0]
-    profit_factor = sum(winning_trades) / abs(sum(losing_trades)) if losing_trades else float('inf')
-    returns = pd.Series(trade_results).pct_change().dropna()
-    sharpe_ratio = (returns.mean() / returns.std()) * np.sqrt(252) if returns.std() != 0 else float('nan')
+            elif price_change_loss >= stop_loss:
+                pnl = (-stop_loss * position_size * 5) - 0.94
+                cash += pnl
+                trade_results.append(pnl)
+                position_size = 0
 
-    return total_return, sharpe_ratio, profit_factor
+    # Calculate Metrics
+    balance_series = pd.Series([initial_cash] + trade_results).cumsum()
+    daily_returns = balance_series.pct_change().dropna()
 
-# Optimization loop
-best_params = None
-best_sharpe = -float('inf')
-results = []
+    # Correct Sharpe Ratio Calculation
+    sharpe_ratio = (
+        daily_returns.mean() / daily_returns.std() * np.sqrt(252)
+        if daily_returns.std() != 0 else -float('inf')
+    )
 
-for bollinger_period in range(10, 31, 5):  # Example: periods 10, 15, 20, 25, 30
-    for bollinger_stddev in np.arange(1.5, 3.5, 0.5):  # Example: stddevs 1.5, 2.0, 2.5, 3.0
-        total_return, sharpe_ratio, profit_factor = backtest_bollinger(bollinger_period, bollinger_stddev)
+    total_return_percentage = ((cash - initial_cash) / initial_cash) * 100
+    profit_factor = sum([t for t in trade_results if t > 0]) / abs(sum([t for t in trade_results if t <= 0])) if sum(
+        [t for t in trade_results if t <= 0]) != 0 else float('inf')
 
-        if sharpe_ratio > best_sharpe:
-            best_sharpe = sharpe_ratio
-            best_params = (bollinger_period, bollinger_stddev)
+    # Debug Output
+    print(f"Testing Lookback={lookback}, Stop Loss={stop_loss}, Take Profit={take_profit}, Trades={len(trade_results)}, Sharpe={sharpe_ratio:.2f}")
 
-        # Save the results of this combination
-        results.append({
-            'period': bollinger_period,
-            'stddev': bollinger_stddev,
+    # Update Best Config
+    if sharpe_ratio > best_sharpe_ratio:
+        best_sharpe_ratio = sharpe_ratio
+        best_config = {
+            'lookback_period': lookback,
+            'stop_loss_points': stop_loss,
+            'take_profit_points': take_profit,
             'sharpe_ratio': sharpe_ratio,
-            'total_return': total_return,
-            'profit_factor': profit_factor
-        })
+            'profit_factor': profit_factor,
+            'final_balance': cash,
+            'return_percentage': total_return_percentage,
+            'total_trades': len(trade_results)
+        }
 
-        # Print results for each iteration
-        print(f"Tested Period: {bollinger_period}, StdDev: {bollinger_stddev}")
-        print(f"Sharpe Ratio: {sharpe_ratio:.2f}, Total Return: ${total_return:.2f}, Profit Factor: {profit_factor:.2f}")
-        print("-" * 60)
+# Print Best Results
+if best_config:
+    print("\nBest Strategy Configuration:")
+    for key, value in best_config.items():
+        print(f"{key:25}: {value:.2f}" if isinstance(value, float) else f"{key:25}: {value}")
+else:
+    print("No valid strategy configuration found.")
 
-# Print best result
-print("\nBest Parameters:")
-print(f"Best Period: {best_params[0]}, Best StdDev: {best_params[1]}")
-print(f"Best Sharpe Ratio: {best_sharpe:.2f}")
+# Disconnect from TWS
+ib.disconnect()

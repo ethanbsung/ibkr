@@ -25,9 +25,9 @@ es_contract = Future(
 ib.qualifyContracts(mes_contract)
 
 # Strategy Parameters
-bollinger_period = 20
+bollinger_period = 15
 bollinger_stddev = 2
-stop_loss_points = 10
+stop_loss_points = 5
 take_profit_points = 20
 commission_per_side = 0.47
 total_commission = commission_per_side * 2
