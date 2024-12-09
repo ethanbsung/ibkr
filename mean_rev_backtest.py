@@ -8,11 +8,18 @@ ib.connect('127.0.0.1', 7497, clientId=1)
 
 # Define the MES futures contract
 mes_contract = Future(
-    symbol='MES',              
-    exchange='CME',            
-    currency='USD',            
+    symbol='ES',
+    exchange='CME',
+    currency='USD',
     lastTradeDateOrContractMonth='202412'
 )
+
+# Define Both Contracts
+es_contract = Future(
+    symbol='ES', 
+    exchange='CME', 
+    currency='USD', 
+    lastTradeDateOrContractMonth='202412')
 
 # Qualify the contract to ensure it is valid and tradable
 ib.qualifyContracts(mes_contract)
@@ -22,13 +29,13 @@ bollinger_period = 20
 bollinger_stddev = 2
 stop_loss_points = 10
 take_profit_points = 20
-commission_per_side = 0.62
+commission_per_side = 0.47
 total_commission = commission_per_side * 2
 initial_cash = 5000
 
 # Retrieve historical data
 bars = ib.reqHistoricalData(
-    mes_contract,
+    es_contract,
     endDateTime='20241208 23:59:59',
     durationStr='12 M',
     barSizeSetting='30 mins',
