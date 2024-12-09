@@ -27,8 +27,8 @@ ib.qualifyContracts(mes_contract)
 # Strategy Parameters
 bollinger_period = 15
 bollinger_stddev = 2
-stop_loss_points = 5
-take_profit_points = 20
+stop_loss_points = 3
+take_profit_points = 23
 commission_per_side = 0.47
 total_commission = commission_per_side * 2
 initial_cash = 5000
@@ -47,7 +47,7 @@ bars = ib.reqHistoricalData(
 df = util.df(bars)
 
 # Ensure DataFrame index is set to datetime format
-df['date'] = pd.to_datetime(df['date'])  # Convert to datetime if not already
+df['date'] = pd.to_datetime(df['date'])
 df.set_index('date', inplace=True)
 
 # Extract correct start and end dates
@@ -72,8 +72,20 @@ cash = initial_cash
 trade_results = []
 balance_series = [initial_cash]
 
-# Initialize variables
-exposure_bars = 0  # Count active bars
+exposure_bars = 0  # Count bars when in a position
+
+# In a more live-like simulation, once we enter a position, 
+# we will set limit orders for take profit and stop loss.
+# For longs:
+#   Stop loss limit order at (entry_price - stop_loss_points)
+#   Take profit limit order at (entry_price + take_profit_points)
+#
+# For shorts:
+#   Stop loss limit order at (entry_price + stop_loss_points)
+#   Take profit limit order at (entry_price - take_profit_points)
+
+stop_loss_price = None
+take_profit_price = None
 
 # Backtesting loop
 for i in range(bollinger_period, len(df)):
@@ -86,51 +98,86 @@ for i in range(bollinger_period, len(df)):
         exposure_bars += 1
 
     if position_size == 0:
+        # No open position, check for entry signals
         if current_price < df['lower_band'].iloc[i]:
+            # Enter Long
             position_size = 1
             entry_price = current_price
             position_type = 'long'
+            # Set limit orders
+            stop_loss_price = entry_price - stop_loss_points
+            take_profit_price = entry_price + take_profit_points
+            print(f"Entered Long Position at {entry_price:.2f}")
 
         elif current_price > df['upper_band'].iloc[i]:
+            # Enter Short
             position_size = 1
             entry_price = current_price
             position_type = 'short'
+            # Set limit orders
+            stop_loss_price = entry_price + stop_loss_points
+            take_profit_price = entry_price - take_profit_points
+            print(f"Entered Short Position at {entry_price:.2f}")
 
-    elif position_type == 'long':
-        price_change_profit = high_price - entry_price
-        price_change_loss = entry_price - low_price
+    else:
+        # Position is open, check if the limit orders are triggered
+        if position_type == 'long':
+            # For a long position, check if stop or take profit triggered
+            # Check stop loss first, as stops are protective and usually trigger first if both occur same bar
+            if low_price <= stop_loss_price:
+                # Stopped out at stop_loss_price
+                pnl = ((stop_loss_price - entry_price) * position_size * 5) - total_commission
+                cash += pnl
+                trade_results.append(pnl)
+                balance_series.append(cash)
+                print(f"STOPPED OUT LONG at {stop_loss_price:.2f} | Loss: {pnl:.2f}")
+                position_size = 0
+                position_type = None
+                entry_price = None
+                stop_loss_price = None
+                take_profit_price = None
 
-        if price_change_profit >= take_profit_points:
-            pnl = (take_profit_points * position_size * 5) - total_commission
-            cash += pnl
-            trade_results.append(pnl)
-            balance_series.append(cash)
-            position_size = 0
+            elif high_price >= take_profit_price:
+                # Took profit at take_profit_price
+                pnl = ((take_profit_price - entry_price) * position_size * 5) - total_commission
+                cash += pnl
+                trade_results.append(pnl)
+                balance_series.append(cash)
+                print(f"EXITED LONG at {take_profit_price:.2f} | Profit: {pnl:.2f}")
+                position_size = 0
+                position_type = None
+                entry_price = None
+                stop_loss_price = None
+                take_profit_price = None
 
-        elif price_change_loss >= stop_loss_points:
-            pnl = (-stop_loss_points * position_size * 5) - total_commission
-            cash += pnl
-            trade_results.append(pnl)
-            balance_series.append(cash)
-            position_size = 0
+        elif position_type == 'short':
+            # For a short position, check if stop or take profit triggered
+            # Check stop loss first
+            if high_price >= stop_loss_price:
+                # Stopped out short at stop_loss_price
+                pnl = ((entry_price - stop_loss_price) * position_size * 5) - total_commission
+                cash += pnl
+                trade_results.append(pnl)
+                balance_series.append(cash)
+                print(f"STOPPED OUT SHORT at {stop_loss_price:.2f} | Loss: {pnl:.2f}")
+                position_size = 0
+                position_type = None
+                entry_price = None
+                stop_loss_price = None
+                take_profit_price = None
 
-    elif position_type == 'short':
-        price_change_profit = entry_price - low_price
-        price_change_loss = high_price - entry_price
-
-        if price_change_profit >= take_profit_points:
-            pnl = (take_profit_points * position_size * 5) - total_commission
-            cash += pnl
-            trade_results.append(pnl)
-            balance_series.append(cash)
-            position_size = 0
-
-        elif price_change_loss >= stop_loss_points:
-            pnl = (-stop_loss_points * position_size * 5) - total_commission
-            cash += pnl
-            trade_results.append(pnl)
-            balance_series.append(cash)
-            position_size = 0
+            elif low_price <= take_profit_price:
+                # Took profit short at take_profit_price
+                pnl = ((entry_price - take_profit_price) * position_size * 5) - total_commission
+                cash += pnl
+                trade_results.append(pnl)
+                balance_series.append(cash)
+                print(f"EXITED SHORT at {take_profit_price:.2f} | Profit: {pnl:.2f}")
+                position_size = 0
+                position_type = None
+                entry_price = None
+                stop_loss_price = None
+                take_profit_price = None
 
 # Final Portfolio Calculations
 balance_series = pd.Series(balance_series)
@@ -169,8 +216,7 @@ losing_trades = [pnl for pnl in trade_results if pnl <= 0]
 if losing_trades:
     profit_factor = sum(winning_trades) / abs(sum(losing_trades))
 else:
-    profit_factor = float('inf') if winning_trades else 0  # Avoid 'inf' when no trades
-
+    profit_factor = float('inf') if winning_trades else 0
 
 # Results Summary
 print("\nPerformance Summary:")
@@ -187,7 +233,7 @@ results = {
     "Total Trades": len(trade_results),
     "Winning Trades": len(winning_trades),
     "Losing Trades": len(losing_trades),
-    "Win Rate": f"{len(winning_trades) / len(trade_results) * 100:.2f}%" if trade_results else "0.00%",
+    "Win Rate": f"{(len(winning_trades)/len(trade_results)*100) if trade_results else 0:.2f}%",
     "Profit Factor": f"{profit_factor:.2f}",
     "Sharpe Ratio": f"{sharpe_ratio:.2f}",
     "Sortino Ratio": f"{sortino_ratio:.2f}",

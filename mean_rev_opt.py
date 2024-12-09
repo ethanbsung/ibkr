@@ -9,10 +9,9 @@ ib.connect('127.0.0.1', 7497, clientId=1)
 
 # Define Contracts
 es_contract = Future(symbol='ES', exchange='CME', currency='USD', lastTradeDateOrContractMonth='202412')
-mes_contract = Future(symbol='MES', exchange='CME', currency='USD', lastTradeDateOrContractMonth='202412')
 
 # Qualify contracts
-ib.qualifyContracts(es_contract, mes_contract)
+ib.qualifyContracts(es_contract)
 
 # Retrieve Historical Data for ES
 bars = ib.reqHistoricalData(
@@ -32,8 +31,8 @@ df.set_index('date', inplace=True)
 
 # Optimization Ranges
 lookback_periods = range(10, 51, 5)
-stop_losses = range(5, 21, 5)
-take_profits = range(10, 31, 5)
+stop_losses = range(3, 15, 1)
+take_profits = range(5, 25, 1)
 
 # Initialize Best Config
 best_config = None
@@ -50,6 +49,8 @@ for lookback, stop_loss, take_profit in product(lookback_periods, stop_losses, t
     # Initialize Variables
     position_size = 0
     entry_price = None
+    stop_loss_price = None
+    take_profit_price = None
     position_type = None
     initial_cash = 5000
     cash = initial_cash
@@ -72,42 +73,39 @@ for lookback, stop_loss, take_profit in product(lookback_periods, stop_losses, t
                 position_size = 1
                 entry_price = current_price
                 position_type = 'long'
+                stop_loss_price = entry_price - stop_loss
+                take_profit_price = entry_price + take_profit
 
             elif current_price > df['upper_band'].iloc[i]:
                 position_size = 1
                 entry_price = current_price
                 position_type = 'short'
+                stop_loss_price = entry_price + stop_loss
+                take_profit_price = entry_price - take_profit
 
-        # Exit Logic - Long
+        # Exit Logic
         elif position_type == 'long':
-            price_change_profit = high_price - entry_price
-            price_change_loss = entry_price - low_price
-
-            if price_change_profit >= take_profit:
-                pnl = (take_profit * position_size * 5) - 0.94
+            if low_price <= stop_loss_price:
+                pnl = ((stop_loss_price - entry_price) * 5) - 0.94
                 cash += pnl
                 trade_results.append(pnl)
                 position_size = 0
 
-            elif price_change_loss >= stop_loss:
-                pnl = (-stop_loss * position_size * 5) - 0.94
+            elif high_price >= take_profit_price:
+                pnl = ((take_profit_price - entry_price) * 5) - 0.94
                 cash += pnl
                 trade_results.append(pnl)
                 position_size = 0
 
-        # Exit Logic - Short
         elif position_type == 'short':
-            price_change_profit = entry_price - low_price
-            price_change_loss = high_price - entry_price
-
-            if price_change_profit >= take_profit:
-                pnl = (take_profit * position_size * 5) - 0.94
+            if high_price >= stop_loss_price:
+                pnl = ((entry_price - stop_loss_price) * 5) - 0.94
                 cash += pnl
                 trade_results.append(pnl)
                 position_size = 0
 
-            elif price_change_loss >= stop_loss:
-                pnl = (-stop_loss * position_size * 5) - 0.94
+            elif low_price <= take_profit_price:
+                pnl = ((entry_price - take_profit_price) * 5) - 0.94
                 cash += pnl
                 trade_results.append(pnl)
                 position_size = 0
