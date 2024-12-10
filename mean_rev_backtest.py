@@ -1,6 +1,7 @@
 from ib_insync import *
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 # Connect to Interactive Brokers TWS or Gateway
 ib = IB()
@@ -23,6 +24,7 @@ es_contract = Future(
 
 # Qualify the contract to ensure it is valid and tradable
 ib.qualifyContracts(mes_contract)
+ib.qualifyContracts(es_contract)
 
 # Strategy Parameters
 bollinger_period = 15
@@ -246,6 +248,17 @@ results = {
 
 for key, value in results.items():
     print(f"{key:25}: {value:>15}")
+
+# --- Equity Curve Plot ---
+plt.figure(figsize=(12, 6))
+plt.plot(balance_series, label="Equity Curve", color="blue", linewidth=2)
+plt.title("Bollinger Bands Trading Strategy - Equity Curve", fontsize=16)
+plt.xlabel("Date", fontsize=12)
+plt.ylabel("Account Balance (USD)", fontsize=12)
+plt.grid(True, linestyle="--", alpha=0.6)
+plt.axhline(initial_cash, color="red", linestyle="--", label="Starting Balance")
+plt.legend(loc="upper left", fontsize=12)
+plt.show()
 
 # Disconnect from TWS
 ib.disconnect()
