@@ -12,7 +12,7 @@ mes_contract = Future(
     symbol='MES',              # Micro E-mini S&P 500 symbol
     exchange='CME',            # Correct exchange for Interactive Brokers
     currency='USD',            # USD currency
-    lastTradeDateOrContractMonth='202409'  # Example expiry (September 2024)
+    lastTradeDateOrContractMonth='202412'  # Example expiry (September 2024)
 )
 
 # Qualify the contract to ensure it is valid and tradable
@@ -23,13 +23,13 @@ fast_period = 20
 slow_period = 50
 take_profit_points = 25  # Take profit at 30 points gain
 stop_loss_points = 10    # Stop loss at 10 points loss
-commission_per_side = 0.62  # Commission per contract per side
+commission_per_side = 0.47  # Commission per contract per side
 total_commission = commission_per_side * 2  # Total commission per round trip (buy and sell)
 
 # Retrieve historical data for backtesting from 01/01/2024 to 09/01/2024 with 30-minute bars
 bars = ib.reqHistoricalData(
     mes_contract,
-    endDateTime='20240901 23:59:59',  # End date for historical data
+    endDateTime='20241208 23:59:59',  # End date for historical data
     durationStr='12 M',  # Duration covering 8 months (January to September)
     barSizeSetting='1 Hour',  # 1 Hour bars
     whatToShow='TRADES',

@@ -14,8 +14,8 @@ class MovingAverageStrategy:
         self.trades = []
 
     def calculate_signals(self, data):
-        data['FastMA'] = data['Close'].rolling(window=self.fast_period).mean()
-        data['SlowMA'] = data['Close'].rolling(window=self.slow_period).mean()
+        data['FastMA'] = data['close'].rolling(window=self.fast_period).mean()
+        data['SlowMA'] = data['close'].rolling(window=self.slow_period).mean()
         data['Signal'] = np.where(data['FastMA'] > data['SlowMA'], 1, -1)
         return data
 
@@ -26,23 +26,23 @@ class MovingAverageStrategy:
             if self.position == 0:
                 if data['Signal'].iloc[i] == 1:
                     self.position = 1
-                    self.position_price = data['Close'].iloc[i]
+                    self.position_price = data['close'].iloc[i]
                     self.trades.append(('BUY', data.index[i], self.position_price))
                 elif data['Signal'].iloc[i] == -1:
                     self.position = -1
-                    self.position_price = data['Close'].iloc[i]
+                    self.position_price = data['close'].iloc[i]
                     self.trades.append(('SELL', data.index[i], self.position_price))
             elif self.position == 1:
                 if data['Signal'].iloc[i] == -1 or \
-                   data['Close'].iloc[i] >= self.position_price + self.take_profit or \
-                   data['Close'].iloc[i] <= self.position_price - self.stop_loss:
-                    self.trades.append(('SELL', data.index[i], data['Close'].iloc[i]))
+                   data['close'].iloc[i] >= self.position_price + self.take_profit or \
+                   data['close'].iloc[i] <= self.position_price - self.stop_loss:
+                    self.trades.append(('SELL', data.index[i], data['close'].iloc[i]))
                     self.position = 0
             elif self.position == -1:
                 if data['Signal'].iloc[i] == 1 or \
-                   data['Close'].iloc[i] <= self.position_price - self.take_profit or \
-                   data['Close'].iloc[i] >= self.position_price + self.stop_loss:
-                    self.trades.append(('BUY', data.index[i], data['Close'].iloc[i]))
+                   data['close'].iloc[i] <= self.position_price - self.take_profit or \
+                   data['close'].iloc[i] >= self.position_price + self.stop_loss:
+                    self.trades.append(('BUY', data.index[i], data['close'].iloc[i]))
                     self.position = 0
 
         return pd.DataFrame(self.trades, columns=['Action', 'Date', 'Price'])
@@ -52,7 +52,7 @@ def get_historical_data(ib, contract, duration):
         contract,
         endDateTime='',
         durationStr=duration,
-        barSizeSetting='15 mins',
+        barSizeSetting='30 mins',
         whatToShow='TRADES',
         useRTH=True,
         formatDate=1
@@ -109,7 +109,7 @@ if __name__ == "__main__":
         symbol='MES',
         exchange='CME',
         currency='USD',
-        lastTradeDateOrContractMonth='202409'
+        lastTradeDateOrContractMonth='202412'
     )
 
     # Qualify the contract
@@ -117,6 +117,9 @@ if __name__ == "__main__":
 
     # Get historical data (e.g., last 30 days)
     data = get_historical_data(ib, mes_contract, '30 D')
+
+    # Debug: Print the columns of the DataFrame
+    print("DataFrame columns:", data.columns)
 
     # Run backtest
     strategy = MovingAverageStrategy()
