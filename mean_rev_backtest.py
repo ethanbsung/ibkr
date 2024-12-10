@@ -22,6 +22,8 @@ es_contract = Future(
     currency='USD', 
     lastTradeDateOrContractMonth='202412')
 
+
+
 # Qualify the contract to ensure it is valid and tradable
 ib.qualifyContracts(mes_contract)
 ib.qualifyContracts(es_contract)
@@ -34,6 +36,7 @@ take_profit_points = 23
 commission_per_side = 0.47
 total_commission = commission_per_side * 2
 initial_cash = 5000
+
 
 # Retrieve historical data
 bars = ib.reqHistoricalData(
