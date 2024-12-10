@@ -29,8 +29,8 @@ initial_cash = 5000
 # Retrieve historical data
 bars = ib.reqHistoricalData(
     es_contract,
-    endDateTime='20241209 23:59:59',
-    durationStr='6 M',
+    endDateTime='20240609 23:59:59',
+    durationStr='1 M',
     barSizeSetting='30 mins',
     whatToShow='TRADES',
     useRTH=False,

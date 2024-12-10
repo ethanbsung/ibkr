@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 from itertools import product
 import matplotlib.pyplot as plt
+from datetime import time
+import pytz  # Import pytz for timezone handling
 
 # Connect to Interactive Brokers TWS or Gateway
 ib = IB()
@@ -35,10 +37,18 @@ df = util.df(bars)
 df['date'] = pd.to_datetime(df['date'])
 df.set_index('date', inplace=True)
 
+# Adjust timezone to Eastern Time if necessary
+# Uncomment and modify the following lines if your data is not in ET
+# df.index = df.index.tz_localize('UTC').tz_convert('America/New_York')
+
+# Define market open and close times (Eastern Time)
+MARKET_OPEN = time(9, 30)
+MARKET_CLOSE = time(16, 0)
+
 # Optimization Ranges
-lookback_periods = range(10, 31, 5)          # Bollinger Bands lookback periods: 10, 15, 20, 25
-stop_losses = range(2, 10, 1)                # Stop loss points: 2, 3, 4, 5
-take_profits = range(5, 30, 1)             # Take profit points: 10, 15, 20, 25, 30
+lookback_periods = range(10, 31, 5)          # Bollinger Bands lookback periods: 10, 15, 20, 25, 30
+stop_losses = range(2, 10, 1)                # Stop loss points: 2, 3, 4, 5, 6, 7, 8, 9
+take_profits = range(5, 30, 1)              # Take profit points: 5, 6, ..., 29
 
 # Initialize Best Config
 best_config = None
@@ -87,6 +97,12 @@ for lookback, stop_loss, take_profit in product(
 
     # Backtesting Loop
     for i in range(len(df_backtest)):
+        current_datetime = df_backtest.index[i]
+        current_time = current_datetime.time()
+        
+        # Check if current time is within market hours
+        is_market_hours = MARKET_OPEN <= current_time <= MARKET_CLOSE
+
         current_price = df_backtest['close'].iloc[i]
         high_price = df_backtest['high'].iloc[i]
         low_price = df_backtest['low'].iloc[i]
@@ -97,27 +113,28 @@ for lookback, stop_loss, take_profit in product(
 
         if position_size == 0:
             # No open position, check for entry signals based on Bollinger Bands
-            if current_price < df_backtest['lower_band'].iloc[i]:
-                # Enter Long
-                position_size = 1
-                entry_price = current_price
-                position_type = 'long'
-                # Set stop loss and take profit prices
-                stop_loss_price = entry_price - stop_loss
-                take_profit_price = entry_price + take_profit
-                # Debugging output
-                # print(f"Entered Long Position at {entry_price:.2f}")
-            
-            elif current_price > df_backtest['upper_band'].iloc[i]:
-                # Enter Short
-                position_size = 1
-                entry_price = current_price
-                position_type = 'short'
-                # Set stop loss and take profit prices
-                stop_loss_price = entry_price + stop_loss
-                take_profit_price = entry_price - take_profit
-                # Debugging output
-                # print(f"Entered Short Position at {entry_price:.2f}")
+            if is_market_hours:
+                if current_price < df_backtest['lower_band'].iloc[i]:
+                    # Enter Long
+                    position_size = 1
+                    entry_price = current_price
+                    position_type = 'long'
+                    # Set stop loss and take profit prices
+                    stop_loss_price = entry_price - stop_loss
+                    take_profit_price = entry_price + take_profit
+                    # Debugging output
+                    # print(f"Entered Long Position at {entry_price:.2f}")
+                
+                elif current_price > df_backtest['upper_band'].iloc[i]:
+                    # Enter Short
+                    position_size = 1
+                    entry_price = current_price
+                    position_type = 'short'
+                    # Set stop loss and take profit prices
+                    stop_loss_price = entry_price + stop_loss
+                    take_profit_price = entry_price - take_profit
+                    # Debugging output
+                    # print(f"Entered Short Position at {entry_price:.2f}")
 
         else:
             # Position is open, check if the limit orders are triggered
@@ -190,7 +207,7 @@ for lookback, stop_loss, take_profit in product(
     winning_trades_count = len(winning_trades)
     win_rate = (winning_trades_count / total_trades) * 100 if total_trades > 0 else 0.0
 
-    # Update Best Config based on Sharpe Ratio and Win Rate >30%
+    # Update Best Config based on Sharpe Ratio and Win Rate > min_win_rate
     if win_rate >= min_win_rate and sharpe_ratio > best_sharpe_ratio:
         best_sharpe_ratio = sharpe_ratio
         best_config = {
@@ -209,14 +226,14 @@ for lookback, stop_loss, take_profit in product(
 
 # Print Best Results
 if best_config:
-    print("\nBest Strategy Configuration (Win Rate > 30%):")
+    print("\nBest Strategy Configuration (Win Rate > 25%):")
     for key, value in best_config.items():
         if isinstance(value, float):
             print(f"{key:25}: {value:.2f}")
         else:
             print(f"{key:25}: {value}")
 else:
-    print("No valid strategy configuration found with a win rate over 30%.")
+    print("No valid strategy configuration found with a win rate over 25%.")
 
 # Disconnect from TWS
 ib.disconnect()
