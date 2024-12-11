@@ -18,7 +18,7 @@ def create_es_future_contract(expiration):
         includeExpired=True
     )
 
-def fetch_historical_data(ib, contract, start_date, end_date, bar_size='1 day', what_to_show='TRADES'):
+def fetch_historical_data(ib, contract, start_date, end_date, bar_size='1 min', what_to_show='TRADES'):
     """
     Fetch historical OHLCV data for a given contract.
     """
