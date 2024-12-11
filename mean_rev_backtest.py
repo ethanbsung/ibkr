@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 # Function to load data
 def load_data(csv_file):
@@ -41,19 +42,26 @@ df_1m = load_data(csv_file_1m)
 df_5m = load_data(csv_file_5m)
 df_30m = load_data(csv_file_30m)
 
-# Adjust the date range dynamically and normalize to UTC
-start_time = pd.to_datetime(df_30m.index.min(), utc=True)
-end_time = pd.to_datetime(df_30m.index.max(), utc=True)
+# Option 1: Custom Backtest Period (Replace These Dates)
+custom_start_date = "2024-01-01"
+custom_end_date = "2024-12-11"
+
+# Option 2: Use Full Available Data (if custom dates are not set)
+if custom_start_date and custom_end_date:
+    start_time = pd.to_datetime(custom_start_date, utc=True)
+    end_time = pd.to_datetime(custom_end_date, utc=True)
+else:
+    start_time = pd.to_datetime(df_30m.index.min(), utc=True)
+    end_time = pd.to_datetime(df_30m.index.max(), utc=True)
 
 # Ensure the 1-minute DataFrame index is in UTC
 df_1m.index = pd.to_datetime(df_1m.index, utc=True)
 
-# Slice the 1-minute DataFrame using consistent UTC timezones
+# Slice the 1-minute DataFrame using the chosen backtest period
 df_1m = df_1m.loc[start_time:end_time]
+df_30m = df_30m.loc[start_time:end_time]
 
-print(f"Start Time (UTC): {start_time}")
-print(f"End Time (UTC): {end_time}")
-print(f"1-Minute Data Range: {df_1m.index.min()} to {df_1m.index.max()}")
+print(f"Backtesting from {start_time} to {end_time}")
 
 # Calculate Bollinger Bands on 30m data
 bollinger_period = 15
@@ -83,35 +91,22 @@ drawdown_durations = []
 # Define which high-frequency data to use
 df_high_freq = df_1m  # Change to df_5m if preferred
 
-def evaluate_exit(entry_time, position_type, entry_price, stop_loss, take_profit, df_high_freq):
+def evaluate_exit(position_type, entry_price, stop_loss, take_profit, df_high_freq, entry_time):
     """
-    Determines whether the stop-loss or take-profit is hit first using higher-frequency data.
+    Determines whether the stop-loss or take-profit is hit using higher-frequency data.
+    Returns exit_price, exit_time, and hit_take_profit flag.
     """
-    bar_end_time = entry_time + pd.Timedelta(minutes=30)
-    df_period = df_high_freq.loc[entry_time:bar_end_time]
-
-    # Handle case where bar_end_time might not exist in df_high_freq
-    if bar_end_time not in df_period.index:
-        print(f"Bar end time {bar_end_time} not found in high-frequency data.")
-        # Exit at the last available close price within the period
-        if not df_period.empty:
-            exit_price = df_period['close'].iloc[-1]
-            exit_time = df_period.index[-1]
-        else:
-            # If df_period is empty, exit at entry price
-            exit_price = entry_price
-            exit_time = entry_time
-        hit_take_profit = None
-        return exit_price, exit_time, hit_take_profit
-
-    # Iterate through each higher-frequency bar within the 30m period
+    df_period = df_high_freq.loc[entry_time:]
+    
+    # Iterate through each higher-frequency bar after entry_time
     for timestamp, row in df_period.iterrows():
         high = row['high']
         low = row['low']
 
         if position_type == 'long':
             if high >= take_profit and low <= stop_loss:
-                # Determine which was hit first based on open price
+                # Determine which was hit first
+                # Assuming the open of the bar is the first price, check sequence
                 if row['open'] <= stop_loss:
                     return stop_loss, timestamp, False
                 else:
@@ -132,25 +127,14 @@ def evaluate_exit(entry_time, position_type, entry_price, stop_loss, take_profit
             elif high >= stop_loss:
                 return stop_loss, timestamp, False
 
-    # If neither condition is met within the bar, exit at bar close
-    exit_price_series = df_high_freq.loc[bar_end_time]['close']
-    if isinstance(exit_price_series, pd.Series):
-        # Handle multiple close prices by taking the first one
-        exit_price = exit_price_series.iloc[0]
-    else:
-        exit_price = exit_price_series  # float
-
-    exit_time = bar_end_time
-    hit_take_profit = None
-    return exit_price, exit_time, hit_take_profit
+    # If neither condition is met, wait for the next bar
+    return None, None, None
 
 # Backtesting loop
 for i in range(len(df_30m)):
     current_bar = df_30m.iloc[i]
     current_time = df_30m.index[i]
     current_price = current_bar['close']
-    high_price = current_bar['high']
-    low_price = current_bar['low']
 
     # Count exposure when position is active
     if position_size != 0:
@@ -164,9 +148,9 @@ for i in range(len(df_30m)):
             entry_price = current_price
             position_type = 'long'
             stop_loss_price = entry_price - 5  # Adjust as per your strategy
-            take_profit_price = entry_price + 15  # Adjust as per your strategy
+            take_profit_price = entry_price + 10  # Adjust as per your strategy
             entry_time = current_time
-            # print(f"Entered Long at {entry_price} on {entry_time}")
+            #print(f"Entered LONG at {entry_price} on {entry_time} UTC")
 
         elif current_price > current_bar['upper_band']:
             # Enter Short
@@ -176,63 +160,45 @@ for i in range(len(df_30m)):
             stop_loss_price = entry_price + 5  # Adjust as per your strategy
             take_profit_price = entry_price - 15  # Adjust as per your strategy
             entry_time = current_time
-            # print(f"Entered Short at {entry_price} on {entry_time}")
+            #print(f"Entered SHORT at {entry_price} on {entry_time} UTC")
 
     else:
-        # Position is open, use higher-frequency data to evaluate exit
+        # Position is open, check high-frequency data until exit
         exit_price, exit_time, hit_take_profit = evaluate_exit(
-            entry_time,
             position_type,
             entry_price,
             stop_loss_price,
             take_profit_price,
-            df_high_freq
+            df_high_freq,
+            entry_time
         )
 
         if exit_price is not None and exit_time is not None:
             # Calculate P&L based on the exit condition
-            if hit_take_profit is True:
-                if position_type == 'long':
-                    pnl = ((exit_price - entry_price) * 5) - (0.47 * 2)
-                elif position_type == 'short':
-                    pnl = ((entry_price - exit_price) * 5) - (0.47 * 2)
-                trade_results.append(pnl)
-                cash += pnl
-                balance_series.append(cash)  # Append to list
+            if position_type == 'long':
+                pnl = ((exit_price - entry_price) * 5) - (0.47 * 2)  # Example: 5 contracts, $0.47 spread cost
+            elif position_type == 'short':
+                pnl = ((entry_price - exit_price) * 5) - (0.47 * 2)
+            
+            trade_results.append(pnl)
+            cash += pnl
+            balance_series.append(cash)  # Append to list
 
-            elif hit_take_profit is False:
-                if position_type == 'long':
-                    pnl = ((exit_price - entry_price) * 5) - (0.47 * 2)
-                elif position_type == 'short':
-                    pnl = ((entry_price - exit_price) * 5) - (0.47 * 2)
-                trade_results.append(pnl)
-                cash += pnl
-                balance_series.append(cash)  # Append to list
-
+            # Print trade exit details
+            if hit_take_profit:
+                exit_type = "TAKE PROFIT"
             else:
-                # Neither take profit nor stop loss was hit; exit at bar close
-                if position_type == 'long':
-                    pnl = ((exit_price - entry_price) * 5) - (0.47 * 2)
-                elif position_type == 'short':
-                    pnl = ((entry_price - exit_price) * 5) - (0.47 * 2)
-                trade_results.append(pnl)
-                cash += pnl
-                balance_series.append(cash)  # Append to list
+                exit_type = "STOP LOSS"
 
-            # Reset position
+            #print(f"Exited {position_type.upper()} at {exit_price} on {exit_time} UTC via {exit_type} for P&L: ${pnl:.2f}")
+
+            # Reset position variables
             position_size = 0
             position_type = None
             entry_price = None
             stop_loss_price = None
             take_profit_price = None
             entry_time = None
-
-    # **Do Not Convert `balance_series` to a Series Inside the Loop**
-    # Remove or comment out the following line:
-    # balance_series = pd.Series(balance_series, index=df_30m.index[:len(balance_series)])
-
-    # Drawdown Duration Tracking (unchanged)
-    # We'll handle this after converting to a Series
 
 # After the Backtesting Loop
 
@@ -332,3 +298,13 @@ results = {
 
 for key, value in results.items():
     print(f"{key:25}: {value:>15}")
+
+# Plot Equity Curve
+plt.figure(figsize=(12, 6))
+plt.plot(balance_series, label='Equity Curve', color='b')
+plt.title("Equity Curve")
+plt.xlabel("Date")
+plt.ylabel("Account Balance ($)")
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.legend(loc='upper left')
+plt.show()
