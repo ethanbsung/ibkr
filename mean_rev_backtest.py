@@ -213,18 +213,18 @@ for i in range(len(df_30m)):
             # Calculate P&L based on the exit condition
             if hit_take_profit is True:
                 if position_type == 'long':
-                    pnl = ((exit_price - entry_price) * 50) - (0.47 * 2)
+                    pnl = ((exit_price - entry_price) * 5) - (0.47 * 2)
                 elif position_type == 'short':
-                    pnl = ((entry_price - exit_price) * 50) - (0.47 * 2)
+                    pnl = ((entry_price - exit_price) * 5) - (0.47 * 2)
                 trade_results.append(pnl)
                 cash += pnl
                 balance_series.append(cash)  # Append to list
 
             elif hit_take_profit is False:
                 if position_type == 'long':
-                    pnl = ((exit_price - entry_price) * 50) - (0.47 * 2)
+                    pnl = ((exit_price - entry_price) * 5) - (0.47 * 2)
                 elif position_type == 'short':
-                    pnl = ((entry_price - exit_price) * 50) - (0.47 * 2)
+                    pnl = ((entry_price - exit_price) * 5) - (0.47 * 2)
                 trade_results.append(pnl)
                 cash += pnl
                 balance_series.append(cash)  # Append to list
@@ -232,9 +232,9 @@ for i in range(len(df_30m)):
             else:
                 # Neither take profit nor stop loss was hit; exit at bar close
                 if position_type == 'long':
-                    pnl = ((exit_price - entry_price) * 50) - (0.47 * 2)
+                    pnl = ((exit_price - entry_price) * 5) - (0.47 * 2)
                 elif position_type == 'short':
-                    pnl = ((entry_price - exit_price) * 50) - (0.47 * 2)
+                    pnl = ((entry_price - exit_price) * 5) - (0.47 * 2)
                 trade_results.append(pnl)
                 cash += pnl
                 balance_series.append(cash)  # Append to list
@@ -282,7 +282,7 @@ if in_drawdown:
     drawdown_durations.append(duration)
 
 # Portfolio Summary Calculations
-daily_returns = balance_series.resample('D').last().pct_change().dropna()
+daily_returns = balance_series.resample('D').last().pct_change(fill_method=None).dropna()
 
 # Performance Metrics
 total_return_percentage = ((cash - 5000) / 5000) * 100
