@@ -41,19 +41,6 @@ df_1m = load_data(csv_file_1m)
 df_5m = load_data(csv_file_5m)
 df_30m = load_data(csv_file_30m)
 
-# Check for duplicates in the index of each DataFrame and remove them
-for df_name, df in [('df_1m', df_1m), ('df_5m', df_5m), ('df_30m', df_30m)]:
-    if df.index.duplicated().any():
-        print(f"Duplicate indices found in {df_name}. Removing duplicates.")
-        # Option 1: Remove duplicates, keeping the first occurrence
-        df = df[~df.index.duplicated(keep='first')]
-        # Option 2: Aggregate duplicates (e.g., take mean)
-        # df = df.groupby(df.index).mean()
-        # Reassign the cleaned DataFrame back to its original variable
-        globals()[df_name] = df
-    else:
-        print(f"No duplicate indices in {df_name}.")
-
 # Adjust the date range dynamically and normalize to UTC
 start_time = pd.to_datetime(df_30m.index.min(), utc=True)
 end_time = pd.to_datetime(df_30m.index.max(), utc=True)
@@ -78,13 +65,6 @@ df_30m['upper_band'] = df_30m['ma'] + (bollinger_stddev * df_30m['std'])
 df_30m['lower_band'] = df_30m['ma'] - (bollinger_stddev * df_30m['std'])
 
 df_30m.dropna(inplace=True)
-
-# Ensure df_30m has no duplicate indices after cleaning
-if df_30m.index.duplicated().any():
-    print("Duplicate indices found in df_30m after initial cleaning. Removing duplicates.")
-    df_30m = df_30m[~df_30m.index.duplicated(keep='first')]
-else:
-    print("No duplicate indices in df_30m after initial cleaning.")
 
 # Initialize backtest variables
 position_size = 0
