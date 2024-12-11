@@ -1,6 +1,8 @@
 from ib_insync import IB, Future, util
 import pandas as pd
 import logging
+from datetime import datetime
+import pytz
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,23 +20,56 @@ def create_es_future_contract(expiration):
         includeExpired=True
     )
 
-def fetch_historical_data(ib, contract, start_date, end_date, bar_size='1 min', what_to_show='TRADES'):
+def convert_to_utc(start_date_str, end_date_str):
+    """
+    Convert date strings from US/Eastern to UTC timezone and format them as 'yyyymmdd-HH:MM:SS'.
+    """
+    eastern = pytz.timezone('US/Eastern')
+    utc = pytz.utc
+
+    try:
+        start_naive = datetime.strptime(start_date_str, '%Y%m%d %H:%M:%S')
+        end_naive = datetime.strptime(end_date_str, '%Y%m%d %H:%M:%S')
+    except ValueError as ve:
+        logger.error(f"Date parsing error: {ve}")
+        return None, None
+
+    # Localize to US/Eastern and convert to UTC
+    start_eastern = eastern.localize(start_naive)
+    end_eastern = eastern.localize(end_naive)
+    start_utc = start_eastern.astimezone(utc)
+    end_utc = end_eastern.astimezone(utc)
+    
+    # Format as 'yyyymmdd-HH:MM:SS' to explicitly indicate UTC
+    return start_utc.strftime('%Y%m%d-%H:%M:%S'), end_utc.strftime('%Y%m%d-%H:%M:%S')
+
+def fetch_historical_data(ib, contract, start_date_str, end_date_str, bar_size='1 hour', what_to_show='TRADES'):
     """
     Fetch historical OHLCV data for a given contract.
     """
-    logger.info(f"Fetching data for contract {contract.lastTradeDateOrContractMonth} from {start_date} to {end_date}")
-    bars = ib.reqHistoricalData(
-        contract,
-        endDateTime=end_date,
-        durationStr='3 M',
-        barSizeSetting=bar_size,
-        whatToShow=what_to_show,
-        useRTH=False,
-        formatDate=1,
-        keepUpToDate=False
-    )
+    start_date, end_date = convert_to_utc(start_date_str, end_date_str)
+    if not start_date or not end_date:
+        logger.error(f"Invalid date conversion for {contract.lastTradeDateOrContractMonth}")
+        return pd.DataFrame()
+
+    logger.info(f"Fetching data for {contract.lastTradeDateOrContractMonth} from {start_date} to {end_date}")
+    try:
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime=end_date,
+            durationStr='3 M',
+            barSizeSetting=bar_size,
+            whatToShow=what_to_show,
+            useRTH=False,
+            formatDate=1,
+            keepUpToDate=False
+        )
+    except Exception as e:
+        logger.error(f"Error fetching data for {contract.lastTradeDateOrContractMonth}: {e}")
+        return pd.DataFrame()
+
     if not bars:
-        logger.warning(f"No data returned for contract {contract.lastTradeDateOrContractMonth}")
+        logger.warning(f"No data returned for {contract.lastTradeDateOrContractMonth}")
         return pd.DataFrame()
 
     df = util.df(bars)
@@ -70,14 +105,14 @@ def main():
     data_frames = []
     for contract, start_date, end_date in contracts_with_dates:
         ib.qualifyContracts(contract)
-        df = fetch_historical_data(ib, contract, start_date=start_date, end_date=end_date)
+        df = fetch_historical_data(ib, contract, start_date_str=start_date, end_date_str=end_date)
         if not df.empty:
             data_frames.append(df)
 
     # Combine DataFrames if data is available
     if data_frames:
         combined_df = pd.concat(data_frames, ignore_index=True)
-        combined_df['date'] = pd.to_datetime(combined_df['date'])
+        combined_df['date'] = pd.to_datetime(combined_df['date'], utc=True)
         combined_df = combined_df.sort_values(by=['date', 'contract']).reset_index(drop=True)
 
         # Display the combined DataFrame
