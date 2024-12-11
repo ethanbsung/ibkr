@@ -11,7 +11,8 @@ es_contract = Future(
     symbol='ES',
     exchange='CME',
     currency='USD',
-    lastTradeDateOrContractMonth='202412'
+    lastTradeDateOrContractMonth='202406',
+    includeExpired=True
 )
 
 # Qualify the contract to ensure it is valid and tradable
@@ -29,7 +30,7 @@ initial_cash = 5000
 # Retrieve historical data
 bars = ib.reqHistoricalData(
     es_contract,
-    endDateTime='20240609 23:59:59',
+    endDateTime='20240601 23:59:59',
     durationStr='1 M',
     barSizeSetting='30 mins',
     whatToShow='TRADES',
@@ -43,6 +44,9 @@ df = util.df(bars)
 # Ensure DataFrame index is set to datetime format
 df['date'] = pd.to_datetime(df['date'])
 df.set_index('date', inplace=True)
+
+print(df.head())
+print(df.tail())
 
 # Extract correct start and end dates
 start_date = df.index.min()
@@ -95,7 +99,7 @@ for i in range(bollinger_period, len(df)):
             # Set limit orders
             stop_loss_price = entry_price - stop_loss_points
             take_profit_price = entry_price + take_profit_points
-            print(f"Entered Long Position at {entry_price:.2f}")
+            # print(f"Entered Long Position at {entry_price:.2f}")
         
         elif current_price > df['upper_band'].iloc[i]:
             # Enter Short
@@ -105,7 +109,7 @@ for i in range(bollinger_period, len(df)):
             # Set limit orders
             stop_loss_price = entry_price + stop_loss_points
             take_profit_price = entry_price - take_profit_points
-            print(f"Entered Short Position at {entry_price:.2f}")
+            #print(f"Entered Short Position at {entry_price:.2f}")
 
     else:
         # Position is open, check if the limit orders are triggered
@@ -118,7 +122,7 @@ for i in range(bollinger_period, len(df)):
                 cash += pnl
                 trade_results.append(pnl)
                 balance_series.append(cash)
-                print(f"STOPPED OUT LONG at {stop_loss_price:.2f} | Loss: {pnl:.2f}")
+                # print(f"STOPPED OUT LONG at {stop_loss_price:.2f} | Loss: {pnl:.2f}")
                 # Reset position
                 position_size = 0
                 position_type = None
@@ -132,7 +136,7 @@ for i in range(bollinger_period, len(df)):
                 cash += pnl
                 trade_results.append(pnl)
                 balance_series.append(cash)
-                print(f"EXITED LONG at {take_profit_price:.2f} | Profit: {pnl:.2f}")
+                # print(f"EXITED LONG at {take_profit_price:.2f} | Profit: {pnl:.2f}")
                 # Reset position
                 position_size = 0
                 position_type = None
@@ -149,7 +153,7 @@ for i in range(bollinger_period, len(df)):
                 cash += pnl
                 trade_results.append(pnl)
                 balance_series.append(cash)
-                print(f"STOPPED OUT SHORT at {stop_loss_price:.2f} | Loss: {pnl:.2f}")
+                # print(f"STOPPED OUT SHORT at {stop_loss_price:.2f} | Loss: {pnl:.2f}")
                 # Reset position
                 position_size = 0
                 position_type = None
@@ -163,7 +167,7 @@ for i in range(bollinger_period, len(df)):
                 cash += pnl
                 trade_results.append(pnl)
                 balance_series.append(cash)
-                print(f"EXITED SHORT at {take_profit_price:.2f} | Profit: {pnl:.2f}")
+                # print(f"EXITED SHORT at {take_profit_price:.2f} | Profit: {pnl:.2f}")
                 # Reset position
                 position_size = 0
                 position_type = None

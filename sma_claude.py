@@ -1,134 +1,98 @@
-from ib_insync import *
+from ib_insync import IB, Future, util
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
+import logging
 
-class MovingAverageStrategy:
-    def __init__(self, fast_period=20, slow_period=50, take_profit=5, stop_loss=3):
-        self.fast_period = fast_period
-        self.slow_period = slow_period
-        self.take_profit = take_profit
-        self.stop_loss = stop_loss
-        self.position = 0
-        self.position_price = 0
-        self.trades = []
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-    def calculate_signals(self, data):
-        data['FastMA'] = data['close'].rolling(window=self.fast_period).mean()
-        data['SlowMA'] = data['close'].rolling(window=self.slow_period).mean()
-        data['Signal'] = np.where(data['FastMA'] > data['SlowMA'], 1, -1)
-        return data
-
-    def backtest(self, data):
-        data = self.calculate_signals(data)
-        
-        for i in range(len(data)):
-            if self.position == 0:
-                if data['Signal'].iloc[i] == 1:
-                    self.position = 1
-                    self.position_price = data['close'].iloc[i]
-                    self.trades.append(('BUY', data.index[i], self.position_price))
-                elif data['Signal'].iloc[i] == -1:
-                    self.position = -1
-                    self.position_price = data['close'].iloc[i]
-                    self.trades.append(('SELL', data.index[i], self.position_price))
-            elif self.position == 1:
-                if data['Signal'].iloc[i] == -1 or \
-                   data['close'].iloc[i] >= self.position_price + self.take_profit or \
-                   data['close'].iloc[i] <= self.position_price - self.stop_loss:
-                    self.trades.append(('SELL', data.index[i], data['close'].iloc[i]))
-                    self.position = 0
-            elif self.position == -1:
-                if data['Signal'].iloc[i] == 1 or \
-                   data['close'].iloc[i] <= self.position_price - self.take_profit or \
-                   data['close'].iloc[i] >= self.position_price + self.stop_loss:
-                    self.trades.append(('BUY', data.index[i], data['close'].iloc[i]))
-                    self.position = 0
-
-        return pd.DataFrame(self.trades, columns=['Action', 'Date', 'Price'])
-
-def get_historical_data(ib, contract, duration):
-    bars = ib.reqHistoricalData(
-        contract,
-        endDateTime='',
-        durationStr=duration,
-        barSizeSetting='30 mins',
-        whatToShow='TRADES',
-        useRTH=True,
-        formatDate=1
-    )
-    df = util.df(bars)
-    df.set_index('date', inplace=True)
-    return df
-
-def calculate_metrics(trades):
-    if len(trades) < 2:
-        return "Not enough trades to calculate metrics"
-
-    total_trades = len(trades) // 2
-    pnl = []
-    for i in range(0, len(trades), 2):
-        if i + 1 < len(trades):
-            if trades['Action'].iloc[i] == 'BUY':
-                pnl.append(trades['Price'].iloc[i+1] - trades['Price'].iloc[i])
-            else:
-                pnl.append(trades['Price'].iloc[i] - trades['Price'].iloc[i+1])
-
-    winners = sum(1 for p in pnl if p > 0)
-    losers = sum(1 for p in pnl if p < 0)
-    avg_winner = np.mean([p for p in pnl if p > 0]) if winners > 0 else 0
-    avg_loser = np.mean([p for p in pnl if p < 0]) if losers > 0 else 0
-    win_rate = winners / total_trades if total_trades > 0 else 0
-    profit_factor = abs(sum(p for p in pnl if p > 0)) / abs(sum(p for p in pnl if p < 0)) if sum(p for p in pnl if p < 0) != 0 else float('inf')
-    
-    cumulative_pnl = np.cumsum(pnl)
-    max_drawdown = np.max(np.maximum.accumulate(cumulative_pnl) - cumulative_pnl)
-    
-    total_return = sum(pnl)
-    
-    return {
-        'Total Trades': total_trades,
-        'Winners': winners,
-        'Losers': losers,
-        'Average Winner': avg_winner,
-        'Average Loser': avg_loser,
-        'Win Rate': win_rate,
-        'Profit Factor': profit_factor,
-        'Max Drawdown': max_drawdown,
-        'Total Return': total_return
-    }
-
-# Main execution
-if __name__ == "__main__":
-    # Connect to Interactive Brokers TWS or Gateway
-    ib = IB()
-    ib.connect('127.0.0.1', 7497, clientId=1)
-
-    # Define the MES futures contract
-    mes_contract = Future(
-        symbol='MES',
+def create_es_future_contract(expiration):
+    """
+    Create an ES future contract based on the expiration date.
+    """
+    return Future(
+        symbol='ES',
         exchange='CME',
         currency='USD',
-        lastTradeDateOrContractMonth='202412'
+        lastTradeDateOrContractMonth=expiration,
+        includeExpired=True
     )
 
-    # Qualify the contract
-    ib.qualifyContracts(mes_contract)
+def fetch_historical_data(ib, contract, start_date, end_date, bar_size='1 day', what_to_show='TRADES'):
+    """
+    Fetch historical OHLCV data for a given contract.
+    """
+    logger.info(f"Fetching data for contract {contract.lastTradeDateOrContractMonth} from {start_date} to {end_date}")
+    bars = ib.reqHistoricalData(
+        contract,
+        endDateTime=end_date,
+        durationStr='3 M',
+        barSizeSetting=bar_size,
+        whatToShow=what_to_show,
+        useRTH=False,
+        formatDate=1,
+        keepUpToDate=False
+    )
+    if not bars:
+        logger.warning(f"No data returned for contract {contract.lastTradeDateOrContractMonth}")
+        return pd.DataFrame()
 
-    # Get historical data (e.g., last 30 days)
-    data = get_historical_data(ib, mes_contract, '30 D')
+    df = util.df(bars)
+    df['contract'] = contract.lastTradeDateOrContractMonth
 
-    # Debug: Print the columns of the DataFrame
-    print("DataFrame columns:", data.columns)
+    logger.info(f"Fetched {len(df)} records for contract {contract.lastTradeDateOrContractMonth}")
+    return df
 
-    # Run backtest
-    strategy = MovingAverageStrategy()
-    trades = strategy.backtest(data)
+def main():
+    # Connect to IB
+    ib = IB()
+    try:
+        ib.connect('127.0.0.1', 7497, clientId=1)
+        logger.info("Connected to IB")
+    except Exception as e:
+        logger.error(f"Failed to connect to IB: {e}")
+        return
 
-    # Calculate and print results
-    results = calculate_metrics(trades)
-    for key, value in results.items():
-        print(f"{key}: {value}")
+    # Define Correct Non-Overlapping Contracts
+    contracts_with_dates = [
+        (create_es_future_contract('202212'), '20220917 23:59:59', '20221216 23:59:59'),  # Sep-Dec 2022
+        (create_es_future_contract('202303'), '20221217 23:59:59', '20230316 23:59:59'),  # Dec 2022 - Mar 2023
+        (create_es_future_contract('202306'), '20230317 23:59:59', '20230616 23:59:59'),  # Mar-Jun 2023
+        (create_es_future_contract('202309'), '20230617 23:59:59', '20230916 23:59:59'),  # Jun-Sep 2023
+        (create_es_future_contract('202312'), '20230917 23:59:59', '20231216 23:59:59'),  # Sep-Dec 2023
+        (create_es_future_contract('202403'), '20231217 23:59:59', '20240316 23:59:59'),  # Dec 2023 - Mar 2024
+        (create_es_future_contract('202406'), '20240317 23:59:59', '20240616 23:59:59'),  # Mar-Jun 2024
+        (create_es_future_contract('202409'), '20240617 23:59:59', '20240916 23:59:59'),  # Jun-Sep 2024
+        (create_es_future_contract('202412'), '20240917 23:59:59', '20241216 23:59:59'),  # Sep-Dec 2024
+    ]
+    
+    # Fetch historical data for each contract
+    data_frames = []
+    for contract, start_date, end_date in contracts_with_dates:
+        ib.qualifyContracts(contract)
+        df = fetch_historical_data(ib, contract, start_date=start_date, end_date=end_date)
+        if not df.empty:
+            data_frames.append(df)
 
+    # Combine DataFrames if data is available
+    if data_frames:
+        combined_df = pd.concat(data_frames, ignore_index=True)
+        combined_df['date'] = pd.to_datetime(combined_df['date'])
+        combined_df = combined_df.sort_values(by=['date', 'contract']).reset_index(drop=True)
+
+        # Display the combined DataFrame
+        print(combined_df.head())
+        print(combined_df.tail())
+
+        # Save to CSV
+        combined_df.to_csv('combined_es_futures_data.csv', index=False)
+        logger.info("Combined DataFrame saved to 'combined_es_futures_data.csv'")
+    else:
+        logger.warning("No data fetched for the specified contracts.")
+    
     # Disconnect from IB
     ib.disconnect()
+    logger.info("Disconnected from IB")
+
+if __name__ == "__main__":
+    main()
