@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import time
 
 # Function to load data
 def load_data(csv_file):
@@ -43,7 +44,7 @@ df_5m = load_data(csv_file_5m)
 df_30m = load_data(csv_file_30m)
 
 # Option 1: Custom Backtest Period (Replace These Dates)
-custom_start_date = "2024-01-01"
+custom_start_date = "2023-01-01"
 custom_end_date = "2024-12-11"
 
 # Option 2: Use Full Available Data (if custom dates are not set)
@@ -158,7 +159,7 @@ for i in range(len(df_30m)):
             entry_price = current_price
             position_type = 'short'
             stop_loss_price = entry_price + 5  # Adjust as per your strategy
-            take_profit_price = entry_price - 15  # Adjust as per your strategy
+            take_profit_price = entry_price - 10  # Adjust as per your strategy
             entry_time = current_time
             #print(f"Entered SHORT at {entry_price} on {entry_time} UTC")
 
@@ -227,8 +228,35 @@ if in_drawdown:
     duration = (drawdown_end - drawdown_start).total_seconds() / 86400
     drawdown_durations.append(duration)
 
-# Portfolio Summary Calculations
+# Fix the FutureWarning by specifying fill_method=None
 daily_returns = balance_series.resample('D').last().pct_change(fill_method=None).dropna()
+
+# Define Sortino Ratio Calculation Function
+def calculate_sortino_ratio(daily_returns, target_return=0):
+    """
+    Calculate the annualized Sortino Ratio.
+    """
+    if daily_returns.empty:
+        return np.nan
+    
+    # Calculate excess returns
+    excess_returns = daily_returns - target_return
+    
+    # Calculate downside returns (only negative returns)
+    downside_returns = excess_returns[excess_returns < 0]
+
+    # Handle cases where there are no downside returns
+    if downside_returns.empty or downside_returns.std() == 0:
+        return np.inf  # No downside risk means infinite Sortino Ratio
+
+    # Annualize downside standard deviation
+    downside_std = downside_returns.std() * np.sqrt(252)
+
+    # Annualize mean excess return
+    annualized_mean_excess_return = daily_returns.mean() * 252
+
+    # Return Sortino Ratio
+    return annualized_mean_excess_return / downside_std
 
 # Performance Metrics
 total_return_percentage = ((cash - 5000) / 5000) * 100
@@ -236,14 +264,10 @@ trading_days = max((df_30m.index.max() - df_30m.index.min()).days, 1)
 annualized_return_percentage = ((cash / 5000) ** (252 / trading_days)) - 1
 benchmark_return = ((df_30m['close'].iloc[-1] - df_30m['close'].iloc[0]) / df_30m['close'].iloc[0]) * 100
 equity_peak = balance_series.max()
+
 volatility_annual = daily_returns.std() * np.sqrt(252) * 100
 sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252) if daily_returns.std() != 0 else 0
-
-# Sortino Ratio Calculation
-downside_returns = daily_returns.copy()
-downside_returns[downside_returns > 0] = 0
-downside_std = downside_returns.std() * np.sqrt(252)
-sortino_ratio = (daily_returns.mean() / downside_std) if downside_std != 0 else 0
+sortino_ratio = calculate_sortino_ratio(daily_returns)
 
 # Drawdown Calculations
 running_max_series = balance_series.cummax()
@@ -269,6 +293,12 @@ if drawdown_durations:
 else:
     max_drawdown_duration_days = 0
     average_drawdown_duration_days = 0
+
+# Calculate daily PnL
+daily_pnl = balance_series.resample('D').last().diff().dropna()
+
+
+
 
 # Results Summary
 print("\nPerformance Summary:")
@@ -299,6 +329,14 @@ results = {
 for key, value in results.items():
     print(f"{key:25}: {value:>15}")
 
+plt.figure(figsize=(12, 6))
+daily_pnl.plot(kind='bar', color=daily_pnl.apply(lambda x: 'g' if x >= 0 else 'r'))
+plt.title('Daily PnL')
+plt.xlabel('Date')
+plt.ylabel('PnL ($)')
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
+'''
 # Plot Equity Curve
 plt.figure(figsize=(12, 6))
 plt.plot(balance_series, label='Equity Curve', color='b')
@@ -308,3 +346,4 @@ plt.ylabel("Account Balance ($)")
 plt.grid(True, linestyle='--', alpha=0.6)
 plt.legend(loc='upper left')
 plt.show()
+'''
