@@ -1,79 +1,98 @@
 import pandas as pd
 import numpy as np
 
-# Load CSV data
-csv_file = 'es_30m_data.csv'  # Replace with your actual file path
+# Function to load data
+def load_data(csv_file):
+    try:
+        df = pd.read_csv(
+            csv_file,
+            dtype={
+                'open': float,
+                'high': float,
+                'low': float,
+                'close': float,
+                'volume': float,
+                'average': float,
+                'barCount': int,
+                'contract': str
+            },
+            parse_dates=['date'],
+            date_format="%Y-%m-%d %H:%M:%S%z"
+        )
+        df.sort_values('date', inplace=True)
+        df.set_index('date', inplace=True)
+        return df
+    except FileNotFoundError:
+        print(f"File not found: {csv_file}")
+        exit(1)
+    except pd.errors.EmptyDataError:
+        print("No data: The CSV file is empty.")
+        exit(1)
+    except Exception as e:
+        print(f"An error occurred while reading the CSV: {e}")
+        exit(1)
 
-# Read the CSV without 'date_parser' and handle date parsing separately
-try:
-    df = pd.read_csv(
-        csv_file,
-        dtype={
-            'open': float,
-            'high': float,
-            'low': float,
-            'close': float,
-            'volume': float,
-            'average': float,
-            'barCount': int,
-            'contract': str
-        }
-    )
-except FileNotFoundError:
-    print(f"File not found: {csv_file}")
-    exit(1)
-except pd.errors.EmptyDataError:
-    print("No data: The CSV file is empty.")
-    exit(1)
-except Exception as e:
-    print(f"An error occurred while reading the CSV: {e}")
-    exit(1)
+# Load datasets
+csv_file_1m = 'es_1m_data.csv'
+csv_file_5m = 'es_5m_data.csv'
+csv_file_30m = 'es_30m_data.csv'
 
-# Parse 'date' column with timezone information
-try:
-    df['date'] = pd.to_datetime(df['date'], utc=True)  # Automatically handles timezone
-except ValueError as ve:
-    print(f"Date parsing error: {ve}")
-    exit(1)
+df_1m = load_data(csv_file_1m)
+df_5m = load_data(csv_file_5m)
+df_30m = load_data(csv_file_30m)
 
-# Ensure DataFrame is sorted by date
-df.sort_values('date', inplace=True)
+# Check for duplicates in the index of each DataFrame and remove them
+for df_name, df in [('df_1m', df_1m), ('df_5m', df_5m), ('df_30m', df_30m)]:
+    if df.index.duplicated().any():
+        print(f"Duplicate indices found in {df_name}. Removing duplicates.")
+        # Option 1: Remove duplicates, keeping the first occurrence
+        df = df[~df.index.duplicated(keep='first')]
+        # Option 2: Aggregate duplicates (e.g., take mean)
+        # df = df.groupby(df.index).mean()
+        # Reassign the cleaned DataFrame back to its original variable
+        globals()[df_name] = df
+    else:
+        print(f"No duplicate indices in {df_name}.")
 
-# Set 'date' as the index
-df.set_index('date', inplace=True)
+# Adjust the date range dynamically and normalize to UTC
+start_time = pd.to_datetime(df_30m.index.min(), utc=True)
+end_time = pd.to_datetime(df_30m.index.max(), utc=True)
 
-# Display the first and last few rows to verify
-print("DataFrame Head:")
-print(df.head())
+# Ensure the 1-minute DataFrame index is in UTC
+df_1m.index = pd.to_datetime(df_1m.index, utc=True)
 
-print("\nDataFrame Tail:")
-print(df.tail())
+# Slice the 1-minute DataFrame using consistent UTC timezones
+df_1m = df_1m.loc[start_time:end_time]
 
-# Strategy Parameters
+print(f"Start Time (UTC): {start_time}")
+print(f"End Time (UTC): {end_time}")
+print(f"1-Minute Data Range: {df_1m.index.min()} to {df_1m.index.max()}")
+
+# Calculate Bollinger Bands on 30m data
 bollinger_period = 15
 bollinger_stddev = 2
-stop_loss_points = 5
-take_profit_points = 15
-commission_per_side = 0.47
-total_commission = commission_per_side * 2
-initial_cash = 5000
 
-# Calculate Bollinger Bands
-df['ma'] = df['close'].rolling(window=bollinger_period).mean()
-df['std'] = df['close'].rolling(window=bollinger_period).std()
-df['upper_band'] = df['ma'] + (bollinger_stddev * df['std'])
-df['lower_band'] = df['ma'] - (bollinger_stddev * df['std'])
+df_30m['ma'] = df_30m['close'].rolling(window=bollinger_period).mean()
+df_30m['std'] = df_30m['close'].rolling(window=bollinger_period).std()
+df_30m['upper_band'] = df_30m['ma'] + (bollinger_stddev * df_30m['std'])
+df_30m['lower_band'] = df_30m['ma'] - (bollinger_stddev * df_30m['std'])
 
-# Drop initial rows with NaN values due to rolling calculations
-df.dropna(inplace=True)
+df_30m.dropna(inplace=True)
 
-# Initialize variables
+# Ensure df_30m has no duplicate indices after cleaning
+if df_30m.index.duplicated().any():
+    print("Duplicate indices found in df_30m after initial cleaning. Removing duplicates.")
+    df_30m = df_30m[~df_30m.index.duplicated(keep='first')]
+else:
+    print("No duplicate indices in df_30m after initial cleaning.")
+
+# Initialize backtest variables
 position_size = 0
 entry_price = None
 position_type = None  
-cash = initial_cash
+cash = 5000
 trade_results = []
-balance_series = [initial_cash]
+balance_series = [5000]  # Keep as a list
 exposure_bars = 0
 
 # For Drawdown Duration Calculations
@@ -81,134 +100,200 @@ in_drawdown = False
 drawdown_start = None
 drawdown_durations = []
 
+# Define which high-frequency data to use
+df_high_freq = df_1m  # Change to df_5m if preferred
+
+def evaluate_exit(entry_time, position_type, entry_price, stop_loss, take_profit, df_high_freq):
+    """
+    Determines whether the stop-loss or take-profit is hit first using higher-frequency data.
+    """
+    bar_end_time = entry_time + pd.Timedelta(minutes=30)
+    df_period = df_high_freq.loc[entry_time:bar_end_time]
+
+    # Handle case where bar_end_time might not exist in df_high_freq
+    if bar_end_time not in df_period.index:
+        print(f"Bar end time {bar_end_time} not found in high-frequency data.")
+        # Exit at the last available close price within the period
+        if not df_period.empty:
+            exit_price = df_period['close'].iloc[-1]
+            exit_time = df_period.index[-1]
+        else:
+            # If df_period is empty, exit at entry price
+            exit_price = entry_price
+            exit_time = entry_time
+        hit_take_profit = None
+        return exit_price, exit_time, hit_take_profit
+
+    # Iterate through each higher-frequency bar within the 30m period
+    for timestamp, row in df_period.iterrows():
+        high = row['high']
+        low = row['low']
+
+        if position_type == 'long':
+            if high >= take_profit and low <= stop_loss:
+                # Determine which was hit first based on open price
+                if row['open'] <= stop_loss:
+                    return stop_loss, timestamp, False
+                else:
+                    return take_profit, timestamp, True
+            elif high >= take_profit:
+                return take_profit, timestamp, True
+            elif low <= stop_loss:
+                return stop_loss, timestamp, False
+
+        elif position_type == 'short':
+            if low <= take_profit and high >= stop_loss:
+                if row['open'] >= stop_loss:
+                    return stop_loss, timestamp, False
+                else:
+                    return take_profit, timestamp, True
+            elif low <= take_profit:
+                return take_profit, timestamp, True
+            elif high >= stop_loss:
+                return stop_loss, timestamp, False
+
+    # If neither condition is met within the bar, exit at bar close
+    exit_price_series = df_high_freq.loc[bar_end_time]['close']
+    if isinstance(exit_price_series, pd.Series):
+        # Handle multiple close prices by taking the first one
+        exit_price = exit_price_series.iloc[0]
+    else:
+        exit_price = exit_price_series  # float
+
+    exit_time = bar_end_time
+    hit_take_profit = None
+    return exit_price, exit_time, hit_take_profit
+
 # Backtesting loop
-for i in range(len(df)):
-    current_price = df['close'].iloc[i]
-    high_price = df['high'].iloc[i]
-    low_price = df['low'].iloc[i]
+for i in range(len(df_30m)):
+    current_bar = df_30m.iloc[i]
+    current_time = df_30m.index[i]
+    current_price = current_bar['close']
+    high_price = current_bar['high']
+    low_price = current_bar['low']
 
     # Count exposure when position is active
     if position_size != 0:
         exposure_bars += 1
 
     if position_size == 0:
-        # No open position, check for entry signals
-        if current_price < df['lower_band'].iloc[i]:
+        # No open position, check for entry signals based on 30m bar
+        if current_price < current_bar['lower_band']:
             # Enter Long
             position_size = 1
             entry_price = current_price
             position_type = 'long'
-            stop_loss_price = entry_price - stop_loss_points
-            take_profit_price = entry_price + take_profit_points
-            # print(f"Entered Long Position at {entry_price:.2f}")
+            stop_loss_price = entry_price - 5  # Adjust as per your strategy
+            take_profit_price = entry_price + 15  # Adjust as per your strategy
+            entry_time = current_time
+            # print(f"Entered Long at {entry_price} on {entry_time}")
 
-        elif current_price > df['upper_band'].iloc[i]:
+        elif current_price > current_bar['upper_band']:
             # Enter Short
             position_size = 1
             entry_price = current_price
             position_type = 'short'
-            stop_loss_price = entry_price + stop_loss_points
-            take_profit_price = entry_price - take_profit_points
-            # print(f"Entered Short Position at {entry_price:.2f}")
+            stop_loss_price = entry_price + 5  # Adjust as per your strategy
+            take_profit_price = entry_price - 15  # Adjust as per your strategy
+            entry_time = current_time
+            # print(f"Entered Short at {entry_price} on {entry_time}")
 
     else:
-        # Position is open, check if the limit orders are triggered
-        if position_type == 'long':
-            # For a long position, check if stop or take profit triggered
-            if low_price <= stop_loss_price:
-                # Stopped out at stop_loss_price
-                pnl = ((stop_loss_price - entry_price) * 5) - total_commission  # ES multiplier is 50
-                cash += pnl
-                trade_results.append(pnl)
-                balance_series.append(cash)
-                # print(f"STOPPED OUT LONG at {stop_loss_price:.2f} | Loss: {pnl:.2f}")
-                # Reset position
-                position_size = 0
-                position_type = None
-                entry_price = None
-                stop_loss_price = None
-                take_profit_price = None
+        # Position is open, use higher-frequency data to evaluate exit
+        exit_price, exit_time, hit_take_profit = evaluate_exit(
+            entry_time,
+            position_type,
+            entry_price,
+            stop_loss_price,
+            take_profit_price,
+            df_high_freq
+        )
 
-            elif high_price >= take_profit_price:
-                # Took profit at take_profit_price
-                pnl = ((take_profit_price - entry_price) * 5) - total_commission
-                cash += pnl
+        if exit_price is not None and exit_time is not None:
+            # Calculate P&L based on the exit condition
+            if hit_take_profit is True:
+                if position_type == 'long':
+                    pnl = ((exit_price - entry_price) * 50) - (0.47 * 2)
+                elif position_type == 'short':
+                    pnl = ((entry_price - exit_price) * 50) - (0.47 * 2)
                 trade_results.append(pnl)
-                balance_series.append(cash)
-                # print(f"EXITED LONG at {take_profit_price:.2f} | Profit: {pnl:.2f}")
-                # Reset position
-                position_size = 0
-                position_type = None
-                entry_price = None
-                stop_loss_price = None
-                take_profit_price = None
-
-        elif position_type == 'short':
-            # For a short position, check if stop or take profit triggered
-            if high_price >= stop_loss_price:
-                # Stopped out short at stop_loss_price
-                pnl = ((entry_price - stop_loss_price) * 5) - total_commission
                 cash += pnl
-                trade_results.append(pnl)
-                balance_series.append(cash)
-                # print(f"STOPPED OUT SHORT at {stop_loss_price:.2f} | Loss: {pnl:.2f}")
-                # Reset position
-                position_size = 0
-                position_type = None
-                entry_price = None
-                stop_loss_price = None
-                take_profit_price = None
+                balance_series.append(cash)  # Append to list
 
-            elif low_price <= take_profit_price:
-                # Took profit short at take_profit_price
-                pnl = ((entry_price - take_profit_price) * 5) - total_commission
+            elif hit_take_profit is False:
+                if position_type == 'long':
+                    pnl = ((exit_price - entry_price) * 50) - (0.47 * 2)
+                elif position_type == 'short':
+                    pnl = ((entry_price - exit_price) * 50) - (0.47 * 2)
+                trade_results.append(pnl)
                 cash += pnl
-                trade_results.append(pnl)
-                balance_series.append(cash)
-                # print(f"EXITED SHORT at {take_profit_price:.2f} | Profit: {pnl:.2f}")
-                # Reset position
-                position_size = 0
-                position_type = None
-                entry_price = None
-                stop_loss_price = None
-                take_profit_price = None
+                balance_series.append(cash)  # Append to list
 
-    # Drawdown Duration Tracking
-    current_balance = cash
-    running_max = max(balance_series)  # Current running maximum
+            else:
+                # Neither take profit nor stop loss was hit; exit at bar close
+                if position_type == 'long':
+                    pnl = ((exit_price - entry_price) * 50) - (0.47 * 2)
+                elif position_type == 'short':
+                    pnl = ((entry_price - exit_price) * 50) - (0.47 * 2)
+                trade_results.append(pnl)
+                cash += pnl
+                balance_series.append(cash)  # Append to list
+
+            # Reset position
+            position_size = 0
+            position_type = None
+            entry_price = None
+            stop_loss_price = None
+            take_profit_price = None
+            entry_time = None
+
+    # **Do Not Convert `balance_series` to a Series Inside the Loop**
+    # Remove or comment out the following line:
+    # balance_series = pd.Series(balance_series, index=df_30m.index[:len(balance_series)])
+
+    # Drawdown Duration Tracking (unchanged)
+    # We'll handle this after converting to a Series
+
+# After the Backtesting Loop
+
+# Convert balance_series to a Pandas Series
+balance_series = pd.Series(balance_series, index=df_30m.index[:len(balance_series)])
+
+# Drawdown Duration Tracking
+for i in range(len(balance_series)):
+    current_balance = balance_series.iloc[i]
+    running_max = balance_series.iloc[:i+1].max()
 
     if current_balance < running_max:
         if not in_drawdown:
             in_drawdown = True
-            drawdown_start = df.index[i]
+            drawdown_start = balance_series.index[i]
     else:
         if in_drawdown:
             in_drawdown = False
-            drawdown_end = df.index[i]
-            duration = (drawdown_end - drawdown_start).days + (drawdown_end - drawdown_start).seconds / 86400
+            drawdown_end = balance_series.index[i]
+            duration = (drawdown_end - drawdown_start).total_seconds() / 86400  # Duration in days
             drawdown_durations.append(duration)
 
 # Handle if still in drawdown at the end of the data
 if in_drawdown:
-    drawdown_end = df.index[-1]
-    duration = (drawdown_end - drawdown_start).days + (drawdown_end - drawdown_start).seconds / 86400
+    drawdown_end = balance_series.index[-1]
+    duration = (drawdown_end - drawdown_start).total_seconds() / 86400
     drawdown_durations.append(duration)
 
 # Portfolio Summary Calculations
-balance_series = pd.Series(balance_series, index=df.index[:len(balance_series)])
-daily_returns = balance_series.pct_change().dropna()
+daily_returns = balance_series.resample('D').last().pct_change().dropna()
 
 # Performance Metrics
-total_return_percentage = ((cash - initial_cash) / initial_cash) * 100
-trading_days = max((df.index.max() - df.index.min()).days, 1)
-annualized_return_percentage = ((cash / initial_cash) ** (252 / trading_days)) - 1
-benchmark_return = ((df['close'].iloc[-1] - df['close'].iloc[0]) / df['close'].iloc[0]) * 100
+total_return_percentage = ((cash - 5000) / 5000) * 100
+trading_days = max((df_30m.index.max() - df_30m.index.min()).days, 1)
+annualized_return_percentage = ((cash / 5000) ** (252 / trading_days)) - 1
+benchmark_return = ((df_30m['close'].iloc[-1] - df_30m['close'].iloc[0]) / df_30m['close'].iloc[0]) * 100
 equity_peak = balance_series.max()
 volatility_annual = daily_returns.std() * np.sqrt(252) * 100
 sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252) if daily_returns.std() != 0 else 0
 
 # Sortino Ratio Calculation
-# Calculate downside returns
 downside_returns = daily_returns.copy()
 downside_returns[downside_returns > 0] = 0
 downside_std = downside_returns.std() * np.sqrt(252)
@@ -221,7 +306,7 @@ max_drawdown = drawdowns.min() * 100
 average_drawdown = drawdowns[drawdowns < 0].mean() * 100
 
 # Exposure Time
-exposure_time_percentage = (exposure_bars / len(df)) * 100
+exposure_time_percentage = (exposure_bars / len(df_30m)) * 100
 
 # Profit Factor
 winning_trades = [pnl for pnl in trade_results if pnl > 0]
@@ -242,8 +327,8 @@ else:
 # Results Summary
 print("\nPerformance Summary:")
 results = {
-    "Start Date": df.index.min().strftime("%Y-%m-%d"),
-    "End Date": df.index.max().strftime("%Y-%m-%d"),
+    "Start Date": df_30m.index.min().strftime("%Y-%m-%d"),
+    "End Date": df_30m.index.max().strftime("%Y-%m-%d"),
     "Exposure Time": f"{exposure_time_percentage:.2f}%",
     "Final Account Balance": f"${cash:,.2f}",
     "Equity Peak": f"${equity_peak:,.2f}",
