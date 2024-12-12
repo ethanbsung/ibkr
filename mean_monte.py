@@ -368,28 +368,30 @@ def run_single_simulation(sim_number, df_1m, df_30m, initial_cash, position_mult
 
     # Handle cases where the resampled 1m data might be empty
     if df_1m_resampled.empty:
-        # If no 1m data in the resampled period, return NaNs
+        # Return a balance_series filled with initial_cash aligned with df_30m_resampled
+        balance_series = pd.Series([initial_cash] * len(df_30m_resampled), index=df_30m_resampled.index)
         return {
-            "Final Account Balance": np.nan,
-            "Total Return (%)": np.nan,
-            "Annualized Return (%)": np.nan,
-            "Benchmark Return (%)": np.nan,
-            "Equity Peak": np.nan,
-            "Volatility (Annual %)": np.nan,
+            "Final Account Balance": initial_cash,
+            "Total Return (%)": 0.0,
+            "Annualized Return (%)": 0.0,
+            "Benchmark Return (%)": 0.0,
+            "Equity Peak": initial_cash,
+            "Volatility (Annual %)": 0.0,
             "Sharpe Ratio": np.nan,
-            "Sortino Ratio": np.nan,
-            "Calmar Ratio": np.nan,
-            "Max Drawdown (%)": np.nan,
-            "Average Drawdown (%)": np.nan,
-            "Max Drawdown Duration (days)": np.nan,
-            "Average Drawdown Duration (days)": np.nan,
-            "Exposure Time (%)": np.nan,
+            "Sortino Ratio": np.inf,
+            "Calmar Ratio": np.inf,
+            "Max Drawdown (%)": 0.0,
+            "Average Drawdown (%)": 0.0,
+            "Max Drawdown Duration (days)": 0.0,
+            "Average Drawdown Duration (days)": 0.0,
+            "Exposure Time (%)": 0.0,
             "Total Trades": 0,
             "Winning Trades": 0,
             "Losing Trades": 0,
-            "Win Rate (%)": 0,
+            "Win Rate (%)": 0.0,
             "Profit Factor": np.nan,
-            "Trade PnL": []
+            "Trade PnL": [],
+            "Balance Series": balance_series  # Properly aligned balance_series
         }
 
     # Run backtest on resampled data
@@ -409,6 +411,7 @@ def run_single_simulation(sim_number, df_1m, df_30m, initial_cash, position_mult
     )
 
     return backtest_result
+
 
 def monte_carlo_simulation(
     df_1m,
@@ -450,9 +453,8 @@ def monte_carlo_simulation(
         for sim in range(num_simulations)
     ]
 
-    # Use multiprocessing Pool with imap_unordered for real-time progress
+    # Use multiprocessing Pool with imap_unordered and tqdm for progress
     with multiprocessing.Pool() as pool:
-        # Initialize tqdm progress bar
         for result in tqdm(pool.imap_unordered(run_single_simulation, args), total=num_simulations, desc="Simulations", unit="sim"):
             simulation_results.append(result)
 
@@ -463,8 +465,6 @@ def monte_carlo_simulation(
 # 4. Plotting Functions
 # ==========================
 
-import matplotlib.pyplot as plt
-import numpy as np
 
 def plot_equity_curves(equity_df):
     """
@@ -584,6 +584,13 @@ def main():
     equity_curves = pd.DataFrame(
         [result["Balance Series"] for result in simulation_results if "Balance Series" in result and isinstance(result["Balance Series"], pd.Series)]
     ).T
+
+    # Drop any columns with all NaNs
+    equity_curves.dropna(axis=1, how='all', inplace=True)
+
+    # Convert all data to numeric, coercing errors
+    equity_curves = equity_curves.apply(pd.to_numeric, errors='coerce')
+
 
     # Display summary statistics
     print("\nMonte Carlo Simulation Summary:")
