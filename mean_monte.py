@@ -6,6 +6,7 @@ import copy
 from sklearn.utils import resample
 import multiprocessing
 import warnings
+from tqdm import tqdm
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore")
@@ -329,7 +330,8 @@ def run_backtest(
         "Losing Trades": len(losing_trades),
         "Win Rate (%)": (len(winning_trades)/len(trade_results)*100) if trade_results else 0,
         "Profit Factor": profit_factor,
-        "Trade PnL": trade_results
+        "Trade PnL": trade_results,
+        "Balance Series": balance_series
     }
 
     return results
@@ -411,9 +413,9 @@ def run_single_simulation(sim_number, df_1m, df_30m, initial_cash, position_mult
 def monte_carlo_simulation(
     df_1m,
     df_30m,
-    num_simulations=100,
+    num_simulations=200,
     initial_cash=5000,
-    position_multiplier=1,
+    position_multiplier=5,
     spread_cost=0.47 * 2,
     stop_loss_offset=5,
     take_profit_offset=10,
@@ -424,7 +426,7 @@ def monte_carlo_simulation(
 ):
     """
     Runs multiple backtests with randomized scenarios and collects performance metrics.
-    Utilizes multiprocessing for faster execution.
+    Utilizes multiprocessing for faster execution with a progress bar.
     """
     print(f"Starting Monte Carlo simulation with {num_simulations} simulations...")
     simulation_results = []
@@ -448,18 +450,11 @@ def monte_carlo_simulation(
         for sim in range(num_simulations)
     ]
 
-    completed_sims = 0
-
-    # Use multiprocessing Pool for parallel simulations
+    # Use multiprocessing Pool with imap_unordered for real-time progress
     with multiprocessing.Pool() as pool:
-        for result in pool.starmap(run_single_simulation, args):
-            completed_sims += 1
+        # Initialize tqdm progress bar
+        for result in tqdm(pool.imap_unordered(run_single_simulation, args), total=num_simulations, desc="Simulations", unit="sim"):
             simulation_results.append(result)
-
-            # Print progress every 10% completion
-            if completed_sims % (num_simulations // 10) == 0 or completed_sims == num_simulations:
-                progress_percentage = (completed_sims / num_simulations) * 100
-                print(f"Progress: {completed_sims}/{num_simulations} simulations completed ({progress_percentage:.1f}%)")
 
     print("All Monte Carlo simulations completed.")
     return simulation_results
@@ -563,7 +558,7 @@ def main():
             print(f"{key:30}: {value:>15}")
 
     # Define Monte Carlo simulation parameters
-    num_simulations = 100  # Number of Monte Carlo runs
+    num_simulations = 200  # Number of Monte Carlo runs
 
     # Run Monte Carlo Simulations
     print(f"\nRunning {num_simulations} Monte Carlo simulations...")
@@ -585,6 +580,10 @@ def main():
 
     # Convert simulation results to DataFrame for analysis
     simulation_df = pd.DataFrame(simulation_results)
+
+    equity_curves = pd.DataFrame(
+        [result["Balance Series"] for result in simulation_results if "Balance Series" in result and isinstance(result["Balance Series"], pd.Series)]
+    ).T
 
     # Display summary statistics
     print("\nMonte Carlo Simulation Summary:")
