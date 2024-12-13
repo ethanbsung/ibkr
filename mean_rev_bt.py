@@ -229,7 +229,7 @@ if in_drawdown:
     drawdown_durations.append(duration)
 
 # Fix the FutureWarning by specifying fill_method=None
-daily_returns = balance_series.resample('D').last().pct_change(fill_method=None).dropna()
+daily_returns = balance_series.resample('D').ffill().pct_change().dropna()
 
 # Define Sortino Ratio Calculation Function
 def calculate_sortino_ratio(daily_returns, target_return=0):
@@ -266,7 +266,8 @@ benchmark_return = ((df_30m['close'].iloc[-1] - df_30m['close'].iloc[0]) / df_30
 equity_peak = balance_series.max()
 
 volatility_annual = daily_returns.std() * np.sqrt(252) * 100
-sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252) if daily_returns.std() != 0 else 0
+risk_free_rate = 0  # Example: 0 for simplicity or use the current rate
+sharpe_ratio = ((daily_returns.mean() - risk_free_rate) / daily_returns.std()) * np.sqrt(252) if daily_returns.std() != 0 else 0
 sortino_ratio = calculate_sortino_ratio(daily_returns)
 
 # Drawdown Calculations
@@ -328,15 +329,3 @@ results = {
 
 for key, value in results.items():
     print(f"{key:25}: {value:>15}")
-
-'''
-# Plot Equity Curve
-plt.figure(figsize=(12, 6))
-plt.plot(balance_series, label='Equity Curve', color='b')
-plt.title("Equity Curve")
-plt.xlabel("Date")
-plt.ylabel("Account Balance ($)")
-plt.grid(True, linestyle='--', alpha=0.6)
-plt.legend(loc='upper left')
-plt.show()
-'''

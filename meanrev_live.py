@@ -6,7 +6,7 @@ from ib_insync import *
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IB Gateway/TWS host
-IB_PORT = 4002               # IB Gateway/TWS paper trading port
+IB_PORT = 7497               # IB Gateway/TWS paper trading port
 CLIENT_ID = 1                # Unique client ID
 DATA_SYMBOL = 'ES'           # E-mini S&P 500 for data
 DATA_EXPIRY = '202412'       # December 2024
