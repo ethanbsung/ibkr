@@ -10,7 +10,7 @@ IB_PORT = 7497               # IB Gateway/TWS paper trading port
 CLIENT_ID = 1                # Unique client ID
 DATA_SYMBOL = 'ES'           # E-mini S&P 500 for data
 DATA_EXPIRY = '202412'       # December 2024
-DATA_EXCHANGE = 'CME'     # Exchange for ES
+DATA_EXCHANGE = 'CME'        # Exchange for ES
 
 EXEC_SYMBOL = 'MES'          # Micro E-mini S&P 500 for execution
 EXEC_EXPIRY = '202412'       # December 2024
