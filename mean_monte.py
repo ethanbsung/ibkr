@@ -515,7 +515,7 @@ def main():
     df_30m = load_data(csv_file_30m)
 
     # Option 1: Custom Backtest Period (Replace These Dates)
-    custom_start_date = "2023-01-01"
+    custom_start_date = "2022-10-01"
     custom_end_date = "2024-12-11"
 
     # Option 2: Use Full Available Data (if custom dates are not set)

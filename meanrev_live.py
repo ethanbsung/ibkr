@@ -6,20 +6,20 @@ from ib_insync import *
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IB Gateway/TWS host
-IB_PORT = 7497               # IB Gateway/TWS port (7497 for TWS Paper)
+IB_PORT = 7497               # IB Gateway/TWS paper trading port
 CLIENT_ID = 1                # Unique client ID
-DATA_SYMBOL = 'ES'            # E-mini S&P 500 for data
-DATA_EXPIRY = '202412'        # December 2024
-DATA_EXCHANGE = 'GLOBEX'      # Exchange for ES
+DATA_SYMBOL = 'ES'           # E-mini S&P 500 for data
+DATA_EXPIRY = '202412'       # December 2024
+DATA_EXCHANGE = 'GLOBEX'     # Exchange for ES
 
-EXEC_SYMBOL = 'MES'           # Micro E-mini S&P 500 for execution
-EXEC_EXPIRY = '202412'        # December 2024
-EXEC_EXCHANGE = 'GLOBEX'      # Exchange for MES
+EXEC_SYMBOL = 'MES'          # Micro E-mini S&P 500 for execution
+EXEC_EXPIRY = '202412'       # December 2024
+EXEC_EXCHANGE = 'GLOBEX'     # Exchange for MES
 
 CURRENCY = 'USD'
 
-INITIAL_CASH = 5000           # Starting cash
-POSITION_SIZE = 1             # Number of MES contracts per trade
+INITIAL_CASH = 5000          # Starting cash
+POSITION_SIZE = 1            # Number of MES contracts per trade
 
 BOLLINGER_PERIOD = 15
 BOLLINGER_STDDEV = 2
@@ -34,16 +34,20 @@ print("Connected.")
 
 # --- Define Contracts ---
 # ES Contract for Data
-es_contract = Future(symbol=DATA_SYMBOL, 
-                     lastTradeDateOrContractMonth=DATA_EXPIRY,
-                     exchange=DATA_EXCHANGE,
-                     currency=CURRENCY)
+es_contract = Future(
+    symbol=DATA_SYMBOL, 
+    lastTradeDateOrContractMonth=DATA_EXPIRY,
+    exchange=DATA_EXCHANGE,
+    currency=CURRENCY
+)
 
 # MES Contract for Execution
-mes_contract = Future(symbol=EXEC_SYMBOL, 
-                      lastTradeDateOrContractMonth=EXEC_EXPIRY,
-                      exchange=EXEC_EXCHANGE,
-                      currency=CURRENCY)
+mes_contract = Future(
+    symbol=EXEC_SYMBOL, 
+    lastTradeDateOrContractMonth=EXEC_EXPIRY,
+    exchange=EXEC_EXCHANGE,
+    currency=CURRENCY
+)
 
 # --- Request Historical Data for ES (Data Contract) ---
 print("Requesting historical ES data...")
@@ -95,40 +99,35 @@ balance_series = [INITIAL_CASH]
 position = None  # No open position initially
 
 # --- Define Bracket Order Function ---
-def create_bracket_order(action, quantity, limit_price, stop_loss_price, take_profit_price):
+def create_bracket_order(action, quantity, entry_price, stop_loss_price, take_profit_price):
     """
-    Creates a bracket order with a parent order, a take profit limit order, and a stop loss order.
+    Creates orders for parent (market), take profit (limit), and stop loss (stop).
+    We'll assign parent/child IDs before placing them.
     """
-    # Main order: Market order to enter the position
+    # Get next available order ID for parent
+    parent_id = ib.client.getReqId()
+
+    # Parent order: Market Order to enter the position
     parent_order = MarketOrder(action, quantity)
-    
+    parent_order.orderId = parent_id
+
     # Determine actions for take profit and stop loss based on the main action
-    if action == 'BUY':
+    if action.upper() == 'BUY':
         take_profit_action = 'SELL'
         stop_loss_action = 'SELL'
     else:
         take_profit_action = 'BUY'
         stop_loss_action = 'BUY'
-    
+
     # Take Profit Order: Limit Order
-    take_profit_order = LimitOrder(
-        take_profit_action, 
-        quantity, 
-        take_profit_price
-    )
-    
+    take_profit_order = LimitOrder(take_profit_action, quantity, take_profit_price)
+    take_profit_order.parentId = parent_id
+
     # Stop Loss Order: Stop Order
-    stop_loss_order = StopOrder(
-        stop_loss_action, 
-        quantity, 
-        stop_loss_price
-    )
-    
-    # Attach parentId to child orders
-    take_profit_order.parentId = parent_order.orderId
-    stop_loss_order.parentId = parent_order.orderId
-    
-    return [parent_order, take_profit_order, stop_loss_order]
+    stop_loss_order = StopOrder(stop_loss_action, quantity, stop_loss_price)
+    stop_loss_order.parentId = parent_id
+
+    return parent_order, take_profit_order, stop_loss_order
 
 # --- Order Filled Callback ---
 def on_order_filled(trade, fill, position_type, take_profit_order, stop_loss_order):
@@ -138,15 +137,14 @@ def on_order_filled(trade, fill, position_type, take_profit_order, stop_loss_ord
     global cash, position
     if fill:
         print(f"Parent order filled: {trade.order.action} {trade.order.totalQuantity} @ {fill.price}")
-        # Update cash based on position type
+        # Update cash or record as needed; here we just print entry price
+        entry_price = fill.price
         if position_type == 'long':
-            entry_price = fill.price
             print(f"Entered LONG at {entry_price}")
         elif position_type == 'short':
-            entry_price = fill.price
             print(f"Entered SHORT at {entry_price}")
-        
-        # Place take profit and stop loss orders
+
+        # Now place take profit and stop loss orders
         ib.placeOrder(mes_contract, take_profit_order)
         ib.placeOrder(mes_contract, stop_loss_order)
         print(f"Placed TAKE PROFIT and STOP LOSS orders for {position_type.upper()} position.")
@@ -160,10 +158,9 @@ current_minute = None
 current_min_bars = []
 thirty_min_bars = df_30m.copy()
 
-# --- Define Real-Time Bar Handler ---
 def on_realtime_bar(tick):
-    global current_minute, current_min_bars, thirty_min_bars, position, cash
-    
+    global current_minute, current_min_bars, thirty_min_bars, position, cash, df_1m
+
     # Convert timestamp to UTC
     bar_time = datetime.datetime.fromtimestamp(tick.time, datetime.timezone.utc)
     bar_minute = bar_time.replace(second=0, microsecond=0)
@@ -188,7 +185,6 @@ def on_realtime_bar(tick):
             }], index=[current_minute])
             
             # Append to 1-min DataFrame
-            global df_1m
             df_1m = pd.concat([df_1m, new_bar])
             df_1m = df_1m[~df_1m.index.duplicated(keep='last')]
             
@@ -233,21 +229,17 @@ def on_realtime_bar(tick):
                         if current_price < current_30_bar['lower_band']:
                             # Enter Long
                             print("Entry Signal: LONG")
-                            bracket = create_bracket_order(
+                            parent_order, take_profit_order, stop_loss_order = create_bracket_order(
                                 action='BUY',
                                 quantity=POSITION_SIZE,
-                                limit_price=current_price,
+                                entry_price=current_price,
                                 stop_loss_price=current_price - STOP_LOSS_DISTANCE,
                                 take_profit_price=current_price + TAKE_PROFIT_DISTANCE
                             )
-                            # Place Bracket Order
-                            parent_order = bracket[0]
-                            take_profit_order = bracket[1]
-                            stop_loss_order = bracket[2]
-                            
+                            # Place Parent Order
                             trade = ib.placeOrder(mes_contract, parent_order)
                             # Attach callback for when the parent order is filled
-                            trade.filledEvent += lambda fill: on_order_filled(trade, fill, 'long', take_profit_order, stop_loss_order)
+                            trade.filledEvent += lambda t, f: on_order_filled(t, f, 'long', take_profit_order, stop_loss_order)
                             
                             position = {
                                 'type': 'long',
@@ -258,21 +250,17 @@ def on_realtime_bar(tick):
                         elif current_price > current_30_bar['upper_band']:
                             # Enter Short
                             print("Entry Signal: SHORT")
-                            bracket = create_bracket_order(
+                            parent_order, take_profit_order, stop_loss_order = create_bracket_order(
                                 action='SELL',
                                 quantity=POSITION_SIZE,
-                                limit_price=current_price,
+                                entry_price=current_price,
                                 stop_loss_price=current_price + STOP_LOSS_DISTANCE,
                                 take_profit_price=current_price - TAKE_PROFIT_DISTANCE
                             )
-                            # Place Bracket Order
-                            parent_order = bracket[0]
-                            take_profit_order = bracket[1]
-                            stop_loss_order = bracket[2]
-                            
+                            # Place Parent Order
                             trade = ib.placeOrder(mes_contract, parent_order)
                             # Attach callback for when the parent order is filled
-                            trade.filledEvent += lambda fill: on_order_filled(trade, fill, 'short', take_profit_order, stop_loss_order)
+                            trade.filledEvent += lambda t, f: on_order_filled(t, f, 'short', take_profit_order, stop_loss_order)
                             
                             position = {
                                 'type': 'short',
@@ -280,7 +268,6 @@ def on_realtime_bar(tick):
                                 'entry_time': current_time
                             }
                     
-                    # Reset current_min_bars for the new minute
         # Reset current_min_bars for the new minute
         current_min_bars = []
     
@@ -294,18 +281,16 @@ def on_realtime_bar(tick):
         'volume': tick.volume
     })
 
-# --- Assign the Real-Time Bar Handler ---
-# Real-time bars are received as RealTimeBar objects
-def handle_real_time_bars(ticker, tickType, value, attrib):
+def handle_real_time_bars(ticker, *args):
     """
     Handles incoming real-time bars for ES.
+    We expect 'rtBar' attribute in ticker for real-time bars.
     """
-    if tickType == 'RT_BID_SIZE':
-        return  # Ignore non-price ticks
-    if hasattr(ticker, 'rtBar'):
+    if hasattr(ticker, 'rtBar') and ticker.rtBar:
         on_realtime_bar(ticker.rtBar)
 
-ib.pendingTickersEvent += lambda tickers: [handle_real_time_bars(ticker, None, None, None) for ticker in tickers]
+# Assign the Real-Time Bar Handler
+ib.pendingTickersEvent += lambda tickers: [handle_real_time_bars(t) for t in tickers]
 
 # --- Start the Event Loop ---
 print("Starting event loop...")

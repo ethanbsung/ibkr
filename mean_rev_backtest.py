@@ -45,7 +45,7 @@ df_30m = load_data(csv_file_30m)
 
 # Option 1: Custom Backtest Period (Replace These Dates)
 custom_start_date = "2022-09-25"
-custom_end_date = "2023-12-11"
+custom_end_date = "2024-12-11"
 
 # Option 2: Use Full Available Data (if custom dates are not set)
 if custom_start_date and custom_end_date:
@@ -329,13 +329,6 @@ results = {
 for key, value in results.items():
     print(f"{key:25}: {value:>15}")
 
-plt.figure(figsize=(12, 6))
-daily_pnl.plot(kind='bar', color=daily_pnl.apply(lambda x: 'g' if x >= 0 else 'r'))
-plt.title('Daily PnL')
-plt.xlabel('Date')
-plt.ylabel('PnL ($)')
-plt.grid(True, linestyle='--', alpha=0.6)
-plt.show()
 '''
 # Plot Equity Curve
 plt.figure(figsize=(12, 6))
