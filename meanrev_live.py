@@ -10,11 +10,11 @@ IB_PORT = 7497               # IB Gateway/TWS paper trading port
 CLIENT_ID = 1                # Unique client ID
 DATA_SYMBOL = 'ES'           # E-mini S&P 500 for data
 DATA_EXPIRY = '202412'       # December 2024
-DATA_EXCHANGE = 'GLOBEX'     # Exchange for ES
+DATA_EXCHANGE = 'CME'     # Exchange for ES
 
 EXEC_SYMBOL = 'MES'          # Micro E-mini S&P 500 for execution
 EXEC_EXPIRY = '202412'       # December 2024
-EXEC_EXCHANGE = 'GLOBEX'     # Exchange for MES
+EXEC_EXCHANGE = 'CME'     # Exchange for MES
 
 CURRENCY = 'USD'
 
@@ -49,38 +49,63 @@ mes_contract = Future(
     currency=CURRENCY
 )
 
+# Qualify Contracts
+try:
+    es_contract = ib.qualifyContracts(es_contract)[0]
+    mes_contract = ib.qualifyContracts(mes_contract)[0]
+    print(f"Qualified ES Contract: {es_contract}")
+    print(f"Qualified MES Contract: {mes_contract}")
+except IndexError:
+    print("Error: Could not qualify one or both contracts.")
+    ib.disconnect()
+    exit(1)
+
 # --- Request Historical Data for ES (Data Contract) ---
-print("Requesting historical ES data...")
-bars_30m = ib.reqHistoricalData(
-    es_contract, 
-    endDateTime='', 
-    durationStr='60 D',            # Last 60 days
-    barSizeSetting='30 mins', 
-    whatToShow='TRADES', 
-    useRTH=False, 
-    formatDate=1,
-    keepUpToDate=False
-)
+try:
+    print("Requesting historical ES data...")
 
-bars_1m = ib.reqHistoricalData(
-    es_contract, 
-    endDateTime='', 
-    durationStr='2 D',
-    barSizeSetting='1 min', 
-    whatToShow='TRADES', 
-    useRTH=False, 
-    formatDate=1,
-    keepUpToDate=False
-)
+    # Request 30-minute bars
+    bars_30m = ib.reqHistoricalData(
+        es_contract, 
+        endDateTime='', 
+        durationStr='60 D',            
+        barSizeSetting='30 mins', 
+        whatToShow='TRADES', 
+        useRTH=False, 
+        formatDate=1,
+        keepUpToDate=False
+    )
 
-# Convert to DataFrames
-df_30m = util.df(bars_30m)
-df_30m.set_index('date', inplace=True)
-df_30m.sort_index(inplace=True)
+    if bars_30m:
+        df_30m = util.df(bars_30m)
+        df_30m.set_index('date', inplace=True)
+        df_30m.sort_index(inplace=True)
+        print("Successfully retrieved 30m data.")
+    else:
+        print("No 30m historical data received.")
 
-df_1m = util.df(bars_1m)
-df_1m.set_index('date', inplace=True)
-df_1m.sort_index(inplace=True)
+    # Request 1-minute bars
+    bars_1m = ib.reqHistoricalData(
+        es_contract, 
+        endDateTime='', 
+        durationStr='2 D',
+        barSizeSetting='1 min', 
+        whatToShow='TRADES', 
+        useRTH=False, 
+        formatDate=1,
+        keepUpToDate=False
+    )
+
+    if bars_1m:
+        df_1m = util.df(bars_1m)
+        df_1m.set_index('date', inplace=True)
+        df_1m.sort_index(inplace=True)
+        print("Successfully retrieved 1m data.")
+    else:
+        print("No 1m historical data received.")
+
+except Exception as e:
+    print(f"Error requesting historical data: {e}")
 
 # --- Calculate Bollinger Bands for ES ---
 def calculate_bollinger_bands(df, period=15, stddev=2):
@@ -151,7 +176,13 @@ def on_order_filled(trade, fill, position_type, take_profit_order, stop_loss_ord
 
 # --- Subscribe to Real-Time ES Bars ---
 print("Subscribing to real-time ES bars...")
-ib.reqRealTimeBars(es_contract, whatToShow='TRADES', useRTH=False, realTimeBarsOptions=[])
+ib.reqRealTimeBars(
+    contract=es_contract,
+    barSize='5',          # Added barSize parameter
+    whatToShow='TRADES',
+    useRTH=False,
+    realTimeBarsOptions=[]
+)
 
 # --- Initialize Real-Time Bar Aggregation ---
 current_minute = None
