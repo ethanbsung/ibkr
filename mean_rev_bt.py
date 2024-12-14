@@ -44,7 +44,7 @@ df_5m = load_data(csv_file_5m)
 df_30m = load_data(csv_file_30m)
 
 # Option 1: Custom Backtest Period (Replace These Dates)
-custom_start_date = "2022-09-25"
+custom_start_date = "2024-09-25"
 custom_end_date = "2024-12-11"
 
 # Option 2: Use Full Available Data (if custom dates are not set)
@@ -297,9 +297,6 @@ else:
 
 # Calculate daily PnL
 daily_pnl = balance_series.resample('D').last().diff().dropna()
-
-
-
 
 # Results Summary
 print("\nPerformance Summary:")
