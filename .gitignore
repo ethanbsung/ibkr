@@ -3,3 +3,5 @@ es_1m_data.csv
 es_30m_data.csv
 es_1h_data.csv
 backtest.log
+launch_ibgateway.sh
+venv/
