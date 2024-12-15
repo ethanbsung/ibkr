@@ -8,7 +8,7 @@ CLIENT_ID = 1          # Ensure a unique client ID
 ib = IB()
 print("Connecting to IBKR...")
 try:
-    ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID, timeout=30)
+    ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID, timeout=61)
     print("Connected to IBKR.")
     server_version = ib.serverVersion()
     print(f"IBKR Server Version: {server_version}")
