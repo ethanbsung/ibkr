@@ -2,7 +2,7 @@ from ib_insync import IB
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'    # IB Gateway/TWS host
-IB_PORT = 4002           # IB Gateway/TWS paper trading port
+IB_PORT = 4000           # IB Gateway/TWS paper trading port
 CLIENT_ID = 2            # Unique client ID (ensure it's unique)
 
 # --- Connect to IBKR ---
