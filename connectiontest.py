@@ -1,5 +1,4 @@
-from ib_insync import IB
-
+from ib_insync import*
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'  # IB Gateway/TWS host
 IB_PORT = 4002         # IB Gateway paper trading API port
