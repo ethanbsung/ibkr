@@ -1,8 +1,9 @@
 import pandas as pd
 import numpy as np
 import datetime
-import time
+from decimal import Decimal
 from ib_insync import *
+import logging
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IB Gateway/TWS host
@@ -14,7 +15,7 @@ DATA_EXCHANGE = 'CME'        # Exchange for ES
 
 EXEC_SYMBOL = 'MES'          # Micro E-mini S&P 500 for execution
 EXEC_EXPIRY = '202503'       # March 2025
-EXEC_EXCHANGE = 'CME'     # Exchange for MES
+EXEC_EXCHANGE = 'CME'        # Exchange for MES
 
 CURRENCY = 'USD'
 
@@ -26,16 +27,30 @@ BOLLINGER_STDDEV = 2
 STOP_LOSS_DISTANCE = 5        # Points away from entry
 TAKE_PROFIT_DISTANCE = 10     # Points away from entry
 
+# --- Setup Logging ---
+logging.basicConfig(
+    level=logging.INFO,  # Changed to INFO for clarity; set to DEBUG for more detailed logs
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger()
+
 # --- Connect to IBKR ---
 ib = IB()
-print("Connecting to IBKR...")
-ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
-print("Connected.")
+logger.info("Connecting to IBKR...")
+try:
+    ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
+    logger.info("Connected to IBKR.")
+except Exception as e:
+    logger.error(f"Failed to connect to IBKR: {e}")
+    exit(1)
 
 # --- Define Contracts ---
 # ES Contract for Data
 es_contract = Future(
-    symbol=DATA_SYMBOL, 
+    symbol=DATA_SYMBOL,
     lastTradeDateOrContractMonth=DATA_EXPIRY,
     exchange=DATA_EXCHANGE,
     currency=CURRENCY
@@ -43,7 +58,7 @@ es_contract = Future(
 
 # MES Contract for Execution
 mes_contract = Future(
-    symbol=EXEC_SYMBOL, 
+    symbol=EXEC_SYMBOL,
     lastTradeDateOrContractMonth=EXEC_EXPIRY,
     exchange=EXEC_EXCHANGE,
     currency=CURRENCY
@@ -51,27 +66,28 @@ mes_contract = Future(
 
 # Qualify Contracts
 try:
-    es_contract = ib.qualifyContracts(es_contract)[0]
-    mes_contract = ib.qualifyContracts(mes_contract)[0]
-    print(f"Qualified ES Contract: {es_contract}")
-    print(f"Qualified MES Contract: {mes_contract}")
-except IndexError:
-    print("Error: Could not qualify one or both contracts.")
+    qualified_contracts = ib.qualifyContracts(es_contract, mes_contract)
+    es_contract = qualified_contracts[0]
+    mes_contract = qualified_contracts[1]
+    logger.info(f"Qualified ES Contract: {es_contract}")
+    logger.info(f"Qualified MES Contract: {mes_contract}")
+except Exception as e:
+    logger.error(f"Error qualifying contracts: {e}")
     ib.disconnect()
     exit(1)
 
 # --- Request Historical Data for ES (Data Contract) ---
 try:
-    print("Requesting historical ES data...")
+    logger.info("Requesting historical ES data...")
 
     # Request 30-minute bars
     bars_30m = ib.reqHistoricalData(
-        es_contract, 
-        endDateTime='', 
-        durationStr='60 D',            
-        barSizeSetting='30 mins', 
-        whatToShow='TRADES', 
-        useRTH=False, 
+        contract=es_contract,
+        endDateTime='',
+        durationStr='60 D',
+        barSizeSetting='30 mins',
+        whatToShow='TRADES',
+        useRTH=False,
         formatDate=1,
         keepUpToDate=False
     )
@@ -80,32 +96,15 @@ try:
         df_30m = util.df(bars_30m)
         df_30m.set_index('date', inplace=True)
         df_30m.sort_index(inplace=True)
-        print("Successfully retrieved 30m data.")
+        logger.info("Successfully retrieved 30m historical data.")
+        # logger.debug(df_30m.head())
     else:
-        print("No 30m historical data received.")
-
-    # Request 1-minute bars
-    bars_1m = ib.reqHistoricalData(
-        es_contract, 
-        endDateTime='', 
-        durationStr='2 D',
-        barSizeSetting='1 min', 
-        whatToShow='TRADES', 
-        useRTH=False, 
-        formatDate=1,
-        keepUpToDate=False
-    )
-
-    if bars_1m:
-        df_1m = util.df(bars_1m)
-        df_1m.set_index('date', inplace=True)
-        df_1m.sort_index(inplace=True)
-        print("Successfully retrieved 1m data.")
-    else:
-        print("No 1m historical data received.")
+        logger.warning("No 30m historical data received.")
 
 except Exception as e:
-    print(f"Error requesting historical data: {e}")
+    logger.error(f"Error requesting historical data: {e}")
+    ib.disconnect()
+    exit(1)
 
 # --- Calculate Bollinger Bands for ES ---
 def calculate_bollinger_bands(df, period=15, stddev=2):
@@ -117,6 +116,8 @@ def calculate_bollinger_bands(df, period=15, stddev=2):
 
 df_30m = calculate_bollinger_bands(df_30m, BOLLINGER_PERIOD, BOLLINGER_STDDEV)
 df_30m.dropna(inplace=True)
+logger.info("Bollinger Bands calculated for 30m data.")
+# logger.debug(df_30m.tail())
 
 # --- Initialize Variables ---
 cash = INITIAL_CASH
@@ -124,220 +125,191 @@ balance_series = [INITIAL_CASH]
 position = None  # No open position initially
 
 # --- Define Bracket Order Function ---
-def create_bracket_order(action, quantity, entry_price, stop_loss_price, take_profit_price):
+def get_bracket_order(action, quantity, limit_price, take_profit_price, stop_loss_price):
     """
-    Creates orders for parent (market), take profit (limit), and stop loss (stop).
-    We'll assign parent/child IDs before placing them.
+    Create a bracket order using ib_insync's bracketOrder helper.
     """
-    # Get next available order ID for parent
-    parent_id = ib.client.getReqId()
-
-    # Parent order: Market Order to enter the position
-    parent_order = MarketOrder(action, quantity)
-    parent_order.orderId = parent_id
-
-    # Determine actions for take profit and stop loss based on the main action
-    if action.upper() == 'BUY':
-        take_profit_action = 'SELL'
-        stop_loss_action = 'SELL'
-    else:
-        take_profit_action = 'BUY'
-        stop_loss_action = 'BUY'
-
-    # Take Profit Order: Limit Order
-    take_profit_order = LimitOrder(take_profit_action, quantity, take_profit_price)
-    take_profit_order.parentId = parent_id
-
-    # Stop Loss Order: Stop Order
-    stop_loss_order = StopOrder(stop_loss_action, quantity, stop_loss_price)
-    stop_loss_order.parentId = parent_id
-
-    return parent_order, take_profit_order, stop_loss_order
+    bracket = ib.bracketOrder(
+        action=action,
+        quantity=quantity,
+        limitPrice=limit_price,
+        takeProfitPrice=take_profit_price,
+        stopLossPrice=stop_loss_price
+    )
+    return bracket
 
 # --- Order Filled Callback ---
-def on_order_filled(trade, fill, position_type, take_profit_order, stop_loss_order):
+def on_trade_update(trade, fill):
     """
-    Handles the event when the parent order is filled and places the take profit and stop loss orders.
+    Handles trade updates. If a parent order is filled, logs the entry.
     """
     global cash, position
     if fill:
-        print(f"Parent order filled: {trade.order.action} {trade.order.totalQuantity} @ {fill.price}")
-        # Update cash or record as needed; here we just print entry price
+        logger.info(f"Trade Update - Order ID {trade.order.orderId}: {trade.order.action} {trade.order.totalQuantity} @ {fill.price}")
         entry_price = fill.price
-        if position_type == 'long':
-            print(f"Entered LONG at {entry_price}")
-        elif position_type == 'short':
-            print(f"Entered SHORT at {entry_price}")
-
-        # Now place take profit and stop loss orders
-        ib.placeOrder(mes_contract, take_profit_order)
-        ib.placeOrder(mes_contract, stop_loss_order)
-        print(f"Placed TAKE PROFIT and STOP LOSS orders for {position_type.upper()} position.")
+        if trade.order.action.upper() == 'BUY':
+            position = {
+                'type': 'long',
+                'entry_price': entry_price,
+                'entry_time': datetime.datetime.utcnow()
+            }
+            logger.info(f"Entered LONG position at {entry_price}")
+        elif trade.order.action.upper() == 'SELL':
+            position = {
+                'type': 'short',
+                'entry_price': entry_price,
+                'entry_time': datetime.datetime.utcnow()
+            }
+            logger.info(f"Entered SHORT position at {entry_price}")
 
 # --- Subscribe to Real-Time ES Bars ---
-print("Subscribing to real-time ES bars...")
-ib.reqRealTimeBars(
+logger.info("Subscribing to real-time ES bars...")
+ticker = ib.reqRealTimeBars(
     contract=es_contract,
-    barSize='5',          # Added barSize parameter
+    barSize=5,          # 5-second bars
     whatToShow='TRADES',
     useRTH=False,
     realTimeBarsOptions=[]
 )
+logger.info("Subscribed to real-time bars.")
 
 # --- Initialize Real-Time Bar Aggregation ---
-current_minute = None
-current_min_bars = []
+current_30min_start = None
+current_30min_bars = []
 thirty_min_bars = df_30m.copy()
 
-def on_realtime_bar(tick):
-    global current_minute, current_min_bars, thirty_min_bars, position, cash, df_1m
+# --- Define Trade Execution Function ---
+def execute_trade(action, current_price, current_time):
+    global position
+    logger.info(f"Entry Signal: {action}")
+    logger.info(f"Current Price: {current_price}")
+    logger.info(f"Lower Threshold (Bollinger Band): {thirty_min_bars.iloc[-1]['lower_band']}")
+    logger.info(f"Upper Threshold (Bollinger Band): {thirty_min_bars.iloc[-1]['upper_band']}")
 
-    # Convert timestamp to UTC
-    bar_time = datetime.datetime.fromtimestamp(tick.time, datetime.timezone.utc)
-    bar_minute = bar_time.replace(second=0, microsecond=0)
-    
-    # Check if a new minute has started
-    if current_minute and bar_minute != current_minute:
-        if current_min_bars:
-            # Finalize the 1-min bar
-            df_new = pd.DataFrame(current_min_bars)
-            open_ = df_new.iloc[0]['open']
-            high_ = df_new['high'].max()
-            low_ = df_new['low'].min()
-            close_ = df_new.iloc[-1]['close']
-            volume_ = df_new['volume'].sum()
-            
-            new_bar = pd.DataFrame([{
-                'open': open_,
-                'high': high_,
-                'low': low_,
-                'close': close_,
-                'volume': volume_
-            }], index=[current_minute])
-            
-            # Append to 1-min DataFrame
-            df_1m = pd.concat([df_1m, new_bar])
-            df_1m = df_1m[~df_1m.index.duplicated(keep='last')]
-            
-            # Aggregate into 30-min bars
-            if current_minute.minute % 30 == 0:
-                start_30min = current_minute - pd.Timedelta(minutes=29)
-                last_30min = df_1m.loc[start_30min:current_minute]
-                
-                if len(last_30min) == 30:
-                    open_30 = last_30min.iloc[0]['open']
-                    high_30 = last_30min['high'].max()
-                    low_30 = last_30min['low'].min()
-                    close_30 = last_30min.iloc[-1]['close']
-                    volume_30 = last_30min['volume'].sum()
-                    
-                    new_30_bar = pd.DataFrame([{
+    if action.upper() == 'BUY':
+        take_profit_price = current_price + TAKE_PROFIT_DISTANCE
+        stop_loss_price = current_price - STOP_LOSS_DISTANCE
+    elif action.upper() == 'SELL':
+        take_profit_price = current_price - TAKE_PROFIT_DISTANCE
+        stop_loss_price = current_price + STOP_LOSS_DISTANCE
+    else:
+        logger.error(f"Unknown action: {action}")
+        return
+
+    # Create bracket order
+    bracket = get_bracket_order(
+        action=action,
+        quantity=POSITION_SIZE,
+        limit_price=current_price,
+        take_profit_price=take_profit_price,
+        stop_loss_price=stop_loss_price
+    )
+
+    parent_order, take_profit_order, stop_loss_order = bracket
+
+    # Place parent order
+    ib.placeOrder(mes_contract, parent_order)
+    logger.info(f"Placed parent {action} order with ID {parent_order.orderId}")
+
+    # Attach event handler to track order fills
+    parent_order.filledEvent += lambda trade, fill: on_trade_update(trade, fill)
+
+    # Update position (will be updated upon order fill)
+    position = {
+        'type': action.lower(),
+        'entry_price': current_price,
+        'entry_time': current_time
+    }
+
+# --- Define Real-Time Bar Handler ---
+def on_realtime_bar(ticker, hasNewBar):
+    global current_30min_start, current_30min_bars, thirty_min_bars, position, cash
+
+    try:
+        if hasNewBar:
+            if len(ticker) == 0:
+                logger.warning("No bars received in RealTimeBarList.")
+                return
+
+            # The latest bar
+            bar = ticker[-1]
+            bar_time = bar.time.replace(second=0, microsecond=0)
+
+            # Determine the start time of the current 30-minute candle
+            minute = bar_time.minute
+            candle_start_minute = (minute // 30) * 30
+            candle_start_time = bar_time.replace(minute=candle_start_minute)
+
+            if current_30min_start != candle_start_time:
+                # New 30-minute candle detected
+                if current_30min_start is not None and current_30min_bars:
+                    # Finalize the previous 30-minute candle
+                    open_30 = current_30min_bars[0]['open']
+                    high_30 = max(bar_data['high'] for bar_data in current_30min_bars)
+                    low_30 = min(bar_data['low'] for bar_data in current_30min_bars)
+                    close_30 = current_30min_bars[-1]['close']
+                    volume_30 = sum(bar_data['volume'] for bar_data in current_30min_bars)
+
+                    new_30_bar = {
                         'open': open_30,
                         'high': high_30,
                         'low': low_30,
                         'close': close_30,
                         'volume': volume_30
-                    }], index=[current_minute])
-                    
-                    thirty_min_bars = pd.concat([thirty_min_bars, new_30_bar])
-                    thirty_min_bars.sort_index(inplace=True)
-                    
-                    # Recalculate Bollinger Bands
+                    }
+
+                    # Append to thirty_min_bars DataFrame
+                    thirty_min_bars = thirty_min_bars.append(pd.Series(new_30_bar, name=current_30min_start))
                     thirty_min_bars = calculate_bollinger_bands(thirty_min_bars, BOLLINGER_PERIOD, BOLLINGER_STDDEV)
                     thirty_min_bars.dropna(inplace=True)
-                    
-                    # Get the latest 30-min bar
-                    current_30_bar = thirty_min_bars.iloc[-1]
-                    current_price = current_30_bar['close']
-                    current_time = thirty_min_bars.index[-1]
-                    
-                    print(f"\nNew 30-min bar closed at {current_time} UTC with close price: {current_price}")
-                    print(f"Bollinger Bands - Upper: {current_30_bar['upper_band']}, Lower: {current_30_bar['lower_band']}")
-                    print(f"Current Price: {current_price}")
-                    print(f"Upper Threshold (Bollinger Band): {current_30_bar['upper_band']}")
-                    print(f"Lower Threshold (Bollinger Band): {current_30_bar['lower_band']}")
-                    
+
+                    current_price = close_30
+                    current_time = current_30min_start
+
+                    logger.info(f"\nNew 30-min bar closed at {current_time} UTC with close price: {current_price}")
+                    logger.info(
+                        f"Bollinger Bands - Upper: {thirty_min_bars.iloc[-1]['upper_band']}, "
+                        f"Lower: {thirty_min_bars.iloc[-1]['lower_band']}"
+                    )
+                    logger.info(f"Current Price: {current_price}")
+                    logger.info(f"Upper Threshold (Bollinger Band): {thirty_min_bars.iloc[-1]['upper_band']}")
+                    logger.info(f"Lower Threshold (Bollinger Band): {thirty_min_bars.iloc[-1]['lower_band']}")
+
                     # --- Trading Logic ---
                     if position is None:
-                        # No open position, check for entry signals
-                        if current_price < current_30_bar['lower_band']:
+                        if current_price < thirty_min_bars.iloc[-1]['lower_band']:
                             # Enter Long
-                            print("Entry Signal: LONG")
-                            print(f"Current Price: {current_price}")
-                            print(f"Lower Threshold (Bollinger Band): {current_30_bar['lower_band']}")
-                            print(f"Upper Threshold (Bollinger Band): {current_30_bar['upper_band']}")
-                            parent_order, take_profit_order, stop_loss_order = create_bracket_order(
-                                action='BUY',
-                                quantity=POSITION_SIZE,
-                                entry_price=current_price,
-                                stop_loss_price=current_price - STOP_LOSS_DISTANCE,
-                                take_profit_price=current_price + TAKE_PROFIT_DISTANCE
-                            )
-                            # Place Parent Order
-                            trade = ib.placeOrder(mes_contract, parent_order)
-                            # Attach callback for when the parent order is filled
-                            trade.filledEvent += lambda t, f: on_order_filled(t, f, 'long', take_profit_order, stop_loss_order)
-                            
-                            position = {
-                                'type': 'long',
-                                'entry_price': current_price,
-                                'entry_time': current_time
-                            }
-                            
-                        elif current_price > current_30_bar['upper_band']:
+                            execute_trade('BUY', current_price, current_time)
+                        elif current_price > thirty_min_bars.iloc[-1]['upper_band']:
                             # Enter Short
-                            print("Entry Signal: SHORT")
-                            print(f"Current Price: {current_price}")
-                            print(f"Upper Threshold (Bollinger Band): {current_30_bar['upper_band']}")
-                            print(f"Lower Threshold (Bollinger Band): {current_30_bar['lower_band']}")
-                            parent_order, take_profit_order, stop_loss_order = create_bracket_order(
-                                action='SELL',
-                                quantity=POSITION_SIZE,
-                                entry_price=current_price,
-                                stop_loss_price=current_price + STOP_LOSS_DISTANCE,
-                                take_profit_price=current_price - TAKE_PROFIT_DISTANCE
-                            )
-                            # Place Parent Order
-                            trade = ib.placeOrder(mes_contract, parent_order)
-                            # Attach callback for when the parent order is filled
-                            trade.filledEvent += lambda t, f: on_order_filled(t, f, 'short', take_profit_order, stop_loss_order)
-                            
-                            position = {
-                                'type': 'short',
-                                'entry_price': current_price,
-                                'entry_time': current_time
-                            }
-                
-        # Reset current_min_bars for the new minute
-        current_min_bars = []
-    
-    # Append current 5-second bar
-    current_minute = bar_minute
-    current_min_bars.append({
-        'open': tick.open,
-        'high': tick.high,
-        'low': tick.low,
-        'close': tick.close,
-        'volume': tick.volume
-    })
+                            execute_trade('SELL', current_price, current_time)
 
-def handle_real_time_bars(ticker, *args):
-    """
-    Handles incoming real-time bars for ES.
-    We expect 'rtBar' attribute in ticker for real-time bars.
-    """
-    if hasattr(ticker, 'rtBar') and ticker.rtBar:
-        on_realtime_bar(ticker.rtBar)
+                # Reset for the new 30-minute candle
+                current_30min_start = candle_start_time
+                current_30min_bars = []
 
-# Assign the Real-Time Bar Handler
-ib.pendingTickersEvent += lambda tickers: [handle_real_time_bars(t) for t in tickers]
+            # Append current bar to the 30-minute candle
+            current_30min_bars.append({
+                'open': bar.open_,
+                'high': bar.high,
+                'low': bar.low,
+                'close': bar.close,
+                'volume': bar.volume
+            })
+
+    except Exception as e:
+        logger.error(f"Error in on_realtime_bar handler: {e}")
+
+# --- Assign Real-Time Bar Handler ---
+ticker.updateEvent += on_realtime_bar
+logger.info("Real-time bar handler assigned.")
 
 # --- Start the Event Loop ---
-print("Starting event loop...")
+logger.info("Starting event loop...")
 try:
     ib.run()
 except KeyboardInterrupt:
-    print("Interrupt received, shutting down...")
+    logger.info("Interrupt received, shutting down...")
 finally:
     ib.disconnect()
-    print("Disconnected from IBKR.")
+    logger.info("Disconnected from IBKR.")
