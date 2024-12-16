@@ -253,6 +253,9 @@ def on_realtime_bar(tick):
                     
                     print(f"\nNew 30-min bar closed at {current_time} UTC with close price: {current_price}")
                     print(f"Bollinger Bands - Upper: {current_30_bar['upper_band']}, Lower: {current_30_bar['lower_band']}")
+                    print(f"Current Price: {current_price}")
+                    print(f"Upper Threshold (Bollinger Band): {current_30_bar['upper_band']}")
+                    print(f"Lower Threshold (Bollinger Band): {current_30_bar['lower_band']}")
                     
                     # --- Trading Logic ---
                     if position is None:
@@ -260,6 +263,9 @@ def on_realtime_bar(tick):
                         if current_price < current_30_bar['lower_band']:
                             # Enter Long
                             print("Entry Signal: LONG")
+                            print(f"Current Price: {current_price}")
+                            print(f"Lower Threshold (Bollinger Band): {current_30_bar['lower_band']}")
+                            print(f"Upper Threshold (Bollinger Band): {current_30_bar['upper_band']}")
                             parent_order, take_profit_order, stop_loss_order = create_bracket_order(
                                 action='BUY',
                                 quantity=POSITION_SIZE,
@@ -281,6 +287,9 @@ def on_realtime_bar(tick):
                         elif current_price > current_30_bar['upper_band']:
                             # Enter Short
                             print("Entry Signal: SHORT")
+                            print(f"Current Price: {current_price}")
+                            print(f"Upper Threshold (Bollinger Band): {current_30_bar['upper_band']}")
+                            print(f"Lower Threshold (Bollinger Band): {current_30_bar['lower_band']}")
                             parent_order, take_profit_order, stop_loss_order = create_bracket_order(
                                 action='SELL',
                                 quantity=POSITION_SIZE,
@@ -298,7 +307,7 @@ def on_realtime_bar(tick):
                                 'entry_price': current_price,
                                 'entry_time': current_time
                             }
-                    
+                
         # Reset current_min_bars for the new minute
         current_min_bars = []
     
