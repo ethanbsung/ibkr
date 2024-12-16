@@ -97,7 +97,7 @@ try:
         df_30m.set_index('date', inplace=True)
         df_30m.sort_index(inplace=True)
         logger.info("Successfully retrieved 30m historical data.")
-        # logger.debug(df_30m.head())
+        logger.debug(df_30m.head())
     else:
         logger.warning("No 30m historical data received.")
 
@@ -117,7 +117,7 @@ def calculate_bollinger_bands(df, period=15, stddev=2):
 df_30m = calculate_bollinger_bands(df_30m, BOLLINGER_PERIOD, BOLLINGER_STDDEV)
 df_30m.dropna(inplace=True)
 logger.info("Bollinger Bands calculated for 30m data.")
-# logger.debug(df_30m.tail())
+logger.debug(df_30m.tail())
 
 # --- Initialize Variables ---
 cash = INITIAL_CASH
@@ -274,6 +274,10 @@ def on_realtime_bar(ticker, hasNewBar):
                     logger.info(f"Current Price: {current_price}")
                     logger.info(f"Upper Threshold (Bollinger Band): {thirty_min_bars.iloc[-1]['upper_band']}")
                     logger.info(f"Lower Threshold (Bollinger Band): {thirty_min_bars.iloc[-1]['lower_band']}")
+
+                    # **Log the last few entries for verification**
+                    logger.debug("Latest 30-Minute Bars Data:")
+                    logger.debug(thirty_min_bars.tail())
 
                     # --- Trading Logic ---
                     if position is None:
