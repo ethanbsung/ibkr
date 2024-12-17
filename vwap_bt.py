@@ -23,8 +23,8 @@ df.sort_index(inplace=True)
 # ----------------------------
 
 # Define the backtest period
-from_date = '2022-09-25'  # YYYY-MM-DD
-to_date = '2023-12-11'    # YYYY-MM-DD
+from_date = '2022-10-11'  # YYYY-MM-DD
+to_date = '2024-12-11'    # YYYY-MM-DD
 
 # Filter the DataFrame for the specified date range
 df = df.loc[from_date:to_date]
@@ -63,10 +63,10 @@ commission = 1.24       # Round-trip commission per trade
 slippage = 0.25         # Simulated slippage in points
 
 # Buy and Sell Thresholds (in points)
-buy_threshold = 15          # Buy when price is 15 points below VWAP
-take_profit = 10            # Take Profit: 10 points above entry price
-stop_loss = 5               # Stop Loss: 4 points below entry price
-vwap_sell_threshold = 15    # Sell when price is 15 points above VWAP
+buy_threshold = 10          # Buy when price is 15 points below VWAP
+take_profit = 15            # Take Profit: 10 points above entry price
+stop_loss = 3               # Stop Loss: 4 points below entry price
+vwap_sell_threshold = 10    # Sell when price is 15 points above VWAP
 
 # Tracking variables
 position = 0                # Current position: 0 = flat, 1 = long
