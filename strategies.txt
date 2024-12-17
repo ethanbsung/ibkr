@@ -1,0 +1,49 @@
+1. Intraday Scalping Strategy (Low Risk, Frequent Trades)
+	•	Objective: Capture small price movements quickly.
+	•	Timeframe: 1-5 minute charts.
+	•	Indicators: VWAP, Bollinger Bands, EMA (9, 21).
+	•	Risk Control:
+	•	Stop-Loss: 1-2 points.
+	•	Take-Profit: 2-4 points.
+	•	Position Size: Adjust based on account balance and volatility.
+
+Why: Low holding time reduces overnight risk.
+
+2. Momentum Breakout Strategy (Medium Risk, Medium Frequency)
+	•	Objective: Enter positions when price breaks key levels.
+	•	Timeframe: 15-30 minute charts.
+	•	Indicators: Donchian Channels, ATR, Volume.
+	•	Entry/Exit:
+	•	Buy Signal: Break above the previous session high with increased volume.
+	•	Sell Signal: Break below the previous session low.
+	•	Risk Control:
+	•	Stop-Loss: 1 ATR from entry.
+	•	Take-Profit: 2-3 ATR from entry.
+
+Why: Higher potential profits while maintaining reasonable stop-losses.
+
+3. Mean Reversion Strategy (Low-Medium Risk, Less Frequent)
+	•	Objective: Fade extreme price moves back to the mean.
+	•	Timeframe: 5-15 minute charts.
+	•	Indicators: RSI (14), Bollinger Bands, Stochastic Oscillator.
+	•	Entry/Exit:
+	•	Buy Signal: Price below the lower Bollinger Band and RSI < 30.
+	•	Sell Signal: Price above the upper Bollinger Band and RSI > 70.
+	•	Risk Control:
+	•	Stop-Loss: 1.5-2 points from entry.
+	•	Take-Profit: 2-3 points from entry.
+
+Why: Adds non-correlated trades that work well in range-bound conditions.
+
+4. Trend-Following Strategy (Medium-High Risk, Longer Hold)
+	•	Objective: Ride strong directional moves.
+	•	Timeframe: 1-hour to 4-hour charts.
+	•	Indicators: Moving Average Crossovers (20 & 50 EMA), MACD, Parabolic SAR.
+	•	Entry/Exit:
+	•	Buy Signal: 20 EMA crosses above the 50 EMA with MACD confirmation.
+	•	Sell Signal: 20 EMA crosses below the 50 EMA with MACD confirmation.
+	•	Risk Control:
+	•	Stop-Loss: 3-5 points below entry.
+	•	Take-Profit: Trail using Parabolic SAR or Moving Average.
+
+Why: Potential for significant gains during trending markets.

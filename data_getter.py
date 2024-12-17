@@ -43,7 +43,7 @@ def convert_to_utc(start_date_str, end_date_str):
     # Format as 'yyyymmdd-HH:MM:SS' to explicitly indicate UTC
     return start_utc.strftime('%Y%m%d-%H:%M:%S'), end_utc.strftime('%Y%m%d-%H:%M:%S')
 
-def fetch_historical_data(ib, contract, start_date_str, end_date_str, bar_size='1 hour', what_to_show='TRADES'):
+def fetch_historical_data(ib, contract, start_date_str, end_date_str, bar_size='5 mins', what_to_show='TRADES'):
     """
     Fetch historical OHLCV data for a given contract.
     """
@@ -82,7 +82,7 @@ def main():
     # Connect to IB
     ib = IB()
     try:
-        ib.connect('127.0.0.1', 7497, clientId=1)
+        ib.connect('127.0.0.1', 7497, clientId=3)
         logger.info("Connected to IB")
     except Exception as e:
         logger.error(f"Failed to connect to IB: {e}")

@@ -9,8 +9,8 @@ SMA_PERIOD = 25
 THRESHOLD = 10  # Points deviation to trigger trades (adjust as needed)
 INITIAL_BALANCE = 5000
 CONTRACT_SIZE = 1  # Number of MES contracts
-STOP_LOSS = 15  # Points
-TAKE_PROFIT = 30  # Points
+STOP_LOSS = 5  # Points
+TAKE_PROFIT = 10  # Points
 MES_TICK_VALUE = 5  # $ per tick
 
 # Load ES Futures Data
@@ -279,14 +279,3 @@ results = {
 print("\nPerformance Summary:")
 for key, value in results.items():
     print(f"{key:25}: {value:>15}")
-
-
-# Plot Equity Curve
-plt.figure(figsize=(14, 7))
-plt.plot(es_data['date'], es_data['Equity'], label='Equity')
-plt.title('Equity Curve')
-plt.xlabel('Date')
-plt.ylabel('Equity ($)')
-plt.legend()
-plt.grid(True)
-plt.show()

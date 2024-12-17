@@ -126,24 +126,31 @@ position = None  # No open position initially
 pending_order = False  # To track if there's a pending order
 
 # --- Define Bracket Order Function ---
-def get_bracket_order(action, quantity, limit_price, take_profit_price, stop_loss_price):
+def get_bracket_order(action, quantity, take_profit_price, stop_loss_price):
     """
     Create a bracket order using ib_insync's bracketOrder helper.
     """
-    # Using MarketOrder as the parent to ensure immediate execution
+    # Parent order: MarketOrder to ensure immediate execution
     parent_order = MarketOrder(action=action, totalQuantity=quantity)
+    
+    # Take Profit Order: Limit Order
+    take_profit_action = 'SELL' if action.upper() == 'BUY' else 'BUY'
     take_profit_order = LimitOrder(
-        action='SELL' if action.upper() == 'BUY' else 'BUY',
+        action=take_profit_action,
         totalQuantity=quantity,
         lmtPrice=take_profit_price,
         parentId=parent_order.orderId
     )
+    
+    # Stop Loss Order: Stop Order
+    stop_loss_action = 'SELL' if action.upper() == 'BUY' else 'BUY'
     stop_loss_order = StopOrder(
-        action='SELL' if action.upper() == 'BUY' else 'BUY',
+        action=stop_loss_action,
         totalQuantity=quantity,
-        auxPrice=stop_loss_price,
+        stopPrice=stop_loss_price,  # Corrected parameter name
         parentId=parent_order.orderId
     )
+    
     return parent_order, take_profit_order, stop_loss_order
 
 # --- Order Filled Callback ---
@@ -171,7 +178,7 @@ def on_trade_update(trade, fill):
             logger.info(f"Entered SHORT position at {entry_price}")
         pending_order = False  # Reset pending order flag upon fill
 
-# --- Optional: Trade Status Update Callback ---
+# --- Trade Status Update Callback ---
 def on_trade_status_update(trade, new_status):
     """
     Handles status updates for trades.
@@ -223,24 +230,28 @@ def execute_trade(action, current_price, current_time):
         logger.error(f"Unknown action: {action}")
         return
 
-    # Create bracket order with MarketOrder as parent
+    # Create bracket order
     parent_order, take_profit_order, stop_loss_order = get_bracket_order(
         action=action,
         quantity=POSITION_SIZE,
-        limit_price=current_price,  # Not used in MarketOrder
         take_profit_price=take_profit_price,
         stop_loss_price=stop_loss_price
     )
 
-    # Place parent order and capture the Trade object
-    trade = ib.placeOrder(mes_contract, parent_order)
-    logger.info(f"Placed parent {action} order with ID {parent_order.orderId}")
+    try:
+        # Place parent order and capture the Trade object
+        trade = ib.placeOrder(mes_contract, parent_order)
+        logger.info(f"Placed parent {action} order with ID {parent_order.orderId}")
 
-    # Attach event handlers to the Trade object to handle fills and status updates
-    trade.filledEvent += lambda fill: on_trade_update(trade, fill)
-    trade.statusEvent += lambda new_status: on_trade_status_update(trade, new_status)
+        # Attach event handlers to the Trade object to handle fills and status updates
+        trade.filledEvent += lambda fill: on_trade_update(trade, fill)
+        trade.statusEvent += lambda new_status: on_trade_status_update(trade, new_status)
 
-    pending_order = True  # Set pending order flag
+        pending_order = True  # Set pending order flag
+
+    except Exception as e:
+        logger.error(f"Failed to place order: {e}")
+        pending_order = False
 
 # --- Define Real-Time Bar Handler ---
 def on_realtime_bar(ticker, hasNewBar):
@@ -260,7 +271,7 @@ def on_realtime_bar(ticker, hasNewBar):
             # Determine the start time of the current 30-minute candle
             minute = bar_time.minute
             candle_start_minute = (minute // 30) * 30
-            candle_start_time = bar_time.replace(minute=candle_start_minute)
+            candle_start_time = bar_time.replace(minute=candle_start_minute, second=0, microsecond=0)
 
             if current_30min_start != candle_start_time:
                 # New 30-minute candle detected
