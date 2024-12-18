@@ -40,8 +40,8 @@ df = load_data(csv_file)
 fast_period = 20
 slow_period = 50
 take_profit_points = 20
-stop_loss_points = 5
-commission_per_side = 0.47
+stop_loss_points = 15
+commission_per_side = 0.62
 total_commission = commission_per_side * 2
 
 # Calculate moving averages

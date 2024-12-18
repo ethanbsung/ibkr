@@ -58,7 +58,7 @@ def filter_rth(df):
         # Convert to UTC to standardize
         df = df.tz_convert('UTC')
     
-    # Convert index to US/Eastern timezone
+    # Convert index to US/Eastern timezone for filtering
     df_eastern = df.copy()
     df_eastern.index = df_eastern.index.tz_convert(eastern)
     
@@ -121,12 +121,12 @@ csv_file_30m = 'es_30m_data.csv'
 logger.info("Loading datasets...")
 df_1m = load_data(csv_file_1m)
 df_5m = load_data(csv_file_5m)
-df_30m = load_data(csv_file_30m)
+df_30m_full = load_data(csv_file_30m)  # Load full 30m data including extended hours
 logger.info("Datasets loaded successfully.")
 
 # --- Define Backtest Period ---
 # Option 1: Custom Backtest Period (Replace These Dates)
-custom_start_date = "2023-01-25"
+custom_start_date = "2022-09-25"
 custom_end_date = "2024-12-11"
 
 # Option 2: Use Full Available Data (if custom dates are not set)
@@ -134,33 +134,35 @@ if custom_start_date and custom_end_date:
     start_time = pd.to_datetime(custom_start_date, utc=True)
     end_time = pd.to_datetime(custom_end_date, utc=True)
 else:
-    start_time = pd.to_datetime(df_30m.index.min(), utc=True)
-    end_time = pd.to_datetime(df_30m.index.max(), utc=True)
+    start_time = pd.to_datetime(df_30m_full.index.min(), utc=True)
+    end_time = pd.to_datetime(df_30m_full.index.max(), utc=True)
 
 # --- Slice Dataframes to Backtest Period ---
 logger.info(f"Slicing data from {start_time} to {end_time}...")
 df_1m = df_1m.loc[start_time:end_time]
 df_5m = df_5m.loc[start_time:end_time]
-df_30m = df_30m.loc[start_time:end_time]
+df_30m_full = df_30m_full.loc[start_time:end_time]
+logger.info("Data sliced to backtest period.")
 
-# --- Apply RTH Filtering to 30m Data Only ---
-logger.info("Applying RTH filter to 30-minute data...")
-df_30m = filter_rth(df_30m)
-logger.info("RTH filtering applied to 30-minute data.")
+# --- Calculate Bollinger Bands on Full 30m Data (Including Extended Hours) ---
+logger.info("Calculating Bollinger Bands on full 30-minute data (including extended hours)...")
+df_30m_full['ma'] = df_30m_full['close'].rolling(window=BOLLINGER_PERIOD).mean()
+df_30m_full['std'] = df_30m_full['close'].rolling(window=BOLLINGER_PERIOD).std()
+df_30m_full['upper_band'] = df_30m_full['ma'] + (BOLLINGER_STDDEV * df_30m_full['std'])
+df_30m_full['lower_band'] = df_30m_full['ma'] - (BOLLINGER_STDDEV * df_30m_full['std'])
+df_30m_full.dropna(inplace=True)
+logger.info("Bollinger Bands calculated on full 30-minute data.")
+
+# --- Filter RTH Data Separately for Trade Execution ---
+logger.info("Applying RTH filter to 30-minute data for trade execution...")
+df_30m_rth = filter_rth(df_30m_full)
+logger.info("RTH filtering applied to 30-minute data for trade execution.")
 
 # --- Confirm Data Points After Filtering ---
-print(f"Backtesting during Regular Trading Hours from {start_time.strftime('%Y-%m-%d')} to {end_time.strftime('%Y-%m-%d')}")
+print(f"Backtesting from {start_time.strftime('%Y-%m-%d')} to {end_time.strftime('%Y-%m-%d')}")
 print(f"1-Minute Data Points after Filtering: {len(df_1m)}")
-print(f"30-Minute Data Points after RTH Filtering: {len(df_30m)}")
-
-# --- Calculate Bollinger Bands on 30m Data ---
-logger.info("Calculating Bollinger Bands on 30-minute data...")
-df_30m['ma'] = df_30m['close'].rolling(window=BOLLINGER_PERIOD).mean()
-df_30m['std'] = df_30m['close'].rolling(window=BOLLINGER_PERIOD).std()
-df_30m['upper_band'] = df_30m['ma'] + (BOLLINGER_STDDEV * df_30m['std'])
-df_30m['lower_band'] = df_30m['ma'] - (BOLLINGER_STDDEV * df_30m['std'])
-df_30m.dropna(inplace=True)
-logger.info("Bollinger Bands calculated and NaNs dropped.")
+print(f"30-Minute Full Data Points after Slicing: {len(df_30m_full)}")
+print(f"30-Minute RTH Data Points after RTH Filtering: {len(df_30m_rth)}")
 
 # --- Initialize Backtest Variables ---
 position_size = 0
@@ -232,9 +234,9 @@ def evaluate_exit_anytime(position_type, entry_price, stop_loss, take_profit, df
 
 # --- Backtesting Loop ---
 logger.info("Starting backtesting loop...")
-for i in range(len(df_30m)):
-    current_bar = df_30m.iloc[i]
-    current_time = df_30m.index[i]
+for i in range(len(df_30m_rth)):
+    current_bar = df_30m_rth.iloc[i]
+    current_time = df_30m_rth.index[i]
     current_price = current_bar['close']
     
     # Count exposure when position is active
@@ -242,8 +244,11 @@ for i in range(len(df_30m)):
         exposure_bars += 1
     
     if position_size == 0:
-        # No open position, check for entry signals based on 30m RTH bar
-        if current_price < current_bar['lower_band']:
+        # No open position, check for entry signals based on RTH 30m bar
+        upper_band = df_30m_full.loc[current_time, 'upper_band']
+        lower_band = df_30m_full.loc[current_time, 'lower_band']
+        
+        if current_price < lower_band:
             # Enter Long
             position_size = POSITION_SIZE
             entry_price = current_price
@@ -253,7 +258,7 @@ for i in range(len(df_30m)):
             entry_time = current_time
             logger.info(f"Entered LONG at {entry_price} on {entry_time} UTC")
         
-        elif current_price > current_bar['upper_band']:
+        elif current_price > upper_band:
             # Enter Short
             position_size = POSITION_SIZE
             entry_price = current_price
@@ -302,7 +307,7 @@ logger.info("Backtesting loop completed.")
 # --- Post-Backtest Calculations ---
 
 # Convert balance_series to a Pandas Series with appropriate index
-balance_series = pd.Series(balance_series, index=df_30m.index[:len(balance_series)])
+balance_series = pd.Series(balance_series, index=df_30m_rth.index[:len(balance_series)])
 
 # --- Drawdown Duration Tracking ---
 for i in range(len(balance_series)):
@@ -366,9 +371,9 @@ def calculate_sortino_ratio(daily_returns, target_return=0):
 # --- Performance Metrics ---
 
 total_return_percentage = ((cash - INITIAL_CASH) / INITIAL_CASH) * 100
-trading_days = max((df_30m.index.max() - df_30m.index.min()).days, 1)
+trading_days = max((df_30m_full.index.max() - df_30m_full.index.min()).days, 1)
 annualized_return_percentage = ((cash / INITIAL_CASH) ** (252 / trading_days)) - 1
-benchmark_return = ((df_30m['close'].iloc[-1] - df_30m['close'].iloc[0]) / df_30m['close'].iloc[0]) * 100
+benchmark_return = ((df_30m_full['close'].iloc[-1] - df_30m_full['close'].iloc[0]) / df_30m_full['close'].iloc[0]) * 100
 equity_peak = balance_series.max()
 
 volatility_annual = daily_returns.std() * np.sqrt(252) * 100
@@ -383,7 +388,7 @@ max_drawdown = drawdowns.min() * 100
 average_drawdown = drawdowns[drawdowns < 0].mean() * 100
 
 # Exposure Time
-exposure_time_percentage = (exposure_bars / len(df_30m)) * 100
+exposure_time_percentage = (exposure_bars / len(df_30m_rth)) * 100
 
 # Profit Factor
 winning_trades = [pnl for pnl in trade_results if pnl > 0]
@@ -404,8 +409,8 @@ else:
 # --- Results Summary ---
 print("\nPerformance Summary:")
 results = {
-    "Start Date": df_30m.index.min().strftime("%Y-%m-%d"),
-    "End Date": df_30m.index.max().strftime("%Y-%m-%d"),
+    "Start Date": df_30m_full.index.min().strftime("%Y-%m-%d"),
+    "End Date": df_30m_full.index.max().strftime("%Y-%m-%d"),
     "Exposure Time": f"{exposure_time_percentage:.2f}%",
     "Final Account Balance": f"${cash:,.2f}",
     "Equity Peak": f"${equity_peak:,.2f}",

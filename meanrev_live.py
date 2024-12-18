@@ -69,45 +69,97 @@ except Exception as e:
     ib.disconnect()
     sys.exit(1)
 
-# --- Request Historical Data for ES (Data Contract) ---
+# --- Request Historical Data for ES (Full Data) ---
 try:
-    logger.info("Requesting historical ES data...")
-    bars_30m = ib.reqHistoricalData(
+    logger.info("Requesting historical ES data (including ETH)...")
+    bars_30m_full = ib.reqHistoricalData(
         contract=es_contract,
         endDateTime='',
-        durationStr='60 D',
+        durationStr='90 D',               # Increased duration to ensure sufficient data for Bollinger Bands
         barSizeSetting='30 mins',
         whatToShow='TRADES',
-        useRTH=False,
+        useRTH=False,                     # Include ETH data
         formatDate=1,
         keepUpToDate=False
     )
 
-    if bars_30m:
-        df_30m = util.df(bars_30m)
-        df_30m.set_index('date', inplace=True)
-        df_30m.sort_index(inplace=True)
-        logger.info("Successfully retrieved 30m historical data.")
+    if bars_30m_full:
+        df_30m_full = util.df(bars_30m_full)
+        df_30m_full.set_index('date', inplace=True)
+        df_30m_full.sort_index(inplace=True)
+        # Ensure the index is timezone-aware (UTC)
+        df_30m_full.index = pd.to_datetime(df_30m_full.index, utc=True)
+        logger.info("Successfully retrieved full 30m historical data (including ETH).")
     else:
         logger.warning("No 30m historical data received.")
-        df_30m = pd.DataFrame()
+        df_30m_full = pd.DataFrame()
 
 except Exception as e:
     logger.error(f"Error requesting historical data: {e}")
     ib.disconnect()
     sys.exit(1)
 
-# --- Calculate Bollinger Bands ---
+# --- Define Helper Functions ---
+
 def calculate_bollinger_bands(df, period=15, stddev=2):
+    """
+    Calculate Bollinger Bands for the given DataFrame.
+
+    Parameters:
+        df (pd.DataFrame): DataFrame containing 'close' prices.
+        period (int): Rolling window period for moving average.
+        stddev (float): Number of standard deviations for bands.
+
+    Returns:
+        pd.DataFrame: DataFrame with Bollinger Bands added.
+    """
     df['ma'] = df['close'].rolling(window=period).mean()
     df['std'] = df['close'].rolling(window=period).std()
     df['upper_band'] = df['ma'] + (stddev * df['std'])
     df['lower_band'] = df['ma'] - (stddev * df['std'])
     return df
 
-df_30m = calculate_bollinger_bands(df_30m, BOLLINGER_PERIOD, BOLLINGER_STDDEV)
-df_30m.dropna(inplace=True)
-logger.info("Bollinger Bands calculated for 30m data.")
+def filter_rth(df):
+    """
+    Filters the DataFrame to include only Regular Trading Hours (09:30 - 16:00 ET) on weekdays.
+
+    Parameters:
+        df (pd.DataFrame): The input DataFrame with a timezone-aware datetime index.
+
+    Returns:
+        pd.DataFrame: The filtered DataFrame containing only RTH data.
+    """
+    # Ensure the index is timezone-aware
+    if df.index.tz is None:
+        # Assume the data is in UTC if no timezone is set
+        df = df.tz_localize('UTC')
+    else:
+        # Convert to UTC to standardize
+        df = df.tz_convert('UTC')
+
+    # Convert index to US/Eastern timezone for filtering
+    df_eastern = df.copy()
+    df_eastern.index = df_eastern.index.tz_convert(EASTERN)
+
+    # Filter for weekdays (Monday=0 to Friday=4)
+    df_eastern = df_eastern[df_eastern.index.weekday < 5]
+
+    # Filter for RTH hours: 09:30 to 16:00
+    df_rth = df_eastern.between_time(RTH_START, RTH_END)
+
+    # Convert back to UTC for consistency in further processing
+    df_rth.index = df_rth.index.tz_convert('UTC')
+
+    return df_rth
+
+# --- Calculate Bollinger Bands on Full Data ---
+df_30m_full = calculate_bollinger_bands(df_30m_full, BOLLINGER_PERIOD, BOLLINGER_STDDEV)
+df_30m_full.dropna(inplace=True)
+logger.info("Bollinger Bands calculated on full 30m data (including ETH).")
+
+# --- Filter RTH Data for Trade Execution ---
+df_30m_rth = filter_rth(df_30m_full)
+logger.info("RTH filtering applied to 30-minute data for trade execution.")
 
 # --- Initialize Variables ---
 cash = INITIAL_CASH
@@ -140,6 +192,9 @@ def cancel_scheduled_cancellation(order_id):
 
 # --- Callbacks ---
 def on_trade_filled(trade, fill):
+    """
+    Callback when a trade is filled.
+    """
     logger.info(f"Trade Filled - Order ID {trade.order.orderId}: {trade.order.action} {fill.size} @ {fill.price}")
     if trade.isFilled():
         entry_price = fill.price
@@ -152,6 +207,9 @@ def on_trade_filled(trade, fill):
         cancel_scheduled_cancellation(trade.order.orderId)
 
 def on_order_status(trade, fill):
+    """
+    Callback when an order's status changes.
+    """
     logger.info(f"Trade Status Update - Order ID {trade.order.orderId}: {trade.order.status}")
     if trade.order.status in ('Cancelled', 'Inactive'):
         logger.info(f"Order ID {trade.order.orderId} has been {trade.order.status.lower()}.")
@@ -167,9 +225,6 @@ def place_bracket_order(action, current_price):
     - Parent: MarketOrder (immediate execution during RTH)
     - Child 1: Take Profit (LimitOrder)
     - Child 2: Stop Loss (StopOrder)
-    
-    outsideRth=True allows children to fill in extended hours.
-    Once one child is filled, the other is automatically canceled (OCA group by bracket order).
     """
     if action.upper() not in ['BUY', 'SELL']:
         logger.error(f"Invalid action: {action}. Must be 'BUY' or 'SELL'.")
@@ -255,6 +310,9 @@ def is_rth(timestamp):
     return False
 
 def execute_trade(action, current_price, current_time):
+    """
+    Execute a trade by placing a bracket order if conditions are met.
+    """
     global pending_order
     if pending_order:
         logger.info("There is already a pending order. Skipping new trade execution.")
@@ -267,14 +325,26 @@ def execute_trade(action, current_price, current_time):
 
     logger.info(f"Entry Signal: {action}")
     logger.info(f"Current Price: {current_price}")
-    logger.info(f"Lower Threshold (Bollinger Band): {df_30m.iloc[-1]['lower_band']}")
-    logger.info(f"Upper Threshold (Bollinger Band): {df_30m.iloc[-1]['upper_band']}")
+    # Retrieve Bollinger Bands from full data
+    try:
+        upper_band = df_30m_full.loc[current_time, 'upper_band']
+        lower_band = df_30m_full.loc[current_time, 'lower_band']
+    except KeyError:
+        logger.warning(f"No Bollinger Bands data available for {current_time}. Skipping trade.")
+        return
+
+    logger.info(f"Lower Threshold (Bollinger Band): {lower_band}")
+    logger.info(f"Upper Threshold (Bollinger Band): {upper_band}")
 
     place_bracket_order(action, current_price)
 
 # --- Real-Time Bar Handler ---
 def on_realtime_bar(ticker, hasNewBar):
-    global current_30min_start, current_30min_bars, df_30m, position, cash, pending_order
+    """
+    Handler for incoming real-time bars.
+    Logs each 5-second bar and constructs 30-minute bars from them to evaluate trade signals.
+    """
+    global current_30min_start, current_30min_bars, df_30m_full, df_30m_rth, position, cash, pending_order
 
     try:
         if hasNewBar:
@@ -283,14 +353,19 @@ def on_realtime_bar(ticker, hasNewBar):
                 return
 
             bar = ticker[-1]
+            # bar.time is already UTC-aware
             bar_time = bar.time.replace(second=0, microsecond=0)
             minute = bar_time.minute
+
+            # Determine the start time of the current 30-minute candle
             candle_start_minute = (minute // 30) * 30
             candle_start_time = bar_time.replace(minute=candle_start_minute, second=0, microsecond=0)
+            # candle_start_time should still be UTC-aware here
 
             if current_30min_start != candle_start_time:
-                # New 30-min candle
+                # New 30-minute candle has started
                 if current_30min_start is not None and current_30min_bars:
+                    # Aggregate the previous 30-minute candle
                     open_30 = current_30min_bars[0]['open']
                     high_30 = max(b['high'] for b in current_30min_bars)
                     low_30 = min(b['low'] for b in current_30min_bars)
@@ -306,36 +381,47 @@ def on_realtime_bar(ticker, hasNewBar):
                     }
 
                     new_row = pd.DataFrame(new_30_bar, index=[current_30min_start])
-                    df_30m = pd.concat([df_30m, new_row])
-                    df_30m = calculate_bollinger_bands(df_30m, BOLLINGER_PERIOD, BOLLINGER_STDDEV)
-                    df_30m.dropna(inplace=True)
+                    df_30m_full = pd.concat([df_30m_full, new_row])
+                    df_30m_full = calculate_bollinger_bands(df_30m_full, BOLLINGER_PERIOD, BOLLINGER_STDDEV)
+                    df_30m_full.dropna(inplace=True)
 
-                    if not df_30m.empty:
+                    # Re-filter RTH data
+                    df_30m_rth = filter_rth(df_30m_full)
+
+                    # Check if the new 30m bar is within RTH
+                    if is_rth(current_30min_start):
                         current_price = close_30
                         current_time = current_30min_start
                         logger.info(f"\nNew 30-min bar closed at {current_time} UTC with close price: {current_price}")
-                        logger.info(
-                            f"Bollinger Bands - Upper: {df_30m.iloc[-1]['upper_band']}, "
-                            f"Lower: {df_30m.iloc[-1]['lower_band']}"
-                        )
-                        logger.info(f"Current Price: {current_price}")
-                        logger.info(f"Upper Threshold (Bollinger Band): {df_30m.iloc[-1]['upper_band']}")
-                        logger.info(f"Lower Threshold (Bollinger Band): {df_30m.iloc[-1]['lower_band']}")
+                        try:
+                            upper_band = df_30m_full.loc[current_time, 'upper_band']
+                            lower_band = df_30m_full.loc[current_time, 'lower_band']
+                        except KeyError:
+                            logger.warning(f"No Bollinger Bands data available for {current_time}. Skipping trade.")
+                            upper_band = None
+                            lower_band = None
 
-                        if position is None and not pending_order:
-                            if current_price < df_30m.iloc[-1]['lower_band']:
-                                # Enter Long during RTH
-                                execute_trade('BUY', current_price, current_time)
-                            elif current_price > df_30m.iloc[-1]['upper_band']:
-                                # Enter Short during RTH
-                                execute_trade('SELL', current_price, current_time)
-                            else:
-                                logger.info("No trading signal detected.")
+                        if upper_band is not None and lower_band is not None:
+                            logger.info(f"Bollinger Bands - Upper: {upper_band}, Lower: {lower_band}")
+                            logger.info(f"Current Price: {current_price}")
 
+                            if position is None and not pending_order:
+                                if current_price < lower_band:
+                                    # Enter Long during RTH
+                                    execute_trade('BUY', current_price, current_time)
+                                elif current_price > upper_band:
+                                    # Enter Short during RTH
+                                    execute_trade('SELL', current_price, current_time)
+                                else:
+                                    logger.info("No trading signal detected.")
+                    else:
+                        logger.info(f"New 30-min bar at {current_30min_start} UTC is outside RTH. No trade executed.")
+
+                # Reset for new 30-minute candle
                 current_30min_start = candle_start_time
                 current_30min_bars = []
 
-            # Append current bar
+            # Append current 5-second bar to current 30-minute candle
             current_30min_bars.append({
                 'open': bar.open_,
                 'high': bar.high,
@@ -348,15 +434,21 @@ def on_realtime_bar(ticker, hasNewBar):
         logger.error(f"Error in on_realtime_bar handler: {e}")
 
 # --- Subscribe to Real-Time Bars ---
-ticker = ib.reqRealTimeBars(
-    contract=es_contract,
-    barSize=5,
-    whatToShow='TRADES',
-    useRTH=False,
-    realTimeBarsOptions=[]
-)
-ticker.updateEvent += on_realtime_bar
-logger.info("Real-time bar handler assigned.")
+try:
+    logger.info("Requesting real-time 5-second bars (including ETH)...")
+    ticker = ib.reqRealTimeBars(
+        contract=es_contract,
+        barSize=5,                       # 5-second bars
+        whatToShow='TRADES',             # Trade data
+        useRTH=False,                    # Include ETH data
+        realTimeBarsOptions=[]
+    )
+    ticker.updateEvent += on_realtime_bar
+    logger.info("Real-time bar handler assigned.")
+except Exception as e:
+    logger.error(f"Failed to subscribe to real-time bars: {e}")
+    ib.disconnect()
+    sys.exit(1)
 
 # --- Start Event Loop ---
 logger.info("Starting event loop...")

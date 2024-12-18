@@ -25,7 +25,7 @@ def is_rth(timestamp):
 # ----------------------------
 # Load and Prepare the Data
 # ----------------------------
-df = pd.read_csv("es_5m_data.csv", parse_dates=['date'], index_col='date')
+df = pd.read_csv("es_1m_data.csv", parse_dates=['date'], index_col='date')
 
 required_columns = {'open', 'high', 'low', 'close', 'volume'}
 if not required_columns.issubset(df.columns):
@@ -40,7 +40,7 @@ if df.index.tz is None:
 # ----------------------------
 # Select Backtest Date Range
 # ----------------------------
-from_date = '2022-10-11'
+from_date = '2023-10-11'
 to_date = '2024-12-11'
 df = df.loc[from_date:to_date]
 
@@ -107,8 +107,8 @@ for i in range(len(df)):
     if position == 0:
         # Check if in RTH before placing a new trade
         if is_rth(current_time):
-            # Long Entry Condition: Price below (VWAP - buy_threshold)
-            if current_price < (current_vwap - buy_threshold):
+            # Long Entry Condition: Low of the bar dips below (VWAP - buy_threshold)
+            if df['low'].iloc[i] < (current_vwap - buy_threshold):
                 entry_price = current_price + slippage
                 tp_price = entry_price + take_profit
                 sl_price = entry_price - stop_loss
@@ -187,7 +187,7 @@ if current_drawdown_duration > 0:
 
 # ----------------------------
 # Calculate Drawdown Metrics
-# ----------------------------
+# -------------------------- --
 if len(drawdowns) > 0:
     max_drawdown = np.max(drawdowns)  # Maximum drawdown percentage
     average_drawdown = np.mean(drawdowns)  # Average drawdown percentage
