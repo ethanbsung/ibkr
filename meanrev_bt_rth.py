@@ -1,10 +1,89 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import datetime
+import pytz
+from ib_insync import *
+import logging
+import sys
 import time
 
-# Function to load data
+# --- Configuration Parameters ---
+IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host
+IB_PORT = 7497               # IBKR Gateway/TWS paper trading port
+CLIENT_ID = 2                # Unique client ID (ensure it's different from other scripts)
+EXEC_SYMBOL = 'MES'           # Micro E-mini S&P 500 for execution
+EXEC_EXPIRY = '202503'        # March 2025
+EXEC_EXCHANGE = 'CME'         # Exchange for MES
+CURRENCY = 'USD'
+
+INITIAL_CASH = 5000          # Starting cash
+POSITION_SIZE = 1            # Number of MES contracts per trade
+CONTRACT_MULTIPLIER = 5      # Contract multiplier for MES
+
+BOLLINGER_PERIOD = 15
+BOLLINGER_STDDEV = 2
+STOP_LOSS_DISTANCE = 5        # Points away from entry
+TAKE_PROFIT_DISTANCE = 10     # Points away from entry
+
+# --- Setup Logging ---
+logging.basicConfig(
+    level=logging.INFO,  # Change to DEBUG for more detailed logs if needed
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger()
+
+# --- Helper Function to Filter RTH ---
+def filter_rth(df):
+    """
+    Filters the DataFrame to include only Regular Trading Hours (09:30 - 16:00 ET) on weekdays.
+    
+    Parameters:
+        df (pd.DataFrame): The input DataFrame with a timezone-aware datetime index.
+        
+    Returns:
+        pd.DataFrame: The filtered DataFrame containing only RTH data.
+    """
+    # Define US/Eastern timezone
+    eastern = pytz.timezone('US/Eastern')
+    
+    # Ensure the index is timezone-aware
+    if df.index.tz is None:
+        # Assume the data is in UTC if no timezone is set
+        df = df.tz_localize('UTC')
+    else:
+        # Convert to UTC to standardize
+        df = df.tz_convert('UTC')
+    
+    # Convert index to US/Eastern timezone
+    df_eastern = df.copy()
+    df_eastern.index = df_eastern.index.tz_convert(eastern)
+    
+    # Filter for weekdays (Monday=0 to Friday=4)
+    df_eastern = df_eastern[df_eastern.index.weekday < 5]
+    
+    # Filter for RTH hours: 09:30 to 16:00
+    df_rth = df_eastern.between_time('09:30', '16:00')
+    
+    # Convert back to UTC for consistency in further processing
+    df_rth.index = df_rth.index.tz_convert('UTC')
+    
+    return df_rth
+
+# --- Function to Load Data ---
 def load_data(csv_file):
+    """
+    Loads CSV data into a pandas DataFrame with appropriate data types and datetime parsing.
+    
+    Parameters:
+        csv_file (str): Path to the CSV file.
+        
+    Returns:
+        pd.DataFrame: Loaded and indexed DataFrame.
+    """
     try:
         df = pd.read_csv(
             csv_file,
@@ -19,30 +98,33 @@ def load_data(csv_file):
                 'contract': str
             },
             parse_dates=['date'],
-            date_format="%Y-%m-%d %H:%M:%S%z"
+            date_parser=lambda x: pd.to_datetime(x, format="%Y-%m-%d %H:%M:%S%z")
         )
         df.sort_values('date', inplace=True)
         df.set_index('date', inplace=True)
         return df
     except FileNotFoundError:
-        print(f"File not found: {csv_file}")
-        exit(1)
+        logger.error(f"File not found: {csv_file}")
+        sys.exit(1)
     except pd.errors.EmptyDataError:
-        print("No data: The CSV file is empty.")
-        exit(1)
+        logger.error("No data: The CSV file is empty.")
+        sys.exit(1)
     except Exception as e:
-        print(f"An error occurred while reading the CSV: {e}")
-        exit(1)
+        logger.error(f"An error occurred while reading the CSV: {e}")
+        sys.exit(1)
 
-# Load datasets
+# --- Load Datasets ---
 csv_file_1m = 'es_1m_data.csv'
 csv_file_5m = 'es_5m_data.csv'
 csv_file_30m = 'es_30m_data.csv'
 
+logger.info("Loading datasets...")
 df_1m = load_data(csv_file_1m)
 df_5m = load_data(csv_file_5m)
 df_30m = load_data(csv_file_30m)
+logger.info("Datasets loaded successfully.")
 
+# --- Define Backtest Period ---
 # Option 1: Custom Backtest Period (Replace These Dates)
 custom_start_date = "2023-01-25"
 custom_end_date = "2024-12-11"
@@ -55,33 +137,38 @@ else:
     start_time = pd.to_datetime(df_30m.index.min(), utc=True)
     end_time = pd.to_datetime(df_30m.index.max(), utc=True)
 
-# Ensure the 1-minute DataFrame index is in UTC
-df_1m.index = pd.to_datetime(df_1m.index, utc=True)
-
-# Slice the 1-minute DataFrame using the chosen backtest period
+# --- Slice Dataframes to Backtest Period ---
+logger.info(f"Slicing data from {start_time} to {end_time}...")
 df_1m = df_1m.loc[start_time:end_time]
+df_5m = df_5m.loc[start_time:end_time]
 df_30m = df_30m.loc[start_time:end_time]
 
-print(f"Backtesting from {start_time} to {end_time}")
+# --- Apply RTH Filtering to 30m Data Only ---
+logger.info("Applying RTH filter to 30-minute data...")
+df_30m = filter_rth(df_30m)
+logger.info("RTH filtering applied to 30-minute data.")
 
-# Calculate Bollinger Bands on 30m data
-bollinger_period = 15
-bollinger_stddev = 2
+# --- Confirm Data Points After Filtering ---
+print(f"Backtesting during Regular Trading Hours from {start_time.strftime('%Y-%m-%d')} to {end_time.strftime('%Y-%m-%d')}")
+print(f"1-Minute Data Points after Filtering: {len(df_1m)}")
+print(f"30-Minute Data Points after RTH Filtering: {len(df_30m)}")
 
-df_30m['ma'] = df_30m['close'].rolling(window=bollinger_period).mean()
-df_30m['std'] = df_30m['close'].rolling(window=bollinger_period).std()
-df_30m['upper_band'] = df_30m['ma'] + (bollinger_stddev * df_30m['std'])
-df_30m['lower_band'] = df_30m['ma'] - (bollinger_stddev * df_30m['std'])
-
+# --- Calculate Bollinger Bands on 30m Data ---
+logger.info("Calculating Bollinger Bands on 30-minute data...")
+df_30m['ma'] = df_30m['close'].rolling(window=BOLLINGER_PERIOD).mean()
+df_30m['std'] = df_30m['close'].rolling(window=BOLLINGER_PERIOD).std()
+df_30m['upper_band'] = df_30m['ma'] + (BOLLINGER_STDDEV * df_30m['std'])
+df_30m['lower_band'] = df_30m['ma'] - (BOLLINGER_STDDEV * df_30m['std'])
 df_30m.dropna(inplace=True)
+logger.info("Bollinger Bands calculated and NaNs dropped.")
 
-# Initialize backtest variables
+# --- Initialize Backtest Variables ---
 position_size = 0
 entry_price = None
 position_type = None  
-cash = 5000
+cash = INITIAL_CASH
 trade_results = []
-balance_series = [5000]  # Keep as a list
+balance_series = [INITIAL_CASH]  # Keep as a list
 exposure_bars = 0
 
 # For Drawdown Duration Calculations
@@ -90,82 +177,95 @@ drawdown_start = None
 drawdown_durations = []
 
 # Define which high-frequency data to use
-df_high_freq = df_1m  # Change to df_5m if preferred
+df_high_freq = df_1m  # Use 1-minute data including ETH
 
-def evaluate_exit(position_type, entry_price, stop_loss, take_profit, df_high_freq, entry_time):
+# --- Define Exit Evaluation Function ---
+def evaluate_exit_anytime(position_type, entry_price, stop_loss, take_profit, df_high_freq, entry_time):
     """
-    Determines whether the stop-loss or take-profit is hit using higher-frequency data.
-    Returns exit_price, exit_time, and hit_take_profit flag.
+    Determines whether the stop-loss or take-profit is hit using all available high-frequency data (including ETH).
+    
+    Parameters:
+        position_type (str): 'long' or 'short'
+        entry_price (float): Price at which the position was entered
+        stop_loss (float): Stop-loss price
+        take_profit (float): Take-profit price
+        df_high_freq (pd.DataFrame): High-frequency DataFrame (1-minute) including ETH
+        entry_time (pd.Timestamp): Timestamp when the position was entered
+    
+    Returns:
+        tuple: (exit_price, exit_time, hit_take_profit)
     """
+    # Slice the high-frequency data from entry_time onwards
     df_period = df_high_freq.loc[entry_time:]
     
-    # Iterate through each higher-frequency bar after entry_time
+    # Iterate through each high-frequency bar after entry_time
     for timestamp, row in df_period.iterrows():
         high = row['high']
         low = row['low']
-
+        
         if position_type == 'long':
             if high >= take_profit and low <= stop_loss:
                 # Determine which was hit first
-                # Assuming the open of the bar is the first price, check sequence
                 if row['open'] <= stop_loss:
-                    return stop_loss, timestamp, False
+                    return stop_loss, timestamp, False  # Stop loss hit first
                 else:
-                    return take_profit, timestamp, True
+                    return take_profit, timestamp, True   # Take profit hit first
             elif high >= take_profit:
                 return take_profit, timestamp, True
             elif low <= stop_loss:
                 return stop_loss, timestamp, False
-
+        
         elif position_type == 'short':
             if low <= take_profit and high >= stop_loss:
+                # Determine which was hit first
                 if row['open'] >= stop_loss:
-                    return stop_loss, timestamp, False
+                    return stop_loss, timestamp, False  # Stop loss hit first
                 else:
-                    return take_profit, timestamp, True
+                    return take_profit, timestamp, True   # Take profit hit first
             elif low <= take_profit:
                 return take_profit, timestamp, True
             elif high >= stop_loss:
                 return stop_loss, timestamp, False
-
-    # If neither condition is met, wait for the next bar
+    
+    # If neither condition is met, return None
     return None, None, None
 
-# Backtesting loop
+# --- Backtesting Loop ---
+logger.info("Starting backtesting loop...")
 for i in range(len(df_30m)):
     current_bar = df_30m.iloc[i]
     current_time = df_30m.index[i]
     current_price = current_bar['close']
-
+    
     # Count exposure when position is active
     if position_size != 0:
         exposure_bars += 1
-
+    
     if position_size == 0:
-        # No open position, check for entry signals based on 30m bar
+        # No open position, check for entry signals based on 30m RTH bar
         if current_price < current_bar['lower_band']:
             # Enter Long
-            position_size = 1
+            position_size = POSITION_SIZE
             entry_price = current_price
             position_type = 'long'
-            stop_loss_price = entry_price - 5  # Adjust as per your strategy
-            take_profit_price = entry_price + 10  # Adjust as per your strategy
+            stop_loss_price = entry_price - STOP_LOSS_DISTANCE
+            take_profit_price = entry_price + TAKE_PROFIT_DISTANCE
             entry_time = current_time
-            #print(f"Entered LONG at {entry_price} on {entry_time} UTC")
-
+            logger.info(f"Entered LONG at {entry_price} on {entry_time} UTC")
+        
         elif current_price > current_bar['upper_band']:
             # Enter Short
-            position_size = 1
+            position_size = POSITION_SIZE
             entry_price = current_price
             position_type = 'short'
-            stop_loss_price = entry_price + 5  # Adjust as per your strategy
-            take_profit_price = entry_price - 10  # Adjust as per your strategy
+            stop_loss_price = entry_price + STOP_LOSS_DISTANCE
+            take_profit_price = entry_price - TAKE_PROFIT_DISTANCE
             entry_time = current_time
-            #print(f"Entered SHORT at {entry_price} on {entry_time} UTC")
-
+            logger.info(f"Entered SHORT at {entry_price} on {entry_time} UTC")
+    
     else:
-        # Position is open, check high-frequency data until exit
-        exit_price, exit_time, hit_take_profit = evaluate_exit(
+        # Position is open, check high-frequency ETH data until exit
+        exit_price, exit_time, hit_take_profit = evaluate_exit_anytime(
             position_type,
             entry_price,
             stop_loss_price,
@@ -173,26 +273,22 @@ for i in range(len(df_30m)):
             df_high_freq,
             entry_time
         )
-
+        
         if exit_price is not None and exit_time is not None:
             # Calculate P&L based on the exit condition
             if position_type == 'long':
-                pnl = ((exit_price - entry_price) * 5) - (0.62 * 2)  # Example: 5 contracts, $0.47 spread cost
+                pnl = ((exit_price - entry_price) * CONTRACT_MULTIPLIER * position_size) - (0.62 * 2)  # Example: Spread cost
             elif position_type == 'short':
-                pnl = ((entry_price - exit_price) * 5) - (0.62 * 2)
+                pnl = ((entry_price - exit_price) * CONTRACT_MULTIPLIER * position_size) - (0.62 * 2)
             
             trade_results.append(pnl)
             cash += pnl
-            balance_series.append(cash)  # Append to list
-
+            balance_series.append(cash)  # Update account balance
+            
             # Print trade exit details
-            if hit_take_profit:
-                exit_type = "TAKE PROFIT"
-            else:
-                exit_type = "STOP LOSS"
-
-            #print(f"Exited {position_type.upper()} at {exit_price} on {exit_time} UTC via {exit_type} for P&L: ${pnl:.2f}")
-
+            exit_type = "TAKE PROFIT" if hit_take_profit else "STOP LOSS"
+            logger.info(f"Exited {position_type.upper()} at {exit_price} on {exit_time} UTC via {exit_type} for P&L: ${pnl:.2f}")
+            
             # Reset position variables
             position_size = 0
             position_type = None
@@ -201,16 +297,18 @@ for i in range(len(df_30m)):
             take_profit_price = None
             entry_time = None
 
-# After the Backtesting Loop
+logger.info("Backtesting loop completed.")
 
-# Convert balance_series to a Pandas Series
+# --- Post-Backtest Calculations ---
+
+# Convert balance_series to a Pandas Series with appropriate index
 balance_series = pd.Series(balance_series, index=df_30m.index[:len(balance_series)])
 
-# Drawdown Duration Tracking
+# --- Drawdown Duration Tracking ---
 for i in range(len(balance_series)):
     current_balance = balance_series.iloc[i]
     running_max = balance_series.iloc[:i+1].max()
-
+    
     if current_balance < running_max:
         if not in_drawdown:
             in_drawdown = True
@@ -228,13 +326,20 @@ if in_drawdown:
     duration = (drawdown_end - drawdown_start).total_seconds() / 86400
     drawdown_durations.append(duration)
 
-# Fix the FutureWarning by specifying fill_method=None
+# --- Calculate Daily Returns ---
 daily_returns = balance_series.resample('D').ffill().pct_change().dropna()
 
-# Define Sortino Ratio Calculation Function
+# --- Define Sortino Ratio Calculation Function ---
 def calculate_sortino_ratio(daily_returns, target_return=0):
     """
     Calculate the annualized Sortino Ratio.
+    
+    Parameters:
+        daily_returns (pd.Series): Series of daily returns.
+        target_return (float): Minimum acceptable return.
+        
+    Returns:
+        float: Annualized Sortino Ratio.
     """
     if daily_returns.empty:
         return np.nan
@@ -258,10 +363,11 @@ def calculate_sortino_ratio(daily_returns, target_return=0):
     # Return Sortino Ratio
     return annualized_mean_excess_return / downside_std
 
-# Performance Metrics
-total_return_percentage = ((cash - 5000) / 5000) * 100
+# --- Performance Metrics ---
+
+total_return_percentage = ((cash - INITIAL_CASH) / INITIAL_CASH) * 100
 trading_days = max((df_30m.index.max() - df_30m.index.min()).days, 1)
-annualized_return_percentage = ((cash / 5000) ** (252 / trading_days)) - 1
+annualized_return_percentage = ((cash / INITIAL_CASH) ** (252 / trading_days)) - 1
 benchmark_return = ((df_30m['close'].iloc[-1] - df_30m['close'].iloc[0]) / df_30m['close'].iloc[0]) * 100
 equity_peak = balance_series.max()
 
@@ -295,10 +401,7 @@ else:
     max_drawdown_duration_days = 0
     average_drawdown_duration_days = 0
 
-# Calculate daily PnL
-daily_pnl = balance_series.resample('D').last().diff().dropna()
-
-# Results Summary
+# --- Results Summary ---
 print("\nPerformance Summary:")
 results = {
     "Start Date": df_30m.index.min().strftime("%Y-%m-%d"),
