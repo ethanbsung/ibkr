@@ -169,25 +169,27 @@ def place_bracket_order(action, current_price):
         stop_loss_price = current_price + STOP_LOSS_DISTANCE
 
     try:
+        # Create a standard bracket order with the parent as a limit order
         bracket = ib.bracketOrder(
             action=action.upper(),
             quantity=POSITION_SIZE,
-            limitPrice=current_price,  # Parent order price; using market order instead
+            limitPrice=current_price,      # Parent is a limit order at current_price
             takeProfitPrice=take_profit_price,
             stopLossPrice=stop_loss_price
         )
 
-        # Modify parent order to be a Market Order
-        bracket[0].orderType = 'MKT'
-        bracket[0].transmit = False  # Transmit all together
+        # By default, bracketOrder sets:
+        # - parent.transmit = False
+        # - takeProfit.transmit = False
+        # - stopLoss.transmit = True
+        # This means all orders are submitted together as one OCA group and become active.
+        # The children orders (takeProfit and stopLoss) will only activate once the parent fills.
 
-        bracket[1].transmit = False
-        bracket[2].transmit = True  # Transmit the last order to send all
-
-        # Place all orders together
         for order in bracket:
             ib.placeOrder(mes_contract, order)
-            logger.info(f"Placed {order.orderType} Order ID {order.orderId} for {order.action} at {order.lmtPrice if hasattr(order, 'lmtPrice') else order.stopPrice}")
+            order_type = order.orderType
+            price_info = f"at {order.lmtPrice}" if hasattr(order, 'lmtPrice') else ""
+            logger.info(f"Placed {order_type} Order ID {order.orderId} for {order.action} {price_info}")
 
         # Attach event handlers
         for order in bracket:

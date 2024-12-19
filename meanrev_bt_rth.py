@@ -256,7 +256,7 @@ for i in range(len(df_30m_rth)):
             stop_loss_price = entry_price - STOP_LOSS_DISTANCE
             take_profit_price = entry_price + TAKE_PROFIT_DISTANCE
             entry_time = current_time
-            logger.info(f"Entered LONG at {entry_price} on {entry_time} UTC")
+            #logger.info(f"Entered LONG at {entry_price} on {entry_time} UTC")
         
         elif current_price > upper_band:
             # Enter Short
@@ -266,7 +266,7 @@ for i in range(len(df_30m_rth)):
             stop_loss_price = entry_price + STOP_LOSS_DISTANCE
             take_profit_price = entry_price - TAKE_PROFIT_DISTANCE
             entry_time = current_time
-            logger.info(f"Entered SHORT at {entry_price} on {entry_time} UTC")
+            #logger.info(f"Entered SHORT at {entry_price} on {entry_time} UTC")
     
     else:
         # Position is open, check high-frequency ETH data until exit
@@ -292,7 +292,7 @@ for i in range(len(df_30m_rth)):
             
             # Print trade exit details
             exit_type = "TAKE PROFIT" if hit_take_profit else "STOP LOSS"
-            logger.info(f"Exited {position_type.upper()} at {exit_price} on {exit_time} UTC via {exit_type} for P&L: ${pnl:.2f}")
+            #logger.info(f"Exited {position_type.upper()} at {exit_price} on {exit_time} UTC via {exit_type} for P&L: ${pnl:.2f}")
             
             # Reset position variables
             position_size = 0
