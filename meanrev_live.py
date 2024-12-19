@@ -28,11 +28,9 @@ BOLLINGER_STDDEV = 2
 STOP_LOSS_DISTANCE = 5        # Points away from entry
 TAKE_PROFIT_DISTANCE = 10     # Points away from entry
 
-PARENT_ORDER_TIMEOUT = 300    # 5 minutes timeout for parent order fill
-
 # RTH: 09:30 - 16:00 ET, Monday to Friday
 RTH_START = datetime.time(9, 30)
-RTH_END = datetime.time(16, 0)
+RTH_END = datetime.time(15, 59)
 EASTERN = pytz.timezone('US/Eastern')
 
 # --- Setup Logging ---
@@ -136,48 +134,27 @@ cash = INITIAL_CASH
 balance_series = [INITIAL_CASH]
 position = None
 pending_order = False
-scheduled_cancellations = {}
 current_30min_start = None
 current_30min_bars = []
 
-def schedule_order_cancellation(trade, parent_order, timeout=PARENT_ORDER_TIMEOUT):
-    def cancel_order():
-        if not trade.isFilled():
-            logger.info(f"Parent Order ID {parent_order.orderId} not filled within {timeout} seconds. Cancelling order.")
-            ib.cancelOrder(parent_order)
-            scheduled_cancellations.pop(parent_order.orderId, None)
-
-    scheduled = ib.callLater(timeout, cancel_order)
-    scheduled_cancellations[parent_order.orderId] = scheduled
-    logger.info(f"Scheduled cancellation for Parent Order ID {parent_order.orderId} in {timeout} seconds.")
-
-def cancel_scheduled_cancellation(order_id):
-    scheduled = scheduled_cancellations.get(order_id, None)
-    if scheduled:
-        ib.cancelScheduledCall(scheduled)
-        scheduled_cancellations.pop(order_id, None)
-        logger.info(f"Cancelled scheduled cancellation for Parent Order ID {order_id}.")
-
 def on_trade_filled(trade, fill):
+    global position, pending_order
     logger.info(f"Trade Filled - Order ID {trade.order.orderId}: {trade.order.action} {fill.size} @ {fill.price}")
     if trade.isFilled():
         entry_price = fill.price
         action = trade.order.action.upper()
         position_type = 'LONG' if action == 'BUY' else 'SHORT'
         logger.info(f"Entered {position_type} position at {entry_price}")
-        global position, pending_order
         position = position_type
         pending_order = False
-        cancel_scheduled_cancellation(trade.order.orderId)
 
-def on_order_status(trade, fill):
+def on_order_status(trade):
+    global position, pending_order
     logger.info(f"Trade Status Update - Order ID {trade.order.orderId}: {trade.orderStatus.status}")
     if trade.orderStatus.status in ('Cancelled', 'Inactive'):
         logger.info(f"Order ID {trade.order.orderId} has been {trade.orderStatus.status.lower()}.")
-        global position, pending_order
         if position is None:
             pending_order = False
-        cancel_scheduled_cancellation(trade.order.orderId)
 
 def place_bracket_order(action, current_price):
     if action.upper() not in ['BUY', 'SELL']:
@@ -191,49 +168,33 @@ def place_bracket_order(action, current_price):
         take_profit_price = current_price - TAKE_PROFIT_DISTANCE
         stop_loss_price = current_price + STOP_LOSS_DISTANCE
 
-    parent = MarketOrder(action=action.upper(), totalQuantity=POSITION_SIZE)
-    parent.transmit = False
-    parent.outsideRth = True
-
-    take_profit_action = 'SELL' if action.upper() == 'BUY' else 'BUY'
-    take_profit_order = LimitOrder(
-        action=take_profit_action,
-        totalQuantity=POSITION_SIZE,
-        lmtPrice=take_profit_price,
-        parentId=parent.orderId,
-        transmit=False
-    )
-    take_profit_order.outsideRth = True
-
-    stop_loss_action = 'SELL' if action.upper() == 'BUY' else 'BUY'
-    stop_loss_order = StopOrder(
-        action=stop_loss_action,
-        totalQuantity=POSITION_SIZE,
-        stopPrice=stop_loss_price,
-        parentId=parent.orderId,
-        transmit=True
-    )
-    stop_loss_order.outsideRth = True
-
     try:
-        trade_parent = ib.placeOrder(mes_contract, parent)
-        logger.info(f"Placed Parent {action.upper()} Market Order ID {parent.orderId}")
-        schedule_order_cancellation(trade_parent, parent)
+        bracket = ib.bracketOrder(
+            action=action.upper(),
+            quantity=POSITION_SIZE,
+            limitPrice=current_price,  # Parent order price; using market order instead
+            takeProfitPrice=take_profit_price,
+            stopLossPrice=stop_loss_price
+        )
 
-        trade_take_profit = ib.placeOrder(mes_contract, take_profit_order)
-        logger.info(f"Placed Take Profit Limit Order ID {take_profit_order.orderId} at {take_profit_price}")
+        # Modify parent order to be a Market Order
+        bracket[0].orderType = 'MKT'
+        bracket[0].transmit = False  # Transmit all together
 
-        trade_stop_loss = ib.placeOrder(mes_contract, stop_loss_order)
-        logger.info(f"Placed Stop Loss Stop Order ID {stop_loss_order.orderId} at {stop_loss_price}")
+        bracket[1].transmit = False
+        bracket[2].transmit = True  # Transmit the last order to send all
 
-        trade_parent.filledEvent += on_trade_filled
-        trade_parent.statusEvent += on_order_status
-        trade_take_profit.filledEvent += on_trade_filled
-        trade_take_profit.statusEvent += on_order_status
-        trade_stop_loss.filledEvent += on_trade_filled
-        trade_stop_loss.statusEvent += on_order_status
+        # Place all orders together
+        for order in bracket:
+            ib.placeOrder(mes_contract, order)
+            logger.info(f"Placed {order.orderType} Order ID {order.orderId} for {order.action} at {order.lmtPrice if hasattr(order, 'lmtPrice') else order.stopPrice}")
 
-        global pending_order
+        # Attach event handlers
+        for order in bracket:
+            trade = ib.trades()[-1]  # Get the most recently placed trade
+            trade.filledEvent += on_trade_filled
+            trade.statusEvent += on_order_status
+
         pending_order = True
         logger.info("Bracket order placed successfully.")
 
@@ -366,14 +327,15 @@ def on_realtime_bar(ticker, hasNewBar):
 
             # Continuously update the current candle row in df_30m_full
             # This ensures that if we lose connection or something, we always have the latest partial data.
-            open_30 = current_30min_bars[0]['open']
-            high_30 = max(b['high'] for b in current_30min_bars)
-            low_30 = min(b['low'] for b in current_30min_bars)
-            close_30 = current_30min_bars[-1]['close']
-            volume_30 = sum(b['volume'] for b in current_30min_bars)
+            if current_30min_start is not None:
+                open_30 = current_30min_bars[0]['open']
+                high_30 = max(b['high'] for b in current_30min_bars)
+                low_30 = min(b['low'] for b in current_30min_bars)
+                close_30 = current_30min_bars[-1]['close']
+                volume_30 = sum(b['volume'] for b in current_30min_bars)
 
-            # Update or create the row for the current candle in progress
-            df_30m_full.loc[current_30min_start, ['open', 'high', 'low', 'close', 'volume']] = [open_30, high_30, low_30, close_30, volume_30]
+                # Update or create the row for the current candle in progress
+                df_30m_full.loc[current_30min_start, ['open', 'high', 'low', 'close', 'volume']] = [open_30, high_30, low_30, close_30, volume_30]
 
     except Exception as e:
         logger.error(f"Error in on_realtime_bar handler: {e}")
