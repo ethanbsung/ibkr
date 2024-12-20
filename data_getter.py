@@ -43,7 +43,7 @@ def convert_to_utc(start_date_str, end_date_str):
     # Format as 'yyyymmdd-HH:MM:SS' to explicitly indicate UTC
     return start_utc.strftime('%Y%m%d-%H:%M:%S'), end_utc.strftime('%Y%m%d-%H:%M:%S')
 
-def fetch_historical_data(ib, contract, start_date_str, end_date_str, bar_size='5 mins', what_to_show='TRADES'):
+def fetch_historical_data(ib, contract, start_date_str, end_date_str, bar_size='15 mins', what_to_show='TRADES'):
     """
     Fetch historical OHLCV data for a given contract.
     """
@@ -99,6 +99,7 @@ def main():
         (create_es_future_contract('202406'), '20240317 23:59:59', '20240616 23:59:59'),  # Mar-Jun 2024
         (create_es_future_contract('202409'), '20240617 23:59:59', '20240916 23:59:59'),  # Jun-Sep 2024
         (create_es_future_contract('202412'), '20240917 23:59:59', '20241216 23:59:59'),  # Sep-Dec 2024
+        (create_es_future_contract('202503'), '20241216 23:59:59', '20250316 23:59:59')   # Dec-Mar 2025
     ]
     
     # Fetch historical data for each contract

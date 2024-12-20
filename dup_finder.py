@@ -2,7 +2,7 @@ import pandas as pd
 import os
 
 # List of CSV files to check
-csv_files = ['combined_es_1min_futures_data.csv']
+csv_files = ['es_15m_data.csv']
 
 # Function to load, check, and remove duplicates
 def remove_duplicates(csv_file):

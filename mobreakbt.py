@@ -1,447 +1,388 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
+from datetime import datetime, time as dt_time, timedelta
+import pytz
+import yfinance as yf
+import logging
+import sys
+import time
 
-# ----------------------- User Parameters -----------------------
+# --- Configuration Parameters ---
+CSV_FILE_PATH = 'es_15m_data.csv'      # Replace with your actual CSV file path
+TIMEFRAME = '15min'                    # Aggregation timeframe
+DONCHIAN_PERIOD = 20                   # Number of periods for Donchian Channels
+ATR_PERIOD = 14                        # Number of periods for ATR
+VOLUME_MULTIPLIER = 1.5                # Current volume must be 1.5 times the average volume
+STOP_LOSS_ATR_MULTIPLIER = 0.5         # Stop loss multiplier
+TAKE_PROFIT_ATR_MULTIPLIER = 1         # Take profit multiplier
+SESSION_START = dt_time(9, 30)         # RTH start
+SESSION_END = dt_time(16, 0)           # RTH end
+EASTERN = pytz.timezone('US/Eastern')
+INITIAL_CAPITAL = 5000
+COMMISSION_PER_TRADE = 1.24
+SLIPPAGE = 0.0
+MULTIPLIER = 5                      # MES contract multiplier
+BACKTEST_START_DATE = '2022-12-18'  # Start date of backtest
+BACKTEST_END_DATE = '2023-12-17'    # End date of backtest
+BENCHMARK_TICKER = '^GSPC'
 
-# Paths to your CSV data files
-daily_data_file = 'es_daily_data.csv'       # Daily ES futures data
-intraday_data_file = 'es_5m_data.csv'     # 5-minute ES futures data
+# --- Setup Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger()
 
-# Contract and PnL Parameters
-multiplier = 5            # Trading 5 MES contracts
-point_value_mes = 5.0     # $5 per point per MES contract
+# --- Helper Functions ---
 
-# Initial account balance
-initial_cash = 5000.0    # Starting with $100,000
-
-# Custom Backtest Date Range (Set to None to include all data)
-backtest_start_date = '2022-12-18'  # Format: 'YYYY-MM-DD' or None
-backtest_end_date = '2023-12-31'    # Format: 'YYYY-MM-DD' or None
-
-# Moving Average Parameters
-ma_period = 50            # 50-day moving average for trend identification
-
-# Volume Confirmation Parameters
-volume_ma_period = 20     # 20-day moving average for volume
-volume_multiplier = 1.5   # Current volume must be > 1.5 * average volume
-
-# Trading Costs
-commission_per_side = 0.62  # $0.62 per side
-slippage_per_side = 0.25    # $0.25 per side
-total_cost_per_trade = (commission_per_side + slippage_per_side) * 2  # $1.74 per trade
-
-# Stop Loss Parameters
-stop_loss_points = 10  # Stop loss set 10 points away from entry price
-
-# ----------------------- End of User Parameters -----------------------
-
-# Function to parse and validate dates
-def parse_date(date_str):
-    if date_str is None:
-        return None
+def load_data(file_path):
+    """
+    Load historical data from a CSV file.
+    """
     try:
-        return pd.to_datetime(date_str)
-    except ValueError:
-        raise ValueError(f"Invalid date format: {date_str}. Use 'YYYY-MM-DD'.")
+        df = pd.read_csv(file_path)
+        # Convert 'date' column to DateTime with timezone
+        df['DateTime'] = pd.to_datetime(df['date'])
+        # Set DateTime as the index
+        df.set_index('DateTime', inplace=True)
+        # Sort the index
+        df.sort_index(inplace=True)
+        # Drop original 'date' column
+        df.drop(['date'], axis=1, inplace=True)
+        return df
+    except FileNotFoundError:
+        logger.error(f"File not found: {file_path}")
+        sys.exit(1)
+    except pd.errors.EmptyDataError:
+        logger.error("No data: The CSV file is empty.")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"An error occurred while reading the CSV: {e}")
+        sys.exit(1)
 
-# Parse start and end dates
-start_date = parse_date(backtest_start_date)
-end_date = parse_date(backtest_end_date)
+def calculate_donchian_channels(df, period):
+    """
+    Calculate Donchian Channels.
+    """
+    df['Donchian_High'] = df['high'].rolling(window=period).max()
+    df['Donchian_Low'] = df['low'].rolling(window=period).min()
+    return df
 
-# Load daily data
-daily_df = pd.read_csv(daily_data_file, parse_dates=['date'])
-daily_df.set_index('date', inplace=True)
-daily_df = daily_df.sort_index()
+def calculate_atr(df, period):
+    """
+    Calculate Average True Range (ATR).
+    """
+    df['H-L'] = df['high'] - df['low']
+    df['H-PC'] = abs(df['high'] - df['close'].shift(1))
+    df['L-PC'] = abs(df['low'] - df['close'].shift(1))
+    df['TR'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
+    df['ATR'] = df['TR'].rolling(window=period).mean()
+    df.drop(['H-L', 'H-PC', 'L-PC', 'TR'], axis=1, inplace=True)
+    return df
 
-# Ensure the DataFrame's index is timezone-naive (since daily data typically doesn't include timezone)
-if daily_df.index.tz is not None:
-    daily_df.index = daily_df.index.tz_convert(None)
+def calculate_volume_average(df, period=20):
+    """
+    Calculate the moving average of volume.
+    """
+    df['Volume_Avg'] = df['volume'].rolling(window=period).mean()
+    return df
 
-# Ensure the data is clean and properly typed
-required_daily_columns = ['open','high','low','close','volume','average','barCount','contract']
-for col in required_daily_columns:
-    if col not in daily_df.columns:
-        raise ValueError(f"Missing column '{col}' in daily data.")
-daily_df[required_daily_columns] = daily_df[required_daily_columns].apply(pd.to_numeric, errors='coerce')
-
-# Drop rows with NaN values in required columns
-daily_df.dropna(subset=required_daily_columns, inplace=True)
-
-# Apply date filters to daily data
-if start_date:
-    daily_df = daily_df[daily_df.index >= start_date]
-if end_date:
-    daily_df = daily_df[daily_df.index <= end_date]
-
-# Check if daily data is available after filtering
-if daily_df.empty:
-    raise ValueError("No daily data available for the specified date range.")
-
-# Calculate Moving Averages for Trend
-daily_df['MA'] = daily_df['close'].rolling(window=ma_period).mean()
-
-# Drop rows where moving average is not available
-daily_df.dropna(subset=['MA'], inplace=True)
-
-# Load intraday (5-minute) data
-intraday_df = pd.read_csv(intraday_data_file, parse_dates=['date'])
-intraday_df.set_index('date', inplace=True)
-intraday_df = intraday_df.sort_index()
-
-# Ensure the DataFrame's index is timezone-naive
-if intraday_df.index.tz is not None:
-    intraday_df.index = intraday_df.index.tz_convert(None)
-
-# Ensure the data is clean and properly typed
-required_intraday_columns = ['open','high','low','close','volume','average','barCount','contract']
-for col in required_intraday_columns:
-    if col not in intraday_df.columns:
-        raise ValueError(f"Missing column '{col}' in intraday data.")
-intraday_df[required_intraday_columns] = intraday_df[required_intraday_columns].apply(pd.to_numeric, errors='coerce')
-
-# Drop rows with NaN values in required columns
-intraday_df.dropna(subset=required_intraday_columns, inplace=True)
-
-# Apply date filters to intraday data
-if start_date:
-    intraday_df = intraday_df[intraday_df.index >= start_date]
-if end_date:
-    intraday_df = intraday_df[intraday_df.index <= end_date]
-
-# Check if intraday data is available after filtering
-if intraday_df.empty:
-    raise ValueError("No intraday data available for the specified date range.")
-
-# Calculate Moving Averages for Volume Confirmation
-intraday_df['Volume_MA'] = intraday_df['volume'].rolling(window=volume_ma_period).mean()
-
-# Drop rows where Volume_MA is not available
-intraday_df.dropna(subset=['Volume_MA'], inplace=True)
-
-# Initialize variables for backtest
-trades = []              # List to store trade details
-cash = initial_cash      # Starting cash
-equity = initial_cash    # Current equity
-equity_curve = []        # To store equity over time
-total_trading_days = 0
-trading_days_with_trades = 0
-
-# Iterate over each trading day starting from the second day
-for i in range(1, len(daily_df)):
-    current_day = daily_df.index[i]
-    prev_day = daily_df.index[i - 1]
-    total_trading_days += 1
-    
-    # Determine the prevailing trend
-    current_close = daily_df.loc[current_day, 'close']
-    current_ma = daily_df.loc[current_day, 'MA']
-    
-    if current_close > current_ma:
-        trend = 'Uptrend'
-    elif current_close < current_ma:
-        trend = 'Downtrend'
+def filter_sessions(df, start_date, end_date):
+    """
+    Filter data to include only RTH and within the specified date range.
+    """
+    if df.index.tz is None:
+        df = df.tz_localize('UTC')
     else:
-        trend = 'Sideways'
+        df = df.tz_convert('UTC')
     
-    # Get previous day's high and low
-    prev_high = daily_df.loc[prev_day, 'high']
-    prev_low = daily_df.loc[prev_day, 'low']
+    df_eastern = df.copy()
+    df_eastern.index = df_eastern.index.tz_convert(EASTERN)
+    mask = (df_eastern.index.date >= pd.to_datetime(start_date).date()) & \
+           (df_eastern.index.date <= pd.to_datetime(end_date).date())
+    df_eastern = df_eastern.loc[mask]
+    df_eastern = df_eastern[df_eastern.index.weekday < 5]  # Weekdays only
+    df_rth = df_eastern.between_time(SESSION_START, SESSION_END)
+    df_rth.index = df_rth.index.tz_convert('UTC')
+    return df_rth
+
+def generate_signals(df):
+    """
+    Generate buy and sell signals based on the strategy.
+    """
+    df['Position'] = 0  # 1 for Long, -1 for Short, 0 for Flat
+    df['Session'] = df.index.time
+    df['Date'] = df.index.date
+    sessions = df.groupby('Date')
     
-    # Filter intraday data for the current day
-    # Assuming 'date' in intraday data includes both date and time
-    intraday_day = intraday_df.loc[current_day.strftime('%Y-%m-%d')]
+    previous_session = None
+    for current_date, group in sessions:
+        if previous_session is not None:
+            prev_high = previous_session['high'].max()
+            prev_low = previous_session['low'].min()
+            df.loc[group.index, 'Prev_Session_High'] = prev_high
+            df.loc[group.index, 'Prev_Session_Low'] = prev_low
+        previous_session = group
     
-    # Skip if no intraday data for the current day
-    if intraday_day.empty:
-        equity_curve.append({'date': current_day, 'equity': equity})
-        continue
+    # Drop rows where previous session data is not available
+    df.dropna(subset=['Prev_Session_High', 'Prev_Session_Low'], inplace=True)
     
-    # Initialize trade variables for the day
-    direction = 0  # 1 for long, -1 for short
-    entry_price = None
-    entry_time = None
-    exit_price = None
-    exit_time = None
-    exit_reason = None  # 'Take Profit', 'Stop Loss', 'End of Day'
+    # Buy Signal
+    df['Buy_Signal'] = ((df['close'] > df['Prev_Session_High']) & 
+                        (df['volume'] > df['Volume_Avg'] * VOLUME_MULTIPLIER))
+    # Sell Signal
+    df['Sell_Signal'] = df['close'] < df['Prev_Session_Low']
     
-    # Iterate over each 5-minute bar to detect breakout and manage exit conditions
-    for timestamp, row in intraday_day.iterrows():
-        if direction == 0:
-            # Volume confirmation
-            volume_confirmed = row['volume'] > (volume_multiplier * row['Volume_MA'])
-            
-            if trend == 'Uptrend':
-                # Long breakout condition
-                if row['high'] > prev_high and volume_confirmed:
-                    direction = 1
-                    entry_price = prev_high  # Enter at breakout price
-                    entry_time = timestamp
-                    trading_days_with_trades += 1
-                    # Define Take Profit and Stop Loss
-                    take_profit = daily_df.loc[prev_day, 'high']
-                    stop_loss = entry_price - stop_loss_points
-            elif trend == 'Downtrend':
-                # Short breakout condition
-                if row['low'] < prev_low and volume_confirmed:
-                    direction = -1
-                    entry_price = prev_low  # Enter at breakout price
-                    entry_time = timestamp
-                    trading_days_with_trades += 1
-                    # Define Take Profit and Stop Loss
-                    take_profit = daily_df.loc[prev_day, 'low']
-                    stop_loss = entry_price + stop_loss_points
-            else:
-                # No clear trend; do not enter any trades
-                continue
+    return df
+
+def calculate_benchmark_return(start_date, end_date, ticker=BENCHMARK_TICKER):
+    """
+    Calculate the benchmark return for the given ticker and date range.
+    """
+    benchmark_data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+    if benchmark_data.empty:
+        logger.warning("Benchmark data is empty. Benchmark return set to 0.0")
+        return 0.0
+    benchmark_start_price = benchmark_data['Close'].iloc[0]
+    benchmark_end_price = benchmark_data['Close'].iloc[-1]
+    benchmark_return = ((benchmark_end_price - benchmark_start_price) / benchmark_start_price) * 100
+    return float(benchmark_return)
+
+# --- Backtest Execution ---
+def backtest(df):
+    capital = INITIAL_CAPITAL
+    equity_peak = INITIAL_CAPITAL
+    position = 0  # 1 for Long, -1 for Short, 0 for Flat
+    entry_price = 0
+    stop_loss = 0
+    take_profit = 0
+    trades = []
+    equity_curve = []
+    exposure_time = 0
+    total_time = len(df)
+    
+    equity_over_time = []
+    drawdowns = []
+    peak = INITIAL_CAPITAL
+    max_drawdown = 0
+    
+    for idx, row in df.iterrows():
+        # Entry
+        if position == 0:
+            if row['Buy_Signal']:
+                position = 1
+                entry_price = row['close']
+                stop_loss = entry_price - row['ATR'] * STOP_LOSS_ATR_MULTIPLIER
+                take_profit = entry_price + row['ATR'] * TAKE_PROFIT_ATR_MULTIPLIER
+                capital -= (entry_price * MULTIPLIER) + COMMISSION_PER_TRADE
+                trades.append({'Entry_Date': idx, 'Type': 'Long', 'Entry_Price': entry_price, 
+                               'Exit_Date': None, 'Exit_Price': None, 'Profit': None})
+            elif row['Sell_Signal']:
+                position = -1
+                entry_price = row['close']
+                stop_loss = entry_price + row['ATR'] * STOP_LOSS_ATR_MULTIPLIER
+                take_profit = entry_price - row['ATR'] * TAKE_PROFIT_ATR_MULTIPLIER
+                capital += (entry_price * MULTIPLIER) - COMMISSION_PER_TRADE
+                trades.append({'Entry_Date': idx, 'Type': 'Short', 'Entry_Price': entry_price, 
+                               'Exit_Date': None, 'Exit_Price': None, 'Profit': None})
+        
+        # Exit
+        elif position == 1:
+            # Long position exit conditions
+            if row['low'] <= stop_loss:
+                exit_price = stop_loss
+                profit = ((exit_price - entry_price) * MULTIPLIER) - (COMMISSION_PER_TRADE * 2)
+                capital += (exit_price * MULTIPLIER) - COMMISSION_PER_TRADE
+                trades[-1].update({'Exit_Date': idx, 'Exit_Price': exit_price, 'Profit': profit})
+                position = 0
+            elif row['high'] >= take_profit:
+                exit_price = take_profit
+                profit = ((exit_price - entry_price) * MULTIPLIER) - (COMMISSION_PER_TRADE * 2)
+                capital += (exit_price * MULTIPLIER) - COMMISSION_PER_TRADE
+                trades[-1].update({'Exit_Date': idx, 'Exit_Price': exit_price, 'Profit': profit})
+                position = 0
+                
+        elif position == -1:
+            # Short position exit conditions
+            if row['high'] >= stop_loss:
+                exit_price = stop_loss
+                profit = ((entry_price - exit_price) * MULTIPLIER) - (COMMISSION_PER_TRADE * 2)
+                capital -= (exit_price * MULTIPLIER) + COMMISSION_PER_TRADE
+                trades[-1].update({'Exit_Date': idx, 'Exit_Price': exit_price, 'Profit': profit})
+                position = 0
+            elif row['low'] <= take_profit:
+                exit_price = take_profit
+                profit = ((entry_price - exit_price) * MULTIPLIER) - (COMMISSION_PER_TRADE * 2)
+                capital -= (exit_price * MULTIPLIER) + COMMISSION_PER_TRADE
+                trades[-1].update({'Exit_Date': idx, 'Exit_Price': exit_price, 'Profit': profit})
+                position = 0
+        
+        # Track equity and drawdowns
+        if capital > equity_peak:
+            equity_peak = capital
+        if capital < peak:
+            current_drawdown = (peak - capital) / peak * 100
+            if current_drawdown > max_drawdown:
+                max_drawdown = current_drawdown
+            drawdowns.append(current_drawdown)
         else:
-            # Trade is open; check for exit conditions
-            if direction == 1:
-                # Long Position
-                if row['high'] >= take_profit:
-                    exit_price = take_profit
-                    exit_time = timestamp
-                    exit_reason = 'Take Profit'
-                elif row['low'] <= stop_loss:
-                    exit_price = stop_loss
-                    exit_time = timestamp
-                    exit_reason = 'Stop Loss'
-            elif direction == -1:
-                # Short Position
-                if row['low'] <= take_profit:
-                    exit_price = take_profit
-                    exit_time = timestamp
-                    exit_reason = 'Take Profit'
-                elif row['high'] >= stop_loss:
-                    exit_price = stop_loss
-                    exit_time = timestamp
-                    exit_reason = 'Stop Loss'
-            
-            # If exit condition met, close the trade
-            if exit_price is not None:
-                # Calculate PnL
-                pnl = (exit_price - entry_price) * direction * point_value_mes * multiplier
-                
-                # Subtract transaction costs (entry and exit)
-                pnl -= total_cost_per_trade
-                
-                # Update cash and equity
-                cash += pnl
-                equity = cash  # Positions are closed
-                
-                # Record trade
-                trades.append({
-                    'date': current_day,
-                    'direction': 'Long' if direction == 1 else 'Short',
-                    'entry_price': entry_price,
-                    'exit_price': exit_price,
-                    'pnl_mes': pnl,
-                    'entry_time': entry_time,
-                    'exit_time': exit_time,
-                    'exit_reason': exit_reason
-                })
-                
-                # Reset trade variables
-                direction = 0
-                entry_price = None
-                entry_time = None
-                exit_price = None
-                exit_time = None
-                exit_reason = None
-                break  # Exit after trade is closed
+            peak = capital
+        
+        equity_over_time.append(capital)
+        if position != 0:
+            exposure_time += 1
+        equity_curve.append({'DateTime': idx, 'Capital': capital})
     
-    # After iterating through intraday bars, check if trade is still open and needs to be closed at EOD
-    if direction != 0 and entry_price is not None:
-        # Exit at day's final close
-        exit_price = daily_df.loc[current_day, 'close']
-        exit_time = current_day
-        exit_reason = 'End of Day'
-        
-        # Calculate PnL
-        pnl = (exit_price - entry_price) * direction * point_value_mes * multiplier
-        
-        # Subtract transaction costs (entry and exit)
-        pnl -= total_cost_per_trade
-        
-        # Update cash and equity
-        cash += pnl
-        equity = cash  # Positions are closed
-        
-        # Record trade
-        trades.append({
-            'date': current_day,
-            'direction': 'Long' if direction == 1 else 'Short',
-            'entry_price': entry_price,
-            'exit_price': exit_price,
-            'pnl_mes': pnl,
-            'entry_time': entry_time,
-            'exit_time': exit_time,
-            'exit_reason': exit_reason
-        })
+    equity_df = pd.DataFrame(equity_curve)
+    equity_df.set_index('DateTime', inplace=True)
     
-    # Record equity for the day
-    equity_curve.append({'date': current_day, 'equity': equity})
+    # Drawdown duration calculations
+    drawdown_durations = []
+    in_drawdown = False
+    peak_cap = INITIAL_CAPITAL
+    duration = 0
+    for eq_val in equity_over_time:
+        if eq_val < peak_cap:
+            if not in_drawdown:
+                in_drawdown = True
+                duration = 1
+            else:
+                duration += 1
+        else:
+            if in_drawdown:
+                drawdown_durations.append(duration)
+                in_drawdown = False
+            peak_cap = eq_val
+    if in_drawdown:
+        drawdown_durations.append(duration)
+    
+    if drawdown_durations:
+        # Convert number of bars to days
+        # TIMEFRAME is '15min', 15 minutes = 0.0104167 days
+        timeframe_minutes = 15
+        max_drawdown_duration_days = max(drawdown_durations) * (timeframe_minutes / (60*24))
+        average_drawdown_duration_days = np.mean(drawdown_durations) * (timeframe_minutes / (60*24))
+    else:
+        max_drawdown_duration_days = 0
+        average_drawdown_duration_days = 0
+    
+    exposure_time_percentage = (exposure_time / total_time) * 100
+    total_return = capital - INITIAL_CAPITAL
+    total_return_percentage = (total_return / INITIAL_CAPITAL) * 100
+    duration_days = (df.index.max().date() - df.index.min().date()).days
+    if duration_days > 0:
+        annualized_return_percentage = ((capital / INITIAL_CAPITAL) ** (365.25 / duration_days) - 1) * 100
+    else:
+        annualized_return_percentage = 0.0
+    
+    # Benchmark
+    benchmark_return = calculate_benchmark_return(BACKTEST_START_DATE, BACKTEST_END_DATE)
+    benchmark_return_percentage = float(benchmark_return)
+    
+    returns = equity_df['Capital'].pct_change().dropna()
+    volatility = returns.std()
+    # Approximation: 252 trading days * (6.5 hours per day * 4 bars per hour for 15-min bars)
+    periods_per_year = 252 * (6.5 * 4)
+    volatility_annual = volatility * np.sqrt(periods_per_year) * 100
+    
+    winning_trades = [t for t in trades if t['Profit'] is not None and t['Profit'] > 0]
+    losing_trades = [t for t in trades if t['Profit'] is not None and t['Profit'] <= 0]
+    
+    gross_profit = sum(t['Profit'] for t in winning_trades)
+    gross_loss = -sum(t['Profit'] for t in losing_trades)
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.nan
+    
+    risk_free_rate = 0.0
+    if returns.std() != 0:
+        sharpe_ratio = ((returns.mean() - risk_free_rate) / returns.std()) * np.sqrt(periods_per_year)
+    else:
+        sharpe_ratio = np.nan
+    
+    downside_returns = returns[returns < 0]
+    if not downside_returns.empty and downside_returns.std() != 0:
+        sortino_ratio = ((returns.mean() - risk_free_rate) / downside_returns.std()) * np.sqrt(periods_per_year)
+    else:
+        sortino_ratio = np.nan
+    
+    if max_drawdown != 0:
+        calmar_ratio = total_return_percentage / max_drawdown
+    else:
+        calmar_ratio = np.nan
+    
+    max_drawdown_percentage = max_drawdown
+    average_drawdown_percentage = np.mean(drawdowns) if drawdowns else 0.0
+    
+    # --- Results Summary ---
+    logger.info("Backtest Completed.\n")
+    
+    print("Performance Summary:")
+    results = {
+        "Start Date": df.index.min().strftime("%Y-%m-%d"),
+        "End Date": df.index.max().strftime("%Y-%m-%d"),
+        "Exposure Time": f"{exposure_time_percentage:.2f}%",
+        "Final Account Balance": f"${capital:,.2f}",
+        "Equity Peak": f"${equity_peak:,.2f}",
+        "Total Return": f"{total_return_percentage:.2f}%",
+        "Annualized Return": f"{annualized_return_percentage:.2f}%",
+        "Benchmark Return": f"{benchmark_return_percentage:.2f}%",
+        "Volatility (Annual)": f"{volatility_annual:.2f}%",
+        "Total Trades": len(trades),
+        "Winning Trades": len(winning_trades),
+        "Losing Trades": len(losing_trades),
+        "Win Rate": f"{(len(winning_trades)/len(trades)*100) if trades else 0:.2f}%",
+        "Profit Factor": f"{profit_factor:.2f}" if not np.isnan(profit_factor) else "NaN",
+        "Sharpe Ratio": f"{sharpe_ratio:.2f}" if not np.isnan(sharpe_ratio) else "NaN",
+        "Sortino Ratio": f"{sortino_ratio:.2f}" if not np.isnan(sortino_ratio) else "NaN",
+        "Calmar Ratio": f"{calmar_ratio:.2f}" if not np.isnan(calmar_ratio) else "NaN",
+        "Max Drawdown": f"{max_drawdown_percentage:.2f}%",
+        "Average Drawdown": f"{average_drawdown_percentage:.2f}%",
+        "Max Drawdown Duration": f"{max_drawdown_duration_days:.2f} days",
+        "Average Drawdown Duration": f"{average_drawdown_duration_days:.2f} days",
+    }
+    
+    for key, value in results.items():
+        print(f"{key:25}: {value:>15}")
 
-# Create DataFrame for trades
-trades_df = pd.DataFrame(trades)
+    # Optional: Plot equity curve
+    # equity_df['Capital'].plot(title='Equity Curve')
+    # plt.show()
 
-# Create Equity Curve DataFrame
-equity_df = pd.DataFrame(equity_curve)
-equity_df.set_index('date', inplace=True)
+# --- Main Execution ---
+if __name__ == "__main__":
+    try:
+        logger.info("Loading data...")
+        df = load_data(CSV_FILE_PATH)
+        
+        logger.info("Filtering sessions...")
+        df = filter_sessions(df, BACKTEST_START_DATE, BACKTEST_END_DATE)
+        
+        # If resampling is needed (the CSV is already in 15m, so not necessary here)
+        # If your CSV is not in 15min, uncomment and adjust:
+        """
+        df = df.resample(TIMEFRAME).agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum',
+            'average': 'mean',
+            'barCount': 'sum',
+            'contract': 'first'
+        }).dropna()
+        """
 
-# Calculate Daily Returns
-equity_df['returns'] = equity_df['equity'].pct_change().fillna(0)
-
-# Calculate Cumulative Returns
-equity_df['cumulative_returns'] = (1 + equity_df['returns']).cumprod()
-
-# Performance Metrics Calculation
-
-# Start and End Dates
-actual_start_date = equity_df.index.min()
-actual_end_date = equity_df.index.max()
-
-# Exposure Time: Percentage of days with trades
-exposure_time_percentage = (trading_days_with_trades / total_trading_days) * 100 if total_trading_days > 0 else 0.0
-
-# Final Account Balance
-final_account_balance = equity_df['equity'].iloc[-1]
-
-# Equity Peak
-equity_df['equity_peak'] = equity_df['equity'].cummax()
-
-# Drawdown
-equity_df['drawdown'] = (equity_df['equity'] - equity_df['equity_peak']) / equity_df['equity_peak']
-
-# Max Drawdown
-max_drawdown = equity_df['drawdown'].min() * 100 if not equity_df['drawdown'].empty else 0.0
-
-# Average Drawdown
-average_drawdown = equity_df['drawdown'].mean() * 100 if not equity_df['drawdown'].empty else 0.0
-
-# Calculate Drawdown Durations
-drawdown = equity_df['drawdown']
-is_drawdown = drawdown < 0
-drawdown_shift = is_drawdown.shift(1, fill_value=False)
-drawdown_start = (~drawdown_shift) & is_drawdown
-drawdown_end = drawdown_shift & (~is_drawdown)
-
-drawdown_starts = equity_df.index[drawdown_start].tolist()
-drawdown_ends = equity_df.index[drawdown_end].tolist()
-
-# If a drawdown is ongoing at the end, add the last date as end
-if len(drawdown_starts) > len(drawdown_ends):
-    drawdown_ends.append(equity_df.index[-1])
-
-# Calculate durations
-drawdown_durations = []
-for start, end in zip(drawdown_starts, drawdown_ends):
-    duration = (end - start).days
-    drawdown_durations.append(duration)
-
-if drawdown_durations:
-    max_drawdown_duration_days = max(drawdown_durations)
-    average_drawdown_duration_days = sum(drawdown_durations) / len(drawdown_durations)
-else:
-    max_drawdown_duration_days = 0
-    average_drawdown_duration_days = 0
-
-# Equity Peak
-equity_peak = equity_df['equity_peak'].max()
-
-# Total Return
-total_return = (final_account_balance - initial_cash) / initial_cash * 100  # As percentage
-
-# Annualized Return
-num_years = (actual_end_date - actual_start_date).days / 365.25
-annualized_return = ((final_account_balance / initial_cash) ** (1 / num_years) - 1) * 100 if num_years > 0 else 0.0
-
-# Volatility (Annual)
-volatility = equity_df['returns'].std() * np.sqrt(252) * 100  # As percentage
-
-# Total Trades
-total_trades = len(trades_df)
-
-# Winning Trades
-winning_trades = trades_df[trades_df['pnl_mes'] > 0]
-num_winning_trades = len(winning_trades)
-
-# Losing Trades
-losing_trades = trades_df[trades_df['pnl_mes'] < 0]
-num_losing_trades = len(losing_trades)
-
-# Win Rate
-win_rate = (num_winning_trades / total_trades * 100) if total_trades > 0 else 0.0
-
-# Profit Factor
-gross_profit = trades_df['pnl_mes'][trades_df['pnl_mes'] > 0].sum()
-gross_loss = -trades_df['pnl_mes'][trades_df['pnl_mes'] < 0].sum()
-
-profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else np.inf
-
-# Sharpe Ratio (Assuming risk-free rate = 0)
-sharpe_ratio = (equity_df['returns'].mean() / equity_df['returns'].std()) * np.sqrt(252) if equity_df['returns'].std() != 0 else np.nan
-
-# Sortino Ratio (Assuming risk-free rate = 0)
-negative_returns = equity_df['returns'][equity_df['returns'] < 0]
-sortino_ratio = (equity_df['returns'].mean() / negative_returns.std()) * np.sqrt(252) if negative_returns.std() != 0 else np.nan
-
-# Calmar Ratio
-calmar_ratio = (annualized_return / abs(max_drawdown)) if max_drawdown != 0 else np.inf
-
-# Benchmark Return (Set to 0 or customize as needed)
-benchmark_return = 0.0  # Placeholder
-
-# Compile Results
-results = {
-    "Start Date": actual_start_date.strftime("%Y-%m-%d"),
-    "End Date": actual_end_date.strftime("%Y-%m-%d"),
-    "Exposure Time": f"{exposure_time_percentage:.2f}%",
-    "Final Account Balance": f"${final_account_balance:,.2f}",
-    "Equity Peak": f"${equity_peak:,.2f}",
-    "Total Return": f"{total_return:.2f}%",
-    "Annualized Return": f"{annualized_return:.2f}%",
-    "Benchmark Return": f"{benchmark_return:.2f}%",
-    "Volatility (Annual)": f"{volatility:.2f}%",
-    "Total Trades": total_trades,
-    "Winning Trades": num_winning_trades,
-    "Losing Trades": num_losing_trades,
-    "Win Rate": f"{win_rate:.2f}%",
-    "Profit Factor": f"{profit_factor:.2f}",
-    "Sharpe Ratio": f"{sharpe_ratio:.2f}" if not np.isnan(sharpe_ratio) else "nan",
-    "Sortino Ratio": f"{sortino_ratio:.2f}" if not np.isnan(sortino_ratio) else "nan",
-    "Calmar Ratio": f"{calmar_ratio:.2f}" if not np.isinf(calmar_ratio) else "inf",
-    "Max Drawdown": f"{max_drawdown:.2f}%",
-    "Average Drawdown": f"{average_drawdown:.2f}%",
-    "Max Drawdown Duration": f"{max_drawdown_duration_days:.2f} days",
-    "Average Drawdown Duration": f"{average_drawdown_duration_days:.2f} days",
-}
-
-# Print Performance Summary
-print("\nPerformance Summary:")
-print("--------------------")
-for key, value in results.items():
-    print(f"{key:25}: {value:>15}")
-
-# Optional: Plot Equity Curve and Drawdowns
-plt.figure(figsize=(14, 7))
-
-# Plot Equity Curve
-plt.subplot(2, 1, 1)
-plt.plot(equity_df.index, equity_df['equity'], label='Equity Curve')
-plt.plot(equity_df.index, equity_df['equity_peak'], label='Equity Peak', linestyle='--')
-plt.title('Equity Curve')
-plt.xlabel('Date')
-plt.ylabel('Equity ($)')
-plt.legend()
-
-# Plot Drawdowns
-plt.subplot(2, 1, 2)
-plt.fill_between(equity_df.index, equity_df['drawdown'] * 100, color='red', alpha=0.3)
-plt.title('Drawdowns')
-plt.xlabel('Date')
-plt.ylabel('Drawdown (%)')
-
-plt.tight_layout()
-plt.show()
+        logger.info("Calculating Indicators...")
+        df = calculate_donchian_channels(df, DONCHIAN_PERIOD)
+        df = calculate_atr(df, ATR_PERIOD)
+        df = calculate_volume_average(df, period=20)
+        
+        logger.info("Generating signals...")
+        df = generate_signals(df)
+        
+        logger.info("Starting backtest...")
+        backtest(df)
+        
+    except Exception as e:
+        logger.error(f"An error occurred during backtesting: {e}")

@@ -157,6 +157,7 @@ def on_order_status(trade):
             pending_order = False
 
 def place_bracket_order(action, current_price):
+    global pending_order
     if action.upper() not in ['BUY', 'SELL']:
         logger.error(f"Invalid action: {action}. Must be 'BUY' or 'SELL'.")
         return
@@ -178,27 +179,43 @@ def place_bracket_order(action, current_price):
             stopLossPrice=stop_loss_price
         )
 
-        # By default, bracketOrder sets:
-        # - parent.transmit = False
-        # - takeProfit.transmit = False
-        # - stopLoss.transmit = True
-        # This means all orders are submitted together as one OCA group and become active.
-        # The children orders (takeProfit and stopLoss) will only activate once the parent fills.
+        # Place the parent order first
+        parent_order = bracket[0]
+        parent_trade = ib.placeOrder(mes_contract, parent_order)
+        logger.info(f"Placed Parent {parent_order.orderType} Order ID {parent_order.orderId} for {parent_order.action} at {parent_order.lmtPrice}")
 
-        for order in bracket:
-            ib.placeOrder(mes_contract, order)
-            order_type = order.orderType
-            price_info = f"at {order.lmtPrice}" if hasattr(order, 'lmtPrice') else ""
-            logger.info(f"Placed {order_type} Order ID {order.orderId} for {order.action} {price_info}")
+        # Place the child orders (take-profit and stop-loss)
+        take_profit_order = bracket[1]
+        stop_loss_order = bracket[2]
 
-        # Attach event handlers
-        for order in bracket:
-            trade = ib.trades()[-1]  # Get the most recently placed trade
-            trade.filledEvent += on_trade_filled
-            trade.statusEvent += on_order_status
+        # Place Take-Profit Order
+        ib.placeOrder(mes_contract, take_profit_order)
+        logger.info(f"Placed Take-Profit {take_profit_order.orderType} Order ID {take_profit_order.orderId} for {take_profit_order.action} at {take_profit_order.lmtPrice}")
+
+        # Place Stop-Loss Order
+        ib.placeOrder(mes_contract, stop_loss_order)
+        logger.info(f"Placed Stop-Loss {stop_loss_order.orderType} Order ID {stop_loss_order.orderId} for {stop_loss_order.action} at {stop_loss_order.auxPrice}")
+
+        # Attach event handlers only to the parent trade
+        # Ensure that the parent_trade is correctly updated by waiting for IB to process the order
+        ib.waitOnUpdate(timeout=5)  # Wait for IB to process the order
+
+        # Re-fetch the parent_trade to ensure it's updated
+        for trade in ib.trades():
+            if trade.order.orderId == parent_order.orderId:
+                parent_trade = trade
+                break
+        else:
+            logger.error("Parent trade not found after placing the order.")
+            pending_order = False
+            return
+
+        # Attach event handlers to the parent_trade
+        parent_trade.filledEvent += on_trade_filled
+        parent_trade.statusEvent += on_order_status
 
         pending_order = True
-        logger.info("Bracket order placed successfully.")
+        logger.info("Bracket order placed successfully and event handlers attached.")
 
     except Exception as e:
         logger.error(f"Failed to place bracket order: {e}")
