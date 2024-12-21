@@ -179,8 +179,12 @@ def place_bracket_order(action, current_price):
             stopLossPrice=stop_loss_price
         )
 
-        # Place the parent order first
+        # Attach event handlers before placing the order
         parent_order = bracket[0]
+        parent_order.filledEvent += on_trade_filled
+        parent_order.statusEvent += on_order_status
+
+        # Place the parent order
         parent_trade = ib.placeOrder(mes_contract, parent_order)
         logger.info(f"Placed Parent {parent_order.orderType} Order ID {parent_order.orderId} for {parent_order.action} at {parent_order.lmtPrice}")
 
@@ -196,30 +200,13 @@ def place_bracket_order(action, current_price):
         ib.placeOrder(mes_contract, stop_loss_order)
         logger.info(f"Placed Stop-Loss {stop_loss_order.orderType} Order ID {stop_loss_order.orderId} for {stop_loss_order.action} at {stop_loss_order.auxPrice}")
 
-        # Attach event handlers only to the parent trade
-        # Ensure that the parent_trade is correctly updated by waiting for IB to process the order
-        ib.waitOnUpdate(timeout=5)  # Wait for IB to process the order
-
-        # Re-fetch the parent_trade to ensure it's updated
-        for trade in ib.trades():
-            if trade.order.orderId == parent_order.orderId:
-                parent_trade = trade
-                break
-        else:
-            logger.error("Parent trade not found after placing the order.")
-            pending_order = False
-            return
-
-        # Attach event handlers to the parent_trade
-        parent_trade.filledEvent += on_trade_filled
-        parent_trade.statusEvent += on_order_status
-
         pending_order = True
         logger.info("Bracket order placed successfully and event handlers attached.")
 
     except Exception as e:
         logger.error(f"Failed to place bracket order: {e}")
         pending_order = False
+
 
 def is_rth(timestamp):
     if timestamp is None:

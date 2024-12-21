@@ -144,6 +144,7 @@ def main():
         (create_es_future_contract('202406'), '20240316 23:59:59', '20240616 23:59:59'),
         (create_es_future_contract('202409'), '20240616 23:59:59', '20240916 23:59:59'),
         (create_es_future_contract('202412'), '20240916 23:59:59', '20241216 23:59:59'),
+        (create_es_future_contract('202503'), '20241216 23:59:59', '20250316 23:59:59')
     ]
 
     data_frames = []
