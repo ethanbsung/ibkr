@@ -1,4 +1,4 @@
-from ib_insync import*
+from ib_insync import *
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'  # IB Gateway/TWS host
 IB_PORT = 7497         # IB Gateway paper trading API port
@@ -10,7 +10,9 @@ print("Connecting to IBKR...")
 try:
     ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID, timeout=61)
     print("Connected to IBKR.")
-    server_version = ib.serverVersion()
+    
+    # Get and print the server version
+    server_version = ib.client.serverVersion
     print(f"IBKR Server Version: {server_version}")
 except Exception as e:
     print(f"API connection failed: {e}")
