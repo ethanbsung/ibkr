@@ -137,8 +137,9 @@ pending_order = False
 current_30min_start = None
 current_30min_bars = []
 
-def on_trade_filled(trade, fill):
+def on_trade_filled(trade):
     global position, pending_order
+    fill = trade.fills[-1]  # Get the latest fill
     logger.info(f"Trade Filled - Order ID {trade.order.orderId}: {trade.order.action} {fill.size} @ {fill.price}")
     if trade.isFilled():
         entry_price = fill.price
@@ -179,26 +180,20 @@ def place_bracket_order(action, current_price):
             stopLossPrice=stop_loss_price
         )
 
-        # Attach event handlers before placing the order
-        parent_order = bracket[0]
-        parent_order.filledEvent += on_trade_filled
-        parent_order.statusEvent += on_order_status
+        # Place the parent order and get the Trade object
+        parent_trade = ib.placeOrder(mes_contract, bracket[0])
+        logger.info(f"Placed Parent {bracket[0].orderType} Order ID {bracket[0].orderId} for {bracket[0].action} at {bracket[0].lmtPrice}")
 
-        # Place the parent order
-        parent_trade = ib.placeOrder(mes_contract, parent_order)
-        logger.info(f"Placed Parent {parent_order.orderType} Order ID {parent_order.orderId} for {parent_order.action} at {parent_order.lmtPrice}")
+        # Attach event handlers to the Trade object
+        parent_trade.filledEvent += on_trade_filled
+        parent_trade.statusEvent += on_order_status
 
-        # Place the child orders (take-profit and stop-loss)
-        take_profit_order = bracket[1]
-        stop_loss_order = bracket[2]
+        # Place Take-Profit and Stop-Loss Orders
+        take_profit_trade = ib.placeOrder(mes_contract, bracket[1])
+        logger.info(f"Placed Take-Profit {bracket[1].orderType} Order ID {bracket[1].orderId} for {bracket[1].action} at {bracket[1].lmtPrice}")
 
-        # Place Take-Profit Order
-        ib.placeOrder(mes_contract, take_profit_order)
-        logger.info(f"Placed Take-Profit {take_profit_order.orderType} Order ID {take_profit_order.orderId} for {take_profit_order.action} at {take_profit_order.lmtPrice}")
-
-        # Place Stop-Loss Order
-        ib.placeOrder(mes_contract, stop_loss_order)
-        logger.info(f"Placed Stop-Loss {stop_loss_order.orderType} Order ID {stop_loss_order.orderId} for {stop_loss_order.action} at {stop_loss_order.auxPrice}")
+        stop_loss_trade = ib.placeOrder(mes_contract, bracket[2])
+        logger.info(f"Placed Stop-Loss {bracket[2].orderType} Order ID {bracket[2].orderId} for {bracket[2].action} at {bracket[2].auxPrice}")
 
         pending_order = True
         logger.info("Bracket order placed successfully and event handlers attached.")

@@ -1,6 +1,6 @@
-import sys
-import logging
 from ib_insync import *
+import logging
+import sys
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host
@@ -34,36 +34,24 @@ except Exception as e:
     logger.error(f"Failed to connect to IBKR: {e}")
     sys.exit(1)
 
-# --- Define and Qualify Contract ---
-mes_contract = Future(
-    symbol=EXEC_SYMBOL,
-    lastTradeDateOrContractMonth=EXEC_EXPIRY,
-    exchange=EXEC_EXCHANGE,
-    currency=CURRENCY
-)
+# --- Define Contract ---
+mes_contract = Future(symbol=EXEC_SYMBOL, lastTradeDateOrContractMonth=EXEC_EXPIRY, exchange=EXEC_EXCHANGE, currency=CURRENCY)
 
 try:
-    qualified_contracts = ib.qualifyContracts(mes_contract)
-    mes_contract = qualified_contracts[0]
+    mes_contract = ib.qualifyContracts(mes_contract)[0]
     logger.info(f"Qualified MES Contract: {mes_contract}")
 except Exception as e:
-    logger.error(f"Error qualifying MES contract: {e}")
+    logger.error(f"Error qualifying contract: {e}")
     ib.disconnect()
     sys.exit(1)
 
 # --- Event Handlers ---
-def on_trade_filled(trade, fill):
+def on_trade_filled(trade):
+    fill = trade.fills[-1]  # Get the latest fill
     logger.info(f"Trade Filled - Order ID {trade.order.orderId}: {trade.order.action} {fill.size} @ {fill.price}")
-    if trade.isFilled():
-        entry_price = fill.price
-        action = trade.order.action.upper()
-        position_type = 'LONG' if action == 'BUY' else 'SHORT'
-        logger.info(f"Entered {position_type} position at {entry_price}")
 
-def on_order_status(trade, fill):
+def on_order_status(trade):
     logger.info(f"Trade Status Update - Order ID {trade.order.orderId}: {trade.orderStatus.status}")
-    if trade.orderStatus.status in ('Cancelled', 'Inactive'):
-        logger.info(f"Order ID {trade.order.orderId} has been {trade.orderStatus.status.lower()}.")
 
 # --- Place Bracket Order ---
 def place_bracket_order(action, current_price):
@@ -71,6 +59,7 @@ def place_bracket_order(action, current_price):
         logger.error(f"Invalid action: {action}. Must be 'BUY' or 'SELL'.")
         return
 
+    # Define take-profit and stop-loss prices
     if action.upper() == 'BUY':
         take_profit_price = current_price + TAKE_PROFIT_DISTANCE
         stop_loss_price = current_price - STOP_LOSS_DISTANCE
@@ -79,52 +68,45 @@ def place_bracket_order(action, current_price):
         stop_loss_price = current_price + STOP_LOSS_DISTANCE
 
     try:
-        # Create a bracket order
+        # Create the bracket order
         bracket = ib.bracketOrder(
             action=action.upper(),
             quantity=POSITION_SIZE,
-            limitPrice=current_price,  # Parent order price; using market order instead
+            limitPrice=current_price,      # Parent is a limit order at current_price
             takeProfitPrice=take_profit_price,
             stopLossPrice=stop_loss_price
         )
 
-        # Modify parent order to be a Market Order
-        bracket[0].orderType = 'MKT'
-        bracket[0].transmit = False  # Transmit all together
-
-        bracket[1].transmit = False
-        bracket[2].transmit = True  # Transmit the last order to send all
-
-        # Place all orders together
-        for order in bracket:
-            ib.placeOrder(mes_contract, order)
-            logger.info(f"Placed {order.orderType} Order ID {order.orderId} for {order.action} at {order.lmtPrice if hasattr(order, 'lmtPrice') else order.auxPrice}")
+        # Place the parent order and get the Trade object
+        parent_trade = ib.placeOrder(mes_contract, bracket[0])
+        logger.info(f"Placed Parent {bracket[0].orderType} Order ID {bracket[0].orderId} for {bracket[0].action} at {bracket[0].lmtPrice}")
 
         # Attach event handlers
-        for order in bracket:
-            trade = ib.trades()[-1]  # Get the most recently placed trade
-            trade.filledEvent += on_trade_filled
-            trade.statusEvent += on_order_status
+        parent_trade.filledEvent += on_trade_filled
+        parent_trade.statusEvent += on_order_status
+
+        # Place the child orders (take-profit and stop-loss)
+        take_profit_trade = ib.placeOrder(mes_contract, bracket[1])
+        stop_loss_trade = ib.placeOrder(mes_contract, bracket[2])
 
         logger.info("Bracket order placed successfully.")
 
     except Exception as e:
         logger.error(f"Failed to place bracket order: {e}")
 
-# --- Execute Test Order ---
-if __name__ == "__main__":
-    try:
-        # Example parameters for testing
-        test_action = 'BUY'  # or 'SELL'
-        test_current_price = 5976  # Replace with a realistic test price
+# --- Test Bracket Order Placement ---
+current_price = 6093  # Example current price
+action = 'SELL'         # Example action: 'BUY' or 'SELL'
 
-        logger.info(f"Submitting test {test_action} order at price {test_current_price}...")
-        place_bracket_order(test_action, test_current_price)
+logger.info(f"Testing bracket order placement: Action={action}, Current Price={current_price}")
+place_bracket_order(action, current_price)
 
-        logger.info("Starting event loop to monitor order status...")
-        ib.run()
-    except KeyboardInterrupt:
-        logger.info("Interrupt received, shutting down...")
-    finally:
-        ib.disconnect()
-        logger.info("Disconnected from IBKR.")
+# --- Start Event Loop ---
+logger.info("Starting event loop...")
+try:
+    ib.run()
+except KeyboardInterrupt:
+    logger.info("Interrupt received, shutting down...")
+finally:
+    ib.disconnect()
+    logger.info("Disconnected from IBKR.")
