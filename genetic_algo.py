@@ -4,36 +4,36 @@ import random
 import os
 import time
 from tqdm import tqdm  # For progress bars
-from numba import njit, prange
+import multiprocessing as mp
+from functools import partial
+from numba import njit
 
-# Define the list of timeframes you want to test, including '1m'
-TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h']
+# Define the timeframe you want to test
+TIMEFRAME = '1m'  # Only using 1-minute data for precise crossover detection
 
 # Load data function with correct columns
-def load_data(timeframes):
+def load_data(timeframe):
     """
-    Load CSV data for each specified timeframe.
+    Load CSV data for the specified timeframe.
 
     Parameters:
-    - timeframes: List of timeframe strings (e.g., ['1m', '5m']).
+    - timeframe: Timeframe string (e.g., '1m').
 
     Returns:
-    - data_dict: Dictionary mapping timeframe to its DataFrame.
+    - data: DataFrame containing the loaded data.
     """
-    data_dict = {}
-    for timeframe in timeframes:
-        file_name = f'es_{timeframe}_data.csv'
-        if os.path.exists(file_name):
-            data = pd.read_csv(file_name, parse_dates=['date'])
-            data.rename(columns={'date': 'datetime'}, inplace=True)
-            data['returns'] = data['close'].pct_change().fillna(0)
-            data_dict[timeframe] = data[['datetime', 'open', 'high', 'low', 'close', 'volume', 'returns']]
-            print(f"Loaded data for timeframe: {timeframe}")
-        else:
-            error_msg = f"File {file_name} not found."
-            print(error_msg)
-            raise FileNotFoundError(error_msg)
-    return data_dict
+    file_name = f'es_{timeframe}_data.csv'
+    if os.path.exists(file_name):
+        data = pd.read_csv(file_name, parse_dates=['date'])
+        data.rename(columns={'date': 'datetime'}, inplace=True)
+        data['returns'] = data['close'].pct_change().fillna(0)
+        data = data[['datetime', 'open', 'high', 'low', 'close', 'volume', 'returns']]
+        print(f"Loaded data for timeframe: {timeframe}")
+        return data
+    else:
+        error_msg = f"File {file_name} not found."
+        print(error_msg)
+        raise FileNotFoundError(error_msg)
 
 # Generate a random chromosome ensuring logical parameter constraints
 def generate_chromosome():
@@ -43,10 +43,11 @@ def generate_chromosome():
     Returns:
     - chromosome: Dictionary containing strategy parameters.
     """
-    short_ema = random.randint(5, 50)
-    long_ema = random.randint(short_ema + 1, 200)  # Ensure long_ema > short_ema
-    stop_loss = round(random.uniform(2, 25), 1)     # Stop loss in points
-    take_profit = round(random.uniform(4, 50), 1)  # Take profit in points
+    short_ema = random.choice(range(5, 51, 5))  # Generate multiples of 5 between 5 and 50
+    long_ema = random.choice(range(short_ema + 5, 205, 5))  # Ensure long_ema > short_ema
+
+    stop_loss = random.randint(2, 25)     # Stop loss in points as a whole number
+    take_profit = random.randint(2, 50)  # Take profit in points as a whole number
     return {
         'short_ema': short_ema,
         'long_ema': long_ema,
@@ -73,26 +74,25 @@ def calculate_ema(prices, span):
         ema[i] = alpha * prices[i] + (1.0 - alpha) * ema[i - 1]
     return ema
 
-@njit
-def detect_crossover(close_prices, short_span, long_span):
+def detect_crossover(prices, short_span, long_span):
     """
-    Detect EMA crossovers in 1-minute data based on higher timeframe EMAs.
+    Detect EMA crossovers on 1-minute data based on EMA spans.
 
     Parameters:
-    - close_prices: Numpy array of 1-minute closing prices.
-    - short_span: Short EMA span for higher timeframe.
-    - long_span: Long EMA span for higher timeframe.
+    - prices: Numpy array of 1-minute closing prices.
+    - short_span: Short EMA span.
+    - long_span: Long EMA span.
 
     Returns:
     - signals: Numpy array of signals (1 for bullish, -1 for bearish, 0 otherwise).
     """
-    ema_short = calculate_ema(close_prices, short_span)
-    ema_long = calculate_ema(close_prices, long_span)
-    
+    ema_short = calculate_ema(prices, short_span)
+    ema_long = calculate_ema(prices, long_span)
+
     # Initialize signals array
-    signals = np.zeros(len(close_prices), dtype=np.int8)
-    
-    for i in range(1, len(close_prices)):
+    signals = np.zeros(len(prices), dtype=np.int8)
+
+    for i in range(1, len(prices)):
         if ema_short[i-1] <= ema_long[i-1] and ema_short[i] > ema_long[i]:
             signals[i] = 1  # Bullish Crossover
         elif ema_short[i-1] >= ema_long[i-1] and ema_short[i] < ema_long[i]:
@@ -100,13 +100,13 @@ def detect_crossover(close_prices, short_span, long_span):
     return signals
 
 @njit
-def backtest_single_timeframe_signal(close_prices, signals, stop_loss, take_profit, multiplier, initial_balance):
+def backtest_strategy(prices, signals, stop_loss, take_profit, multiplier, initial_balance):
     """
-    Backtest a single higher timeframe using pre-mapped signals.
+    Backtest the strategy based on EMA crossover signals.
 
     Parameters:
-    - close_prices: Numpy array of closing prices for the higher timeframe.
-    - signals: Numpy array of signals (1, -1, 0) for each candle.
+    - prices: Numpy array of 1-minute closing prices.
+    - signals: Numpy array of signals (1, -1, 0) for each minute.
     - stop_loss: Stop loss in points.
     - take_profit: Take profit in points.
     - multiplier: PnL multiplier per point movement.
@@ -125,14 +125,14 @@ def backtest_single_timeframe_signal(close_prices, signals, stop_loss, take_prof
     max_drawdown = 0.0
     wins = 0
     total_trades = 0
-    
+
     pnl_sum = 0.0
     pnl_sq_sum = 0.0
-    
-    for i in range(len(close_prices)):
+
+    for i in range(len(prices)):
         signal = signals[i]
-        price = close_prices[i]
-        
+        price = prices[i]
+
         # Check for existing position
         if position != 0:
             if position == 1:
@@ -203,7 +203,7 @@ def backtest_single_timeframe_signal(close_prices, signals, stop_loss, take_prof
                     if drawdown > max_drawdown:
                         max_drawdown = drawdown
                     continue
-        
+
         # Open new position based on signal
         if signal == 1 and position == 0:
             position = 1
@@ -244,52 +244,31 @@ def backtest_single_timeframe_signal(close_prices, signals, stop_loss, take_prof
     # Aggregate metrics
     return total_return_pct, sharpe_ratio, win_rate, max_drawdown
 
-@njit(parallel=True)
-def backtest_strategy_multitimeframe_numba(close_prices_list, chromosomes_np, signals_list, multiplier, initial_balance, num_timeframes):
+def evaluate_chromosome(chromosome, prices, initial_balance, multiplier):
     """
-    Backtest multiple chromosomes across multiple timeframes using pre-mapped signals.
+    Evaluate a single chromosome by detecting crossovers and backtesting the strategy.
 
     Parameters:
-    - close_prices_list: List of Numpy arrays containing close prices for each timeframe.
-    - chromosomes_np: Structured Numpy array of chromosome parameters.
-    - signals_list: List of Numpy arrays containing signals for each timeframe.
-    - multiplier: PnL multiplier per point movement.
+    - chromosome: Dictionary containing strategy parameters.
+    - prices: Numpy array of 1-minute closing prices.
     - initial_balance: Starting capital.
-    - num_timeframes: Number of higher timeframes.
+    - multiplier: PnL multiplier per point movement.
 
     Returns:
-    - results: Numpy array of shape (chromosomes, 4) containing performance metrics.
+    - metrics: Tuple containing (total_return_pct, sharpe_ratio, win_rate, max_drawdown).
     """
-    results = np.zeros((len(chromosomes_np), 4))  # Columns: total_return_pct, sharpe_ratio, win_rate, max_drawdown_pct
-    
-    for c in prange(len(chromosomes_np)):
-        total_return = 0.0
-        sharpe = 0.0
-        win_rate = 0.0
-        max_drawdown = 0.0
-        
-        for t in range(1, num_timeframes):  # Start from index 1 to skip '1m'
-            close_prices = close_prices_list[t]
-            signals = signals_list[t]
-            stop_loss = chromosomes_np['stop_loss'][c]
-            take_profit = chromosomes_np['take_profit'][c]
-            
-            ret = backtest_single_timeframe_signal(close_prices, signals, stop_loss, take_profit, multiplier, initial_balance)
-            
-            total_return += ret[0]
-            sharpe += ret[1]
-            win_rate += ret[2]
-            max_drawdown += ret[3]
-        
-        # Average metrics across timeframes
-        results[c, 0] = total_return / (num_timeframes - 1)
-        results[c, 1] = sharpe / (num_timeframes - 1)
-        results[c, 2] = win_rate / (num_timeframes - 1)
-        results[c, 3] = max_drawdown / (num_timeframes - 1)
-    
-    return results
+    short_span = chromosome['short_ema']
+    long_span = chromosome['long_ema']
+    stop_loss = chromosome['stop_loss']
+    take_profit = chromosome['take_profit']
 
-# Tournament selection based on prioritized metrics
+    # Detect crossover signals for this chromosome
+    signals = detect_crossover(prices, short_span, long_span)
+
+    # Backtest the strategy
+    metrics = backtest_strategy(prices, signals, stop_loss, take_profit, multiplier, initial_balance)
+    return metrics
+
 def tournament_selection(population, fitness_scores, tournament_size=3):
     """
     Perform tournament selection on the population based on fitness scores.
@@ -316,7 +295,6 @@ def tournament_selection(population, fitness_scores, tournament_size=3):
         selected.append(winner[0])
     return selected
 
-# Crossover two parents to produce two children
 def crossover(parent1, parent2):
     """
     Perform crossover between two parent chromosomes to produce two children.
@@ -330,12 +308,24 @@ def crossover(parent1, parent2):
     - child2: Second child chromosome (dict).
     """
     child1, child2 = parent1.copy(), parent2.copy()
-    for key in parent1.keys():
+    
+    # Swap EMAs with 50% probability
+    if random.random() < 0.5:
+        child1['short_ema'], child2['short_ema'] = child2['short_ema'], child1['short_ema']
+        child1['long_ema'], child2['long_ema'] = child2['long_ema'], child1['long_ema']
+    
+    # Swap other genes independently
+    for key in ['stop_loss', 'take_profit']:
         if random.random() < 0.5:
-            child1[key], child2[key] = child2[key], parent1[key]
+            child1[key], child2[key] = child2[key], child1[key]
+    
+    # Ensure long_ema > short_ema
+    for child in [child1, child2]:
+        if child['long_ema'] <= child['short_ema']:
+            child['long_ema'] = child['short_ema'] + 5  # Adjust to maintain constraint
+    
     return child1, child2
 
-# Mutate a chromosome
 def mutate(chromosome, mutation_rate=0.1):
     """
     Mutate a chromosome with a given mutation rate.
@@ -348,125 +338,54 @@ def mutate(chromosome, mutation_rate=0.1):
     - mutated_chromosome: Mutated chromosome (dict).
     """
     if random.random() < mutation_rate:
-        chromosome['short_ema'] = random.randint(5, 50)
+        chromosome['short_ema'] = random.choice(range(5, 51, 5))
+        # After mutating short_ema, ensure long_ema > short_ema
+        chromosome['long_ema'] = random.choice(range(chromosome['short_ema'] + 5, 205, 5))
     if random.random() < mutation_rate:
-        chromosome['long_ema'] = random.randint(chromosome['short_ema'] + 1, 200)
+        chromosome['long_ema'] = random.choice(range(chromosome['short_ema'] + 5, 205, 5))
     if random.random() < mutation_rate:
-        chromosome['stop_loss'] = round(random.uniform(2, 25), 2)
+        chromosome['stop_loss'] = random.randint(2, 25)  # As whole number
     if random.random() < mutation_rate:
-        chromosome['take_profit'] = round(random.uniform(4, 50), 2)
+        chromosome['take_profit'] = random.randint(2, 50)  # As whole number
     return chromosome
-
-def map_signals_to_higher_timeframes(data_dict, crossover_signals_1m):
-    """
-    Map 1-minute EMA crossover signals to higher timeframes.
-
-    Parameters:
-    - data_dict: Dictionary containing DataFrames for each timeframe.
-    - crossover_signals_1m: Numpy array of signals from 1-minute data.
-
-    Returns:
-    - signals_list: List of Numpy arrays containing signals for each timeframe, ordered as TIMEFRAMES.
-    """
-    signals_list = []
-    one_min_df = data_dict['1m'].copy()
-    one_min_df['crossover_signal'] = crossover_signals_1m
-    one_min_df['datetime'] = pd.to_datetime(one_min_df['datetime'])
-    
-    for timeframe in TIMEFRAMES:
-        if timeframe == '1m':
-            # 1-minute signals are directly used
-            signals = one_min_df['crossover_signal'].values
-            signals_list.append(signals)
-            continue
-        
-        higher_tf_df = data_dict[timeframe].copy()
-        higher_tf_df['datetime'] = pd.to_datetime(higher_tf_df['datetime'])
-        
-        # Initialize signal array
-        signals = np.zeros(len(higher_tf_df), dtype=np.int8)
-        
-        # Iterate over higher timeframe candles
-        for i in range(len(higher_tf_df)):
-            start_time = higher_tf_df.at[i, 'datetime']
-            # Calculate end_time based on timeframe
-            if timeframe.endswith('m'):
-                minutes = int(timeframe.rstrip('m'))
-                end_time = start_time + pd.Timedelta(minutes=minutes)
-            elif timeframe.endswith('h'):
-                hours = int(timeframe.rstrip('h'))
-                end_time = start_time + pd.Timedelta(hours=hours)
-            else:
-                raise ValueError(f"Unsupported timeframe: {timeframe}")
-            
-            # Find 1-minute signals within this higher timeframe period
-            mask = (one_min_df['datetime'] >= start_time) & (one_min_df['datetime'] < end_time)
-            if mask.any():
-                # Assign the first signal occurrence within the period
-                first_signal = one_min_df.loc[mask, 'crossover_signal'].values[0]
-                signals[i] = first_signal
-            else:
-                signals[i] = 0  # No signal
-        
-        signals_list.append(signals)
-    
-    return signals_list
 
 # Main execution
 if __name__ == "__main__":
     try:
         start_time = time.time()
-        # Load data for all specified timeframes
+        # Load data for the specified timeframe
         print("Loading data...")
-        data_dict = load_data(TIMEFRAMES)
+        data = load_data(TIMEFRAME)
         print("Data loaded successfully.")
 
+        # Validate data
+        if data.isnull().values.any():
+            print("Data contains missing values. Dropping missing data...")
+            data = data.dropna()
+
         # Extract 1-minute data
-        one_min_df = data_dict['1m']
-        close_prices_1m = one_min_df['close'].values.astype(np.float64)
-        # Example spans; these will be optimized by the genetic algorithm
-        short_span_1m = 10  # Short EMA span for higher timeframe
-        long_span_1m = 50   # Long EMA span for higher timeframe
-
-        # Detect EMA crossovers on 1-minute data
-        print("Detecting EMA crossovers on 1-minute data...")
-        crossover_signals_1m = detect_crossover(close_prices_1m, short_span_1m, long_span_1m)
-        print("Crossover detection completed.")
-
-        # Map 1-minute signals to higher timeframes
-        print("Mapping 1-minute signals to higher timeframes...")
-        signals_list = map_signals_to_higher_timeframes(data_dict, crossover_signals_1m)
-        print("Signal mapping completed.")
+        close_prices = data['close'].values.astype(np.float64)
+        datetime_series = data['datetime'].values  # For potential future use
 
         # Genetic Algorithm parameters
-        population_size = 500  # Adjusted population size for performance
+        population_size = 1000  # Adjusted population size for performance
         generations = 100       # Number of generations
-        elitism_size = 50       # Number of top strategies to carry over
+        elitism_size = 100      # Number of top strategies to carry over
         mutation_rate = 0.2     # Mutation probability per gene
         multiplier = 5          # PnL multiplier per point movement
         initial_balance = 5000  # Starting capital
-        num_timeframes = len(TIMEFRAMES)
 
         # Initialize population
         print("Initializing population...")
         population = [generate_chromosome() for _ in range(population_size)]
         print(f"Initial population of {population_size} chromosomes generated.")
 
-        # Convert population to structured Numpy array for Numba
-        chromosomes_np = np.empty(population_size, dtype=np.dtype([
-            ('short_ema', np.int32),
-            ('long_ema', np.int32),
-            ('stop_loss', np.float64),
-            ('take_profit', np.float64)
-        ]))
-        for i, chrom in enumerate(population):
-            chromosomes_np['short_ema'][i] = chrom['short_ema']
-            chromosomes_np['long_ema'][i] = chrom['long_ema']
-            chromosomes_np['stop_loss'][i] = chrom['stop_loss']
-            chromosomes_np['take_profit'][i] = chrom['take_profit']
-        
         # Track best strategies
         best_strategies = []
+
+        # Prepare partial function for multiprocessing
+        evaluate_func = partial(evaluate_chromosome, prices=close_prices,
+                                initial_balance=initial_balance, multiplier=multiplier)
 
         # Initialize tqdm progress bar for generations
         with tqdm(total=generations, desc="Generations", unit="gen") as pbar:
@@ -476,49 +395,49 @@ if __name__ == "__main__":
 
                 print(f"\nGeneration {generation + 1}/{generations}")
 
-                # Run the Numba backtest function
-                metrics = backtest_strategy_multitimeframe_numba(
-                    close_prices_list=[data_dict[tf]['close'].values.astype(np.float64) for tf in TIMEFRAMES],
-                    chromosomes_np=chromosomes_np,
-                    signals_list=signals_list,
-                    multiplier=multiplier,
-                    initial_balance=initial_balance,
-                    num_timeframes=num_timeframes
-                )
+                # Initialize multiprocessing pool
+                with mp.Pool(processes=mp.cpu_count()) as pool:
+                    # Initialize inner progress bar for chromosome evaluations
+                    with tqdm(total=population_size, desc="Evaluating Chromosomes", leave=False, unit="chr") as inner_pbar:
+                        # Map chromosomes to the evaluation function
+                        results = []
+                        for result in pool.imap(evaluate_func, population):
+                            results.append(result)
+                            inner_pbar.update(1)
 
-                # Extract metrics into DataFrame
-                results = pd.DataFrame(metrics, columns=['total_return_pct', 'sharpe_ratio', 'win_rate', 'max_drawdown_pct'])
-                results['short_ema'] = chromosomes_np['short_ema']
-                results['long_ema'] = chromosomes_np['long_ema']
-                results['stop_loss'] = chromosomes_np['stop_loss']
-                results['take_profit'] = chromosomes_np['take_profit']
+                # Convert results to DataFrame for easier handling
+                results_df = pd.DataFrame(results, columns=['total_return_pct', 'sharpe_ratio', 'win_rate', 'max_drawdown'])
 
-                # Calculate additional metrics for progress tracking
-                avg_sharpe = results['sharpe_ratio'].mean()
-                avg_return = results['total_return_pct'].mean()
-                avg_win_rate = results['win_rate'].mean()
-                avg_drawdown = results['max_drawdown_pct'].mean()
-
-                max_sharpe = results['sharpe_ratio'].max()
-                max_return = results['total_return_pct'].max()
-                max_win_rate = results['win_rate'].max()
-                min_drawdown = results['max_drawdown_pct'].min()
+                # Combine population with results
+                population_df = pd.DataFrame(population)
+                combined = pd.concat([population_df, results_df], axis=1)
 
                 # Sort by prioritized metrics: Sharpe Ratio (desc), Total Return (desc), Win Rate (desc), Max Drawdown (asc)
-                results_sorted = results.sort_values(
-                    by=['sharpe_ratio', 'total_return_pct', 'win_rate', 'max_drawdown_pct'],
+                combined_sorted = combined.sort_values(
+                    by=['sharpe_ratio', 'total_return_pct', 'win_rate', 'max_drawdown'],
                     ascending=[False, False, False, True]
                 ).reset_index(drop=True)
 
                 # Save top strategies from this generation
-                top_generation = results_sorted.head(10)
+                top_generation = combined_sorted.head(elitism_size)
                 best_strategies.append(top_generation)
 
                 # Display top 5 strategies
                 print("Top 5 strategies this generation:")
-                print(top_generation[['sharpe_ratio', 'total_return_pct', 'win_rate', 'max_drawdown_pct']].head(5))
+                print(top_generation[['short_ema', 'long_ema', 'stop_loss', 'take_profit',
+                                      'sharpe_ratio', 'total_return_pct', 'win_rate', 'max_drawdown']].head(5))
 
                 # Display average and best metrics
+                avg_sharpe = combined_sorted['sharpe_ratio'].mean()
+                avg_return = combined_sorted['total_return_pct'].mean()
+                avg_win_rate = combined_sorted['win_rate'].mean()
+                avg_drawdown = combined_sorted['max_drawdown'].mean()
+
+                max_sharpe = combined_sorted['sharpe_ratio'].max()
+                max_return = combined_sorted['total_return_pct'].max()
+                max_win_rate = combined_sorted['win_rate'].max()
+                min_drawdown = combined_sorted['max_drawdown'].min()
+
                 print(f"Average Sharpe Ratio: {avg_sharpe:.4f}")
                 print(f"Average Total Return: {avg_return:.2f}%")
                 print(f"Average Win Rate: {avg_win_rate:.2f}")
@@ -529,12 +448,15 @@ if __name__ == "__main__":
                 print(f"Best (Min) Max Drawdown: {min_drawdown:.2f}%")
 
                 # Elitism: carry forward top strategies
-                elites = results_sorted.head(elitism_size)[[
-                    'short_ema', 'long_ema', 'stop_loss', 'take_profit'
-                ]].to_dict('records')
+                elites = top_generation[['short_ema', 'long_ema', 'stop_loss', 'take_profit']].to_dict('records')
 
                 # Selection: Tournament selection based on prioritized metrics
-                selected = tournament_selection(population, metrics.tolist())
+                # Prepare fitness_scores as list of tuples: (total_return_pct, sharpe_ratio, win_rate, max_drawdown)
+                fitness_scores = list(zip(combined_sorted['total_return_pct'],
+                                          combined_sorted['sharpe_ratio'],
+                                          combined_sorted['win_rate'],
+                                          combined_sorted['max_drawdown']))
+                selected = tournament_selection(population, fitness_scores)
 
                 # Crossover & Mutation to create new population
                 next_population = elites.copy()
@@ -547,22 +469,6 @@ if __name__ == "__main__":
 
                 # Ensure population size
                 population = next_population[:population_size]
-
-                # Update chromosomes_np
-                for i, chrom in enumerate(population):
-                    chromosomes_np['short_ema'][i] = chrom['short_ema']
-                    chromosomes_np['long_ema'][i] = chrom['long_ema']
-                    chromosomes_np['stop_loss'][i] = chrom['stop_loss']
-                    chromosomes_np['take_profit'][i] = chrom['take_profit']
-
-                # Save progress periodically
-                if (generation + 1) % 10 == 0:
-                    intermediate_best = pd.concat(best_strategies).sort_values(
-                        by=['sharpe_ratio', 'total_return_pct', 'win_rate', 'max_drawdown_pct'],
-                        ascending=[False, False, False, True]
-                    ).drop_duplicates().reset_index(drop=True)
-                    intermediate_best.to_csv(f'best_strategies_gen_{generation + 1}.csv', index=False)
-                    print(f"Intermediate best strategies saved to 'best_strategies_gen_{generation + 1}.csv'")
 
                 # Update the progress bar
                 pbar.update(1)
@@ -580,7 +486,7 @@ if __name__ == "__main__":
     try:
         # After all generations, compile the best strategies
         all_best = pd.concat(best_strategies).sort_values(
-            by=['sharpe_ratio', 'total_return_pct', 'win_rate', 'max_drawdown_pct'],
+            by=['sharpe_ratio', 'total_return_pct', 'win_rate', 'max_drawdown'],
             ascending=[False, False, False, True]
         ).drop_duplicates().reset_index(drop=True)
         top_overall = all_best.head(100)  # Top 100 strategies
@@ -588,11 +494,19 @@ if __name__ == "__main__":
         print("\nTop 100 Overall Strategies:")
         print(top_overall[['short_ema', 'long_ema', 'stop_loss', 'take_profit',
                            'sharpe_ratio', 'total_return_pct',
-                           'win_rate', 'max_drawdown_pct']])
+                           'win_rate', 'max_drawdown']])
+
+        # Add timeframe information
+        top_overall['timeframe'] = TIMEFRAME
+
+        # Reorder columns to include timeframe
+        top_overall = top_overall[['timeframe', 'short_ema', 'long_ema', 'stop_loss', 'take_profit',
+                                   'sharpe_ratio', 'total_return_pct',
+                                   'win_rate', 'max_drawdown']]
 
         # Save the best strategies to a CSV file
-        top_overall.to_csv('best_trading_strategies_multitimeframe_ema.csv', index=False)
-        print("Best strategies saved to 'best_trading_strategies_multitimeframe_ema.csv'")
+        top_overall.to_csv('best_trading_strategies_1m_ema.csv', index=False)
+        print("Best strategies saved to 'best_trading_strategies_1m_ema.csv'")
     except Exception as ex:
         print(f"An error occurred while compiling best strategies: {ex}")
 
