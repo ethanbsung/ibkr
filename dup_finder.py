@@ -2,7 +2,7 @@ import pandas as pd
 import os
 
 # List of CSV files to check
-csv_files = ['es_15m_data.csv']
+csv_files = ['es_4h_data.csv']
 
 # Function to load, check, and remove duplicates
 def remove_duplicates(csv_file):
@@ -10,10 +10,10 @@ def remove_duplicates(csv_file):
         # Load CSV
         df = pd.read_csv(
             csv_file,
-            parse_dates=['date'],
+            parse_dates=['Time'],
             date_format="%Y-%m-%d %H:%M:%S%z"
         )
-        df.set_index('date', inplace=True)
+        df.set_index('Time', inplace=True)
 
         # Find duplicates
         duplicates = df[df.index.duplicated(keep=False)]

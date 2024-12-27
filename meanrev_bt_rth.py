@@ -52,24 +52,20 @@ def filter_rth(df):
     
     # Ensure the index is timezone-aware
     if df.index.tz is None:
-        # Assume the data is in UTC if no timezone is set
-        df = df.tz_localize('UTC')
+        # Assume the data is in US/Eastern if no timezone is set
+        df = df.tz_localize(eastern)
     else:
-        # Convert to UTC to standardize
-        df = df.tz_convert('UTC')
-    
-    # Convert index to US/Eastern timezone for filtering
-    df_eastern = df.copy()
-    df_eastern.index = df_eastern.index.tz_convert(eastern)
+        # Convert to US/Eastern to standardize
+        df = df.tz_convert(eastern)
     
     # Filter for weekdays (Monday=0 to Friday=4)
-    df_eastern = df_eastern[df_eastern.index.weekday < 5]
+    df_eastern = df[df.index.weekday < 5]
     
     # Filter for RTH hours: 09:30 to 16:00
     df_rth = df_eastern.between_time('09:30', '16:00')
     
     # Convert back to UTC for consistency in further processing
-    df_rth.index = df_rth.index.tz_convert('UTC')
+    df_rth = df_rth.tz_convert('UTC')
     
     return df_rth
 
@@ -85,23 +81,69 @@ def load_data(csv_file):
         pd.DataFrame: Loaded and indexed DataFrame.
     """
     try:
+        # Define converters for specific columns
+        converters = {
+            '%Chg': lambda x: float(x.strip('%')) if isinstance(x, str) else np.nan
+        }
+        
         df = pd.read_csv(
             csv_file,
             dtype={
-                'open': float,
-                'high': float,
-                'low': float,
-                'close': float,
-                'volume': float,
-                'average': float,
-                'barCount': int,
-                'contract': str
+                'Symbol': str,
+                'Open': float,
+                'High': float,
+                'Low': float,
+                'Last': float,
+                'Change': float,
+                'Volume': float,
+                'Open Int': float
             },
-            parse_dates=['date'],
-            date_parser=lambda x: pd.to_datetime(x, format="%Y-%m-%d %H:%M:%S%z")
+            parse_dates=['Time'],
+            converters=converters
         )
-        df.sort_values('date', inplace=True)
-        df.set_index('date', inplace=True)
+        
+        # Strip column names to remove leading/trailing spaces
+        df.columns = df.columns.str.strip()
+        
+        # Log the columns present in the CSV
+        logger.info(f"Loaded '{csv_file}' with columns: {df.columns.tolist()}")
+        
+        # Check if 'Time' column exists
+        if 'Time' not in df.columns:
+            logger.error(f"The 'Time' column is missing in the file: {csv_file}")
+            sys.exit(1)
+        
+        df.sort_values('Time', inplace=True)
+        df.set_index('Time', inplace=True)
+        
+        # Rename columns to match expected names
+        df.rename(columns={
+            'Open': 'open',
+            'High': 'high',
+            'Low': 'low',
+            'Last': 'close',
+            'Volume': 'volume',
+            'Symbol': 'contract',
+            '%Chg': 'pct_chg'  # Rename to avoid issues with '%' in column name
+        }, inplace=True)
+        
+        # Handle 'pct_chg' which is now a float without '%'
+        # No further action needed as converter already handled it
+        
+        # Add missing columns with default values
+        df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
+        df['barCount'] = 1  # Assuming each row is a single bar
+        
+        # Ensure 'contract' is a string
+        df['contract'] = df['contract'].astype(str)
+        
+        # Validate that all required columns are present
+        required_columns = ['open', 'high', 'low', 'close', 'volume', 'contract', 'pct_chg', 'average', 'barCount']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            logger.error(f"Missing columns {missing_columns} in file: {csv_file}")
+            sys.exit(1)
+        
         return df
     except FileNotFoundError:
         logger.error(f"File not found: {csv_file}")
@@ -110,38 +152,65 @@ def load_data(csv_file):
         logger.error("No data: The CSV file is empty.")
         sys.exit(1)
     except Exception as e:
-        logger.error(f"An error occurred while reading the CSV: {e}")
+        logger.error(f"An error occurred while reading the CSV '{csv_file}': {e}")
         sys.exit(1)
 
 # --- Load Datasets ---
+# Update these file paths to point to your new CSV files
 csv_file_1m = 'es_1m_data.csv'
-csv_file_5m = 'es_5m_data.csv'
+#csv_file_5m = 'es_5m_data.csv'  # Not used in this script
 csv_file_30m = 'es_30m_data.csv'
 
 logger.info("Loading datasets...")
 df_1m = load_data(csv_file_1m)
-df_5m = load_data(csv_file_5m)
+#df_5m = load_data(csv_file_5m)
 df_30m_full = load_data(csv_file_30m)  # Load full 30m data including extended hours
 logger.info("Datasets loaded successfully.")
 
+# --- Localize df_1m to US/Eastern and Convert to UTC ---
+eastern = pytz.timezone('US/Eastern')
+if df_1m.index.tz is None:
+    df_1m = df_1m.tz_localize(eastern).tz_convert('UTC')
+else:
+    df_1m = df_1m.tz_convert('UTC')
+
+# --- Localize df_30m_full to US/Eastern and Convert to UTC ---
+if df_30m_full.index.tz is None:
+    df_30m_full = df_30m_full.tz_localize(eastern).tz_convert('UTC')
+else:
+    df_30m_full = df_30m_full.tz_convert('UTC')
+
 # --- Define Backtest Period ---
-# Option 1: Custom Backtest Period (Replace These Dates)
-custom_start_date = "2022-09-25"
-custom_end_date = "2024-12-11"
+# Option 1: Custom Backtest Period (Replace These Dates as needed)
+custom_start_date = "2012-11-28"  # Adjust based on your data
+custom_end_date = "2022-11-28"    # Adjust based on your data
 
 # Option 2: Use Full Available Data (if custom dates are not set)
 if custom_start_date and custom_end_date:
-    start_time = pd.to_datetime(custom_start_date, utc=True)
-    end_time = pd.to_datetime(custom_end_date, utc=True)
+    try:
+        start_time = pd.to_datetime(custom_start_date).tz_localize('UTC')
+        end_time = pd.to_datetime(custom_end_date).tz_localize('UTC')
+    except Exception as e:
+        logger.error(f"Error parsing custom dates: {e}")
+        sys.exit(1)
 else:
-    start_time = pd.to_datetime(df_30m_full.index.min(), utc=True)
-    end_time = pd.to_datetime(df_30m_full.index.max(), utc=True)
+    start_time = pd.to_datetime(df_30m_full.index.min()).tz_localize('UTC')
+    end_time = pd.to_datetime(df_30m_full.index.max()).tz_localize('UTC')
 
 # --- Slice Dataframes to Backtest Period ---
 logger.info(f"Slicing data from {start_time} to {end_time}...")
-df_1m = df_1m.loc[start_time:end_time]
-df_5m = df_5m.loc[start_time:end_time]
-df_30m_full = df_30m_full.loc[start_time:end_time]
+try:
+    df_1m = df_1m.loc[start_time:end_time]
+except KeyError:
+    logger.warning("No data found for the specified 1-minute backtest period.")
+    df_1m = pd.DataFrame(columns=df_1m.columns)
+
+#df_5m = df_5m.loc[start_time:end_time]
+try:
+    df_30m_full = df_30m_full.loc[start_time:end_time]
+except KeyError:
+    logger.warning("No data found for the specified 30-minute backtest period.")
+    df_30m_full = pd.DataFrame(columns=df_30m_full.columns)
 logger.info("Data sliced to backtest period.")
 
 # --- Calculate Bollinger Bands on Full 30m Data (Including Extended Hours) ---
@@ -179,26 +248,30 @@ drawdown_start = None
 drawdown_durations = []
 
 # Define which high-frequency data to use
-df_high_freq = df_1m  # Use 1-minute data including ETH
+df_high_freq = df_1m  # Use 1-minute data
 
 # --- Define Exit Evaluation Function ---
 def evaluate_exit_anytime(position_type, entry_price, stop_loss, take_profit, df_high_freq, entry_time):
     """
-    Determines whether the stop-loss or take-profit is hit using all available high-frequency data (including ETH).
+    Determines whether the stop-loss or take-profit is hit using all available high-frequency data.
     
     Parameters:
         position_type (str): 'long' or 'short'
         entry_price (float): Price at which the position was entered
         stop_loss (float): Stop-loss price
         take_profit (float): Take-profit price
-        df_high_freq (pd.DataFrame): High-frequency DataFrame (1-minute) including ETH
+        df_high_freq (pd.DataFrame): High-frequency DataFrame (1-minute)
         entry_time (pd.Timestamp): Timestamp when the position was entered
     
     Returns:
         tuple: (exit_price, exit_time, hit_take_profit)
     """
     # Slice the high-frequency data from entry_time onwards
-    df_period = df_high_freq.loc[entry_time:]
+    try:
+        df_period = df_high_freq.loc[entry_time:]
+    except KeyError:
+        logger.error(f"Entry time {entry_time} not found in high-frequency data.")
+        return None, None, None
     
     # Iterate through each high-frequency bar after entry_time
     for timestamp, row in df_period.iterrows():
@@ -208,6 +281,7 @@ def evaluate_exit_anytime(position_type, entry_price, stop_loss, take_profit, df
         if position_type == 'long':
             if high >= take_profit and low <= stop_loss:
                 # Determine which was hit first
+                # Assuming open <= stop_loss implies stop loss was hit first
                 if row['open'] <= stop_loss:
                     return stop_loss, timestamp, False  # Stop loss hit first
                 else:
@@ -256,7 +330,7 @@ for i in range(len(df_30m_rth)):
             stop_loss_price = entry_price - STOP_LOSS_DISTANCE
             take_profit_price = entry_price + TAKE_PROFIT_DISTANCE
             entry_time = current_time
-            #logger.info(f"Entered LONG at {entry_price} on {entry_time} UTC")
+            logger.info(f"Entered LONG at {entry_price} on {entry_time} UTC")
         
         elif current_price > upper_band:
             # Enter Short
@@ -266,10 +340,10 @@ for i in range(len(df_30m_rth)):
             stop_loss_price = entry_price + STOP_LOSS_DISTANCE
             take_profit_price = entry_price - TAKE_PROFIT_DISTANCE
             entry_time = current_time
-            #logger.info(f"Entered SHORT at {entry_price} on {entry_time} UTC")
+            logger.info(f"Entered SHORT at {entry_price} on {entry_time} UTC")
     
     else:
-        # Position is open, check high-frequency ETH data until exit
+        # Position is open, check high-frequency data until exit
         exit_price, exit_time, hit_take_profit = evaluate_exit_anytime(
             position_type,
             entry_price,
@@ -292,7 +366,7 @@ for i in range(len(df_30m_rth)):
             
             # Print trade exit details
             exit_type = "TAKE PROFIT" if hit_take_profit else "STOP LOSS"
-            #logger.info(f"Exited {position_type.upper()} at {exit_price} on {exit_time} UTC via {exit_type} for P&L: ${pnl:.2f}")
+            logger.info(f"Exited {position_type.upper()} at {exit_price} on {exit_time} UTC via {exit_type} for P&L: ${pnl:.2f}")
             
             # Reset position variables
             position_size = 0
@@ -307,7 +381,8 @@ logger.info("Backtesting loop completed.")
 # --- Post-Backtest Calculations ---
 
 # Convert balance_series to a Pandas Series with appropriate index
-balance_series = pd.Series(balance_series, index=df_30m_rth.index[:len(balance_series)])
+balance_index = df_30m_rth.index[:len(balance_series)]
+balance_series = pd.Series(balance_series, index=balance_index)
 
 # --- Drawdown Duration Tracking ---
 for i in range(len(balance_series)):
