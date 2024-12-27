@@ -140,7 +140,7 @@ current_30min_bars = []
 def on_trade_filled(trade):
     global position, pending_order
     fill = trade.fills[-1]  # Get the latest fill
-    logger.info(f"Trade Filled - Order ID {trade.order.orderId}: {trade.order.action} {fill.size} @ {fill.price}")
+    logger.info(f"Trade Filled - Order ID {trade.order.orderId}: {trade.order.action} {fill.execution.shares} @ {fill.execution.price}")
     if trade.isFilled():
         entry_price = fill.price
         action = trade.order.action.upper()

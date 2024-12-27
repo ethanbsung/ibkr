@@ -294,7 +294,7 @@ entry_price = None
 position_type = None  
 cash = INITIAL_CASH
 trade_results = []
-balance_series = [INITIAL_CASH]  # Keep as a list
+balance_series = []  # Initialize as an empty list to store balance at each bar
 exposure_bars = 0
 
 # For Drawdown Duration Calculations
@@ -417,7 +417,6 @@ for i in range(len(df_30m_rth)):
 
             trade_results.append(pnl)
             cash += pnl
-            balance_series.append(cash)  # Update account balance
 
             # Print trade exit details
             exit_type = "TAKE PROFIT" if hit_take_profit else "STOP LOSS"
@@ -431,13 +430,15 @@ for i in range(len(df_30m_rth)):
             take_profit_price = None
             entry_time = None
 
+    # Append current cash to balance_series at each bar
+    balance_series.append(cash)
+
 logger.info("Backtesting loop completed.")
 
 # --- Post-Backtest Calculations ---
 
 # Convert balance_series to a Pandas Series with appropriate index
-balance_index = df_30m_rth.index[:len(balance_series)]
-balance_series = pd.Series(balance_series, index=balance_index)
+balance_series = pd.Series(balance_series, index=df_30m_rth.index)
 
 # --- Drawdown Duration Tracking ---
 for i in range(len(balance_series)):
@@ -575,6 +576,15 @@ else:
 
     # Align the benchmark to the strategy's balance_series
     benchmark_equity = benchmark_equity.reindex(balance_series.index, method='ffill')
+
+    # Verify benchmark_equity alignment
+    logger.info(f"Benchmark Equity Range: {benchmark_equity.index.min()} to {benchmark_equity.index.max()}")
+
+    # Ensure no NaNs in benchmark_equity
+    num_benchmark_nans = benchmark_equity.isna().sum()
+    if num_benchmark_nans > 0:
+        logger.warning(f"Benchmark equity has {num_benchmark_nans} NaN values. Filling with forward fill.")
+        benchmark_equity = benchmark_equity.fillna(method='ffill')
 
     # Create a DataFrame for plotting
     equity_df = pd.DataFrame({
