@@ -95,7 +95,7 @@ def place_bracket_order(action, current_price):
         logger.error(f"Failed to place bracket order: {e}")
 
 # --- Test Bracket Order Placement ---
-current_price = 6093  # Example current price
+current_price = 6090  # Example current price
 action = 'SELL'         # Example action: 'BUY' or 'SELL'
 
 logger.info(f"Testing bracket order placement: Action={action}, Current Price={current_price}")

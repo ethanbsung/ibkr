@@ -303,7 +303,7 @@ for key, value in results.items():
 # ----------------------------
 # Plot Equity Curve
 # ----------------------------
-'''
+
 plt.figure(figsize=(14, 7))
 plt.plot(equity_series, label='Equity Curve', color='blue')
 plt.title("Equity Curve - Long-Only VWAP Mean Reversion with SL and TP (MES Futures)")
@@ -313,4 +313,3 @@ plt.legend()
 plt.grid(True)
 plt.tight_layout()
 plt.show()
-'''

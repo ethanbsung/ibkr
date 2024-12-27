@@ -1,8 +1,8 @@
 import pandas as pd
 
 # Load the earlier and later CSV files
-earlier_file = "esh25_intraday-nearby-30min_historical-data-download-12-25-2024-7.csv"  # Replace with your earlier file name
-later_file = "es_30m_later.csv"      # Replace with your later file name
+earlier_file = "esh25_intraday-nearby-1min_historical-data-download-12-26-2024-72.csv"  # Replace with your earlier file name
+later_file = "es_1m_later.csv"  # Replace with your later file name
 
 # Read the CSV files into dataframes
 earlier_data = pd.read_csv(earlier_file)
@@ -40,7 +40,6 @@ combined_data = pd.concat([earlier_data, later_data])
 # Ensure the combined data is sorted by time
 combined_data.sort_values(by="Time", inplace=True)
 
-# Save the combined dataset to a new CSV file
-combined_file = "combined_data.csv"
-combined_data.to_csv(combined_file, index=False)
-print(f"Combined data saved to {combined_file}.")
+# Save the combined dataset to overwrite the later file
+combined_data.to_csv(later_file, index=False)
+print(f"Combined data saved to {later_file}.")
