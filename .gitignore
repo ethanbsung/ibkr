@@ -21,3 +21,8 @@ cl_30m_data.csv
 cl_1h_data.csv
 cl_4h_data.csv
 cl_daily_data.csv
+ng_daily_data.csv
+ng_4h_data.csv
+ng_1h_data.csv
+ng_30m_data.csv
+ng_5m_data.csv
