@@ -209,8 +209,8 @@ logger.info(f"30-Minute Data Range: {df_30m_full.index.min()} to {df_30m_full.in
 
 # --- Define Backtest Period ---
 # Option 1: Custom Backtest Period (Replace These Dates as needed)
-custom_start_date = "2021-11-29"  # Adjust based on your data
-custom_end_date = "2023-08-24"    # Adjust based on your data
+custom_start_date = "2008-09-29"  # Adjust based on your data
+custom_end_date = "2024-12-24"    # Adjust based on your data
 
 # Option 2: Use Full Available Data (if custom dates are not set)
 if custom_start_date and custom_end_date:
