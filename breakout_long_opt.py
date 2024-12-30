@@ -82,6 +82,7 @@ def run_backtest(df_30m, rolling_window, stop_loss_points, take_profit_points,
     
     Returns:
     - results: Dictionary of performance metrics.
+    - balance_df: DataFrame of equity over time.
     """
     # Copy the DataFrame to avoid modifying the original
     df = df_30m.copy()
@@ -272,12 +273,12 @@ def run_backtest(df_30m, rolling_window, stop_loss_points, take_profit_points,
         "Average Drawdown Duration (days)": f"{average_drawdown_duration_days:.2f}",
     }
 
-    return results
+    return results, balance_df
 
 # --- Main Optimization Loop ---
 def optimize_strategy(df_30m):
     # Define parameter grids
-    rolling_window_options = range(15, 31, 1)  # Example: 15 to 30
+    rolling_window_options = range(10, 31, 5)  # Example: 15 to 30
     stop_loss_options = range(3, 11, 1)        # Example: 3 to 10
     take_profit_options = range(3, 31, 1)     # Example: 3 to 30
 
@@ -292,8 +293,8 @@ def optimize_strategy(df_30m):
         rolling_window, stop_loss, take_profit = params
         print(f"\nRunning Backtest with Rolling Window: {rolling_window}, Stop Loss: {stop_loss}, Take Profit: {take_profit}")
 
-        # Run backtest
-        results = run_backtest(
+        # Run backtest and capture both results and balance_df
+        results, _ = run_backtest(
             df_30m=df_30m,
             rolling_window=rolling_window,
             stop_loss_points=stop_loss,
@@ -337,8 +338,7 @@ def optimize_strategy(df_30m):
 if __name__ == "__main__":
     # --- Configuration Parameters ---
     INTRADAY_DATA_FILE = 'es_1m_data.csv'    # Path to 1-minute CSV
-
-    # Backtesting Parameters are handled within the run_backtest function
+    INITIAL_CASH = 5000                      # Define INITIAL_CASH globally
 
     # --- Load Intraday Dataset ---
     df_intraday = load_data(INTRADAY_DATA_FILE)
@@ -393,76 +393,14 @@ if __name__ == "__main__":
         for key, value in best_strategy.items():
             if key != "Sharpe Ratio Float":  # Exclude the helper column
                 print(f"  {key}: {value}")
-    else:
-        print("No valid strategies found during optimization.")
 
-    # --- Optional: Plotting the Best Strategy's Equity Curve ---
-    # To plot the equity curve of the best strategy, modify the run_backtest function
-    # to return the balance_df along with the results. Here's how you can do it:
-
-    # 1. Modify the run_backtest function to return balance_df
-    #    - Change the return statement to: return results, balance_df
-
-    # 2. Update the 'optimize_strategy' function to handle the additional return value if needed
-    #    - This example focuses on saving top parameters, so we'll rerun the backtest for the best strategy
-
-    if not optimization_results_df.empty:
+        # --- Plotting the Best Strategy's Equity Curve ---
+        # Run backtest again to get balance_df for the best strategy
         best_params = {
             "rolling_window": best_strategy["Rolling Window"],
             "stop_loss_points": best_strategy["Stop Loss Points"],
             "take_profit_points": best_strategy["Take Profit Points"]
         }
-        # Run backtest again to get balance_df for the best strategy
-        best_results = run_backtest(
-            df_30m=df_30m,
-            rolling_window=best_params["rolling_window"],
-            stop_loss_points=best_params["stop_loss_points"],
-            take_profit_points=best_params["take_profit_points"],
-            ES_MULTIPLIER=5,
-            POSITION_SIZE=1,
-            COMMISSION=1.24,
-            INITIAL_CASH=5000
-        )
-
-        # To obtain balance_df, you need to modify the run_backtest function to return it
-        # Here's how you can do it:
-
-        # --- Modified Backtest Function to Return balance_df ---
-        # (Update the run_backtest function above to return both 'results' and 'balance_df')
-        # For demonstration, let's assume it now returns both:
-        # return results, balance_df
-
-        # Since the current run_backtest only returns 'results', we'll need to adjust it.
-        # Here's an adjusted version:
-        def run_backtest_with_balance(df_30m, rolling_window, stop_loss_points, take_profit_points, 
-                                      ES_MULTIPLIER=5, POSITION_SIZE=1, COMMISSION=1.24, INITIAL_CASH=5000):
-            results, balance_df = run_backtest(df_30m, rolling_window, stop_loss_points, take_profit_points, 
-                                              ES_MULTIPLIER, POSITION_SIZE, COMMISSION, INITIAL_CASH)
-            return results, balance_df
-
-        # Update the run_backtest function to return both 'results' and 'balance_df'
-        # Modify the existing run_backtest function to:
-        # return results, balance_df
-
-        # For the purpose of this example, let's proceed with the current run_backtest
-        # and assume it returns both
-
-        # Since in the current script, run_backtest only returns 'results',
-        # we'll redefine it to return both:
-        def run_backtest(df_30m, rolling_window, stop_loss_points, take_profit_points, 
-                        ES_MULTIPLIER=5, POSITION_SIZE=1, COMMISSION=1.24, INITIAL_CASH=5000):
-            """
-            Runs the backtest for given parameters.
-            
-            Returns:
-            - results: Dictionary of performance metrics.
-            - balance_df: DataFrame of equity over time.
-            """
-            # [The existing run_backtest code goes here...]
-            # At the end, modify the return statement:
-            return results, balance_df
-
-        # Now, rerun the backtest for the best strategy
         best_results, balance_df_best = run_backtest(
             df_30m=df_30m,
             rolling_window=best_params["rolling_window"],
@@ -471,7 +409,7 @@ if __name__ == "__main__":
             ES_MULTIPLIER=5,
             POSITION_SIZE=1,
             COMMISSION=1.24,
-            INITIAL_CASH=5000
+            INITIAL_CASH=INITIAL_CASH
         )
 
         # Create benchmark equity curve
@@ -503,4 +441,4 @@ if __name__ == "__main__":
         plt.tight_layout()
         plt.show()
     else:
-        print("Balance DataFrame for the best strategy is not available for plotting.")
+        print("No valid strategies found during optimization.")
