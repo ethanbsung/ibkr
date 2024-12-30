@@ -7,8 +7,8 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Load the earlier and later CSV files
-earlier_file = "ngf25_intraday-nearby-5min_historical-data-download-12-28-2024-44.csv"  # Replace with your earlier file name
-later_file = "ng_5m_data.csv"  # Replace with your later file name
+earlier_file = "ngf25_intraday-nearby-15min_historical-data-download-12-29-2024-19.csv"  # Replace with your earlier file name
+later_file = "ng_15m_data.csv"  # Replace with your later file name
 
 
 # Read the CSV files into dataframes
