@@ -2,10 +2,10 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import logging
-from datetime import timedelta, time as dt_time
 import sys
 import random
-import time  # Import time module for tracking runtime
+import time  # for tracking runtime
+from datetime import timedelta, time as dt_time
 
 # -------------------------------------------------------------
 #                GA CONFIGURATION
@@ -133,7 +133,8 @@ def perform_backtest(
     2) Resamples that data to 30-min bars to compute a rolling high over `rolling_window` bars.
     3) Forward-fills that Rolling High back into the original 1-minute data.
     4) On the 1-minute timeframe:
-       - Enter long 1 tick above rolling high if the 1-min High >= rolling_high + one_tick (during 09:30-16:00).
+       - Enter long 1 tick above rolling high if the 1-min High >= (rolling_high + one_tick) 
+         and rolling_high > last_breakout_high (to avoid multiple entries on same breakout).
        - Use 1-min Low & High to manage Stop Loss and Take Profit.
     5) Return the annualized Sharpe ratio for this parameter set.
     """
@@ -148,7 +149,7 @@ def perform_backtest(
     df_filtered = df_intraday.loc[start_time:end_time].copy()
     if df_filtered.empty:
         print("No data available for the specified date range.")
-        return -999.0  # penalize no data scenario
+        return -999.0  # penalize no-data scenario
 
     # Step A: Compute Rolling High on 30-min bars
     df_30m = df_filtered.resample('30min').agg({
@@ -184,6 +185,9 @@ def perform_backtest(
     balance_series = [cash]
     balance_dates  = [df_filtered.index[0]]
     
+    # Track the last rolling high used for a breakout
+    last_breakout_high = -np.inf
+
     for current_time, row in df_filtered.iterrows():
         rolling_high_value = row['Rolling_High']
         if pd.isna(rolling_high_value):
@@ -193,8 +197,8 @@ def perform_backtest(
             # Enter if within RTH (09:30 to 16:00)
             if dt_time(9, 30) <= current_time.time() < dt_time(16, 0):
                 breakout_price = rolling_high_value + ONE_TICK_LOCAL
-                # If 1-min High >= breakout_price => fill
-                if row['High'] >= breakout_price:
+                # Only consider a new breakout if rolling_high_value > last_breakout_high
+                if rolling_high_value > last_breakout_high and row['High'] >= breakout_price:
                     entry_price = breakout_price
                     stop_price  = entry_price - stop_loss_points
                     target_price= entry_price + take_profit_points
@@ -205,6 +209,8 @@ def perform_backtest(
                         'take_profit': target_price
                     }
                     logger.debug(f"Entered position at {entry_price} on {current_time}")
+                    # Update last_breakout_high to the current rolling high
+                    last_breakout_high = rolling_high_value
         else:
             # Manage open position
             current_high = row['High']
@@ -222,6 +228,7 @@ def perform_backtest(
                 balance_dates.append(exit_time)
                 logger.debug(f"Exited position at {exit_price} on {exit_time} with PnL={pnl}")
                 position = None
+            
             # Take Profit
             elif current_high >= position['take_profit']:
                 exit_price = position['take_profit']
@@ -274,7 +281,7 @@ def run_backtest(
     val_end_date="2024-12-23"
 ):
     """
-    Runs the new 1-min + rolling high breakout backtest on:
+    Runs the updated 1-min + rolling high breakout backtest on:
       - Train dataset
       - Validation dataset
     Returns the combined Sharpe ratio (train + val) / 2.
@@ -325,7 +332,7 @@ def run_backtest(
 
 
 # -------------------------------------------------------------
-#      STEP 3: GENETIC ALGORITHM CODE (UNCHANGED)
+#      STEP 3: GENETIC ALGORITHM CODE
 # -------------------------------------------------------------
 def create_individual():
     """

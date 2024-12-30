@@ -16,18 +16,18 @@ INTRADAY_DATA_FILE = 'es_1m_data.csv'  # 1-minute CSV path
 # General Backtesting Parameters
 INITIAL_CASH       = 5000
 ES_MULTIPLIER      = 5      # 1 ES point = $5 per contract for ES
-STOP_LOSS_POINTS   = 1
-TAKE_PROFIT_POINTS = 12
+STOP_LOSS_POINTS   = 2
+TAKE_PROFIT_POINTS = 5
 POSITION_SIZE      = 1      # Can be fractional if desired
 COMMISSION         = 1.24   # Commission per trade
 ONE_TICK           = 0.25   # For ES, 1 tick = 0.25
 
 # Rolling window for the 30-minute bars
-ROLLING_WINDOW = 7
+ROLLING_WINDOW = 5
 
 # Backtest date range
-BACKTEST_START = "2012-01-01"
-BACKTEST_END   = "2019-12-23"
+BACKTEST_START = "2024-01-01"
+BACKTEST_END   = "2024-12-23"
 
 # -------------------------------------------------------------
 #              STEP 1: LOAD 1-MIN DATA
@@ -150,7 +150,10 @@ def backtest_1m(df_1m,
     
     total_bars = len(df_filtered)
     active_bars = 0  # For measuring "exposure"
-
+    
+    # Initialize variable to track last breakout
+    last_breakout_high = -np.inf
+    
     for idx, (current_time, row) in enumerate(df_filtered.iterrows()):
         rolling_high_value = row['Rolling_High']
         
@@ -162,8 +165,9 @@ def backtest_1m(df_1m,
             # Only trade between 09:30 and 16:00
             if time(9, 30) <= current_time.time() < time(16, 0):
                 breakout_price = rolling_high_value + one_tick
-                # If the 1-min high >= breakout_price => fill
-                if row['High'] >= breakout_price:
+                
+                # New condition: Only enter if Rolling_High has increased since last breakout
+                if rolling_high_value > last_breakout_high and row['High'] >= breakout_price:
                     entry_price = breakout_price
                     stop_price  = entry_price - stop_loss_points
                     target_price= entry_price + take_profit_points
@@ -176,6 +180,9 @@ def backtest_1m(df_1m,
                     }
                     active_bars += 1
                     logger.info(f"[ENTRY] Long entered at {entry_price} on {current_time}")
+                    
+                    # Update last_breakout_high
+                    last_breakout_high = rolling_high_value
         else:
             # Manage open position
             current_high = row['High']
