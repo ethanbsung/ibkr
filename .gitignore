@@ -29,3 +29,6 @@ ng_1h_data.csv
 ng_30m_data.csv
 ng_5m_data.csv
 ng_15m_data.csv
+trade_entries.csv
+trade_exits.csv
+complete_pinescript_trade_visualization.pine
