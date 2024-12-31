@@ -16,18 +16,18 @@ INTRADAY_DATA_FILE = 'es_1m_data.csv'  # 1-minute CSV path
 # General Backtesting Parameters
 INITIAL_CASH       = 5000
 ES_MULTIPLIER      = 5      # 1 ES point = $5 per contract for ES
-STOP_LOSS_POINTS   = 2
-TAKE_PROFIT_POINTS = 5
+STOP_LOSS_POINTS   = 9
+TAKE_PROFIT_POINTS = 10
 POSITION_SIZE      = 1      # Can be fractional if desired
 COMMISSION         = 1.24   # Commission per trade
 ONE_TICK           = 0.25   # For ES, 1 tick = 0.25
 
 # Rolling window for the 30-minute bars
-ROLLING_WINDOW = 5
+ROLLING_WINDOW = 13  # Adjusted to match RTH (6.5 hours / 30 minutes = 13 bars)
 
 # Backtest date range
-BACKTEST_START = "2024-01-01"
-BACKTEST_END   = "2024-12-23"
+BACKTEST_START = "2014-01-01"
+BACKTEST_END   = "2019-12-23"
 
 # -------------------------------------------------------------
 #              STEP 1: LOAD 1-MIN DATA
@@ -83,7 +83,7 @@ def load_data(csv_file):
 def prepare_data(df_1m, rolling_window=ROLLING_WINDOW):
     """
     1) Resample df_1m to 30-min bars
-    2) Compute the rolling high over 'rolling_window' previous 30-min bars
+    2) Compute the rolling high over 'rolling_window' previous 30-min bars per day
     3) Forward-fill that rolling high back onto the 1-min DataFrame
     """
     # Resample to 30-minute bars
@@ -95,16 +95,21 @@ def prepare_data(df_1m, rolling_window=ROLLING_WINDOW):
         'Volume': 'sum'
     }).dropna()
     
-    # Rolling high of the past 'rolling_window' 30-min bars (excluding current bar => shift(1))
+    # Assign date for grouping
+    df_30m['Date'] = df_30m.index.date
+    
+    # Compute Rolling_High per day
     df_30m['Rolling_High'] = (
-        df_30m['High'].shift(1)
-                      .rolling(window=rolling_window, min_periods=rolling_window)
-                      .max()
+        df_30m.groupby('Date')['High']
+              .shift(1)  # Exclude current bar
+              .rolling(window=rolling_window, min_periods=rolling_window)
+              .max()
     )
+    
     # Drop rows where Rolling_High is NaN
     df_30m.dropna(subset=['Rolling_High'], inplace=True)
     
-    # We'll merge the 30-min Rolling_High into 1-min data via forward-fill
+    # Merge Rolling_High into 1-min data via forward-fill
     df_1m['Rolling_High'] = df_30m['Rolling_High'].reindex(df_1m.index, method='ffill')
     
     return df_1m
@@ -151,9 +156,6 @@ def backtest_1m(df_1m,
     total_bars = len(df_filtered)
     active_bars = 0  # For measuring "exposure"
     
-    # Initialize variable to track last breakout
-    last_breakout_high = -np.inf
-    
     for idx, (current_time, row) in enumerate(df_filtered.iterrows()):
         rolling_high_value = row['Rolling_High']
         
@@ -199,11 +201,11 @@ def backtest_1m(df_1m,
             if time(9, 30) <= current_time.time() < time(16, 0):
                 breakout_price = rolling_high_value + one_tick
                 
-                # New condition: Only enter if Rolling_High has increased since last breakout
-                if rolling_high_value > last_breakout_high and row['High'] >= breakout_price:
+                # Entry Condition: Breakout above Rolling_High
+                if row['High'] >= breakout_price:
                     entry_price = breakout_price
-                    stop_price  = entry_price - stop_loss_points
-                    target_price= entry_price + take_profit_points
+                    stop_price  = entry_price - stop_loss_points * one_tick
+                    target_price= entry_price + take_profit_points * one_tick
                     
                     position = {
                         'entry_time': current_time,
@@ -213,9 +215,6 @@ def backtest_1m(df_1m,
                     }
                     active_bars += 1
                     logger.info(f"[ENTRY] Long entered at {entry_price} on {current_time}")
-                    
-                    # Update last_breakout_high
-                    last_breakout_high = rolling_high_value
         
         # Record equity if no position or if we just closed
         if position is None:
@@ -275,19 +274,24 @@ def compute_and_plot_metrics(result_dict):
     # Calculate drawdown durations
     drawdown_periods = drawdown[drawdown < 0]
     if not drawdown_periods.empty:
+        # Convert drawdown_periods to a DataFrame
+        drawdown_periods_df = drawdown_periods.to_frame(name='Drawdown')
+        drawdown_periods_df['Drawdown_Group'] = (
+            drawdown_periods_df.index.to_series().diff() > timedelta(minutes=1)
+        ).cumsum()
+        
         # Group consecutive negative drawdown periods
-        # We'll treat each 1-min step as 1 'period'. For 30-min, we used 0.0208333 days,
-        # but here we can do 1 minute = 1/1440 days as a rough approach if we want days.
-        end_dates = drawdown_periods.index.to_series().diff().ne(pd.Timedelta('1min')).cumsum()
-        drawdown_groups = drawdown_periods.groupby(end_dates)
+        drawdown_groups = drawdown_periods_df.groupby('Drawdown_Group')
+        
+        # Calculate durations
         drawdown_durations = drawdown_groups.size()
         
-        # 1 minute = 1/1440 days
-        max_drawdown_duration_days    = drawdown_durations.max() * (1.0 / 1440.0)
-        average_drawdown_duration_days= drawdown_durations.mean() * (1.0 / 1440.0)
+        # Convert durations to days (assuming 1-minute intervals)
+        max_drawdown_duration_days = drawdown_durations.max() * (1.0 / 1440.0)
+        average_drawdown_duration_days = drawdown_durations.mean() * (1.0 / 1440.0)
     else:
-        max_drawdown_duration_days    = 0
-        average_drawdown_duration_days= 0
+        max_drawdown_duration_days = 0
+        average_drawdown_duration_days = 0
     
     # We'll define 'average_drawdown' as the same as min drawdown for simplicity
     average_drawdown = drawdown.min() * 100
@@ -306,7 +310,7 @@ def compute_and_plot_metrics(result_dict):
     # Strategy returns for ratio calculations
     returns = balance_df['Equity'].pct_change().dropna()
     
-    # Sharpe Ratio (approx, using ~ 252 trading days * ~6.5 hrs * 60 min = ~ 98k minutes
+    # Sharpe Ratio (approx, using ~ 252 trading days * ~6.5 hrs * 60 min = ~ 98k minutes)
     # This is not an exact formula, but a ballpark. Adjust to your preference.
     if returns.std() != 0:
         sharpe_ratio = returns.mean() / returns.std() * np.sqrt(252 * 6.5 * 60)
@@ -350,7 +354,7 @@ def compute_and_plot_metrics(result_dict):
     benchmark_equity.fillna(method='ffill', inplace=True)
     
     # Volatility (Annual)
-    # We'll again approximate by scaling the std dev of daily returns.
+    # We'll again approximate by scaling the std dev of minute returns.
     vol_annual = returns.std() * np.sqrt(252 * 6.5 * 60) * 100
     
     # Create results dictionary
