@@ -14,13 +14,17 @@ logger = logging.getLogger(__name__)
 INTRADAY_DATA_FILE = 'es_1m_data.csv'  # 1-minute CSV path
 
 # General Backtesting Parameters
-INITIAL_CASH       = 5000
-ES_MULTIPLIER      = 5      # 1 ES point = $5 per contract for ES
-STOP_LOSS_POINTS   = 9
-TAKE_PROFIT_POINTS = 10
-POSITION_SIZE      = 1      # Can be fractional if desired
-COMMISSION         = 1.24   # Commission per trade
-ONE_TICK           = 0.25   # For ES, 1 tick = 0.25
+INITIAL_CASH        = 5000
+ES_MULTIPLIER       = 5       # 1 ES point = $5 per contract for ES
+STOP_LOSS_POINTS    = 9       # Stop loss in points
+TAKE_PROFIT_POINTS  = 10      # Take profit in points
+POSITION_SIZE       = 1       # Can be fractional if desired
+COMMISSION          = 1.24    # Commission per trade
+ONE_TICK            = 0.25    # For ES, 1 tick = 0.25 points
+
+# Convert points to ticks
+STOP_LOSS_TICKS     = STOP_LOSS_POINTS * 4  # 1 point = 4 ticks
+TAKE_PROFIT_TICKS   = TAKE_PROFIT_POINTS * 4
 
 # Rolling window for the 30-minute bars
 ROLLING_WINDOW = 13  # Adjusted to match RTH (6.5 hours / 30 minutes = 13 bars)
@@ -120,8 +124,8 @@ def prepare_data(df_1m, rolling_window=ROLLING_WINDOW):
 def backtest_1m(df_1m, 
                 initial_cash=INITIAL_CASH,
                 es_multiplier=ES_MULTIPLIER,
-                stop_loss_points=STOP_LOSS_POINTS,
-                take_profit_points=TAKE_PROFIT_POINTS,
+                stop_loss_ticks=STOP_LOSS_TICKS,
+                take_profit_ticks=TAKE_PROFIT_TICKS,
                 position_size=POSITION_SIZE,
                 commission=COMMISSION,
                 one_tick=ONE_TICK,
@@ -156,12 +160,23 @@ def backtest_1m(df_1m,
     total_bars = len(df_filtered)
     active_bars = 0  # For measuring "exposure"
     
+    last_breakout_price = None  # Track the last breakout price
+    
     for idx, (current_time, row) in enumerate(df_filtered.iterrows()):
         rolling_high_value = row['Rolling_High']
         
         # Skip if Rolling High is NaN (shouldn't happen if we've forward-filled + dropped NaN)
         if pd.isna(rolling_high_value):
             continue
+        
+        # Determine current breakout price
+        breakout_price = rolling_high_value + one_tick
+        
+        # Check if Rolling High has increased
+        if last_breakout_price is None or breakout_price > last_breakout_price:
+            eligible_for_entry = True
+        else:
+            eligible_for_entry = False
         
         position_closed = False  # Flag to track if a position was closed in this iteration
         
@@ -183,6 +198,7 @@ def backtest_1m(df_1m,
                 logger.info(f"[STOP LOSS] Exit at {exit_price} on {exit_time}, PnL: ${pnl:,.2f}")
                 position = None
                 position_closed = True  # Set flag
+                last_breakout_price = None  # Reset last breakout price
             # If still open, check Take Profit
             elif current_high >= position['take_profit']:
                 exit_price = position['take_profit']
@@ -195,17 +211,16 @@ def backtest_1m(df_1m,
                 logger.info(f"[TAKE PROFIT] Exit at {exit_price} on {exit_time}, PnL: ${pnl:,.2f}")
                 position = None
                 position_closed = True  # Set flag
+                last_breakout_price = None  # Reset last breakout price
         
-        if not position_closed and position is None:
+        if not position_closed and position is None and eligible_for_entry:
             # Only trade between 09:30 and 16:00
             if time(9, 30) <= current_time.time() < time(16, 0):
-                breakout_price = rolling_high_value + one_tick
-                
                 # Entry Condition: Breakout above Rolling_High
                 if row['High'] >= breakout_price:
                     entry_price = breakout_price
-                    stop_price  = entry_price - stop_loss_points * one_tick
-                    target_price= entry_price + take_profit_points * one_tick
+                    stop_price  = entry_price - stop_loss_ticks * one_tick
+                    target_price= entry_price + take_profit_ticks * one_tick
                     
                     position = {
                         'entry_time': current_time,
@@ -214,6 +229,7 @@ def backtest_1m(df_1m,
                         'take_profit': target_price
                     }
                     active_bars += 1
+                    last_breakout_price = breakout_price  # Update last breakout price
                     logger.info(f"[ENTRY] Long entered at {entry_price} on {current_time}")
         
         # Record equity if no position or if we just closed
@@ -425,8 +441,8 @@ def main():
         df_1m=df_prepared,
         initial_cash=INITIAL_CASH,
         es_multiplier=ES_MULTIPLIER,
-        stop_loss_points=STOP_LOSS_POINTS,
-        take_profit_points=TAKE_PROFIT_POINTS,
+        stop_loss_ticks=STOP_LOSS_TICKS,
+        take_profit_ticks=TAKE_PROFIT_TICKS,
         position_size=POSITION_SIZE,
         commission=COMMISSION,
         one_tick=ONE_TICK,
@@ -440,7 +456,6 @@ def main():
     
     # 4) Compute extended metrics and plot
     compute_and_plot_metrics(backtest_result)
-
 
 if __name__ == '__main__':
     main()

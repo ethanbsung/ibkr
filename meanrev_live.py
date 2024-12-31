@@ -138,27 +138,39 @@ current_30min_start = None
 current_30min_bars = []
 
 def on_trade_filled(trade):
-    global position, pending_order
-    fill = trade.fills[-1]  # Get the latest fill
-    logger.info(f"Trade Filled - Order ID {trade.order.orderId}: {trade.order.action} {fill.execution.shares} @ {fill.execution.price}")
-    if trade.isFilled():
-        entry_price = fill.price
-        action = trade.order.action.upper()
-        position_type = 'LONG' if action == 'BUY' else 'SHORT'
-        logger.info(f"Entered {position_type} position at {entry_price}")
-        position = position_type
-        pending_order = False
+    global position, pending_order  # Ensure these globals are accessible
+    try:
+        if not trade.fills:
+            logger.warning("Trade filled event received but no fills are present.")
+            return
+
+        fill = trade.fills[-1]  # Get the latest fill
+        logger.info(f"Trade Filled - Order ID {trade.order.orderId}: {trade.order.action} {fill.execution.shares} @ {fill.execution.price}")
+
+        if trade.filled > 0:
+            entry_price = fill.execution.price
+            action = trade.order.action.upper()
+            position_type = 'LONG' if action == 'BUY' else 'SHORT'
+            logger.info(f"Entered {position_type} position at {entry_price}")
+            position = position_type
+            pending_order = False
+    except Exception as e:
+        logger.error(f"Error in on_trade_filled handler: {e}")
 
 def on_order_status(trade):
     global position, pending_order
-    logger.info(f"Trade Status Update - Order ID {trade.order.orderId}: {trade.orderStatus.status}")
-    if trade.orderStatus.status in ('Cancelled', 'Inactive'):
-        logger.info(f"Order ID {trade.order.orderId} has been {trade.orderStatus.status.lower()}.")
-        if position is None:
-            pending_order = False
+    try:
+        logger.info(f"Trade Status Update - Order ID {trade.order.orderId}: {trade.orderStatus.status}")
+        if trade.orderStatus.status in ('Cancelled', 'Inactive'):
+            logger.info(f"Order ID {trade.order.orderId} has been {trade.orderStatus.status.lower()}.")
+            if position is None:
+                pending_order = False
+    except Exception as e:
+        logger.error(f"Error in on_order_status handler: {e}")
 
 def place_bracket_order(action, current_price):
     global pending_order
+    logger.info(f"Placing bracket order: Action={action}, Current Price={current_price}")
     if action.upper() not in ['BUY', 'SELL']:
         logger.error(f"Invalid action: {action}. Must be 'BUY' or 'SELL'.")
         return
@@ -210,7 +222,8 @@ def is_rth(timestamp):
     return ts_eastern.weekday() < 5 and RTH_START <= ts_eastern.time() < RTH_END
 
 def execute_trade(action, current_price, current_time):
-    global pending_order
+    global pending_order  # Declare global to modify the variable
+
     if pending_order:
         logger.info("There is already a pending order. Skipping new trade execution.")
         return
@@ -299,6 +312,8 @@ def on_realtime_bar(ticker, hasNewBar):
                             logger.info(f"Bollinger Bands - Upper: {upper_band}, Lower: {lower_band}")
                             logger.info(f"Current Price: {current_price}")
 
+                            logger.info(f"Evaluating trade signals: Position={position}, Pending Order={pending_order}")
+
                             if position is None and not pending_order:
                                 if current_price < lower_band:
                                     # Enter Long during RTH
@@ -337,6 +352,8 @@ def on_realtime_bar(ticker, hasNewBar):
 
                 # Update or create the row for the current candle in progress
                 df_30m_full.loc[current_30min_start, ['open', 'high', 'low', 'close', 'volume']] = [open_30, high_30, low_30, close_30, volume_30]
+
+                logger.debug(f"Updated current candle: {current_30min_start} - O:{open_30}, H:{high_30}, L:{low_30}, C:{close_30}, V:{volume_30}")
 
     except Exception as e:
         logger.error(f"Error in on_realtime_bar handler: {e}")
