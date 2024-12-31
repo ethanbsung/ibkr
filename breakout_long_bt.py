@@ -161,7 +161,40 @@ def backtest_1m(df_1m,
         if pd.isna(rolling_high_value):
             continue
         
-        if position is None:
+        position_closed = False  # Flag to track if a position was closed in this iteration
+        
+        if position is not None:
+            # Manage open position
+            current_high = row['High']
+            current_low  = row['Low']
+            exit_time    = current_time
+            
+            # Check Stop Loss
+            if current_low <= position['stop_loss']:
+                exit_price = position['stop_loss']
+                pnl = ((exit_price - position['entry_price']) 
+                       * position_size * es_multiplier) - commission
+                cash += pnl
+                trade_results.append(pnl)
+                balance_series.append(cash)
+                balance_dates.append(exit_time)
+                logger.info(f"[STOP LOSS] Exit at {exit_price} on {exit_time}, PnL: ${pnl:,.2f}")
+                position = None
+                position_closed = True  # Set flag
+            # If still open, check Take Profit
+            elif current_high >= position['take_profit']:
+                exit_price = position['take_profit']
+                pnl = ((exit_price - position['entry_price']) 
+                       * position_size * es_multiplier) - commission
+                cash += pnl
+                trade_results.append(pnl)
+                balance_series.append(cash)
+                balance_dates.append(exit_time)
+                logger.info(f"[TAKE PROFIT] Exit at {exit_price} on {exit_time}, PnL: ${pnl:,.2f}")
+                position = None
+                position_closed = True  # Set flag
+        
+        if not position_closed and position is None:
             # Only trade between 09:30 and 16:00
             if time(9, 30) <= current_time.time() < time(16, 0):
                 breakout_price = rolling_high_value + one_tick
@@ -183,35 +216,6 @@ def backtest_1m(df_1m,
                     
                     # Update last_breakout_high
                     last_breakout_high = rolling_high_value
-        else:
-            # Manage open position
-            current_high = row['High']
-            current_low  = row['Low']
-            exit_time    = current_time
-            
-            # Check Stop Loss
-            if current_low <= position['stop_loss']:
-                exit_price = position['stop_loss']
-                pnl = ((exit_price - position['entry_price']) 
-                       * position_size * es_multiplier) - commission
-                cash += pnl
-                trade_results.append(pnl)
-                balance_series.append(cash)
-                balance_dates.append(exit_time)
-                logger.info(f"[STOP LOSS] Exit at {exit_price} on {exit_time}, PnL: ${pnl:,.2f}")
-                position = None
-            
-            # If still open, check Take Profit
-            elif current_high >= position['take_profit']:
-                exit_price = position['take_profit']
-                pnl = ((exit_price - position['entry_price']) 
-                       * position_size * es_multiplier) - commission
-                cash += pnl
-                trade_results.append(pnl)
-                balance_series.append(cash)
-                balance_dates.append(exit_time)
-                logger.info(f"[TAKE PROFIT] Exit at {exit_price} on {exit_time}, PnL: ${pnl:,.2f}")
-                position = None
         
         # Record equity if no position or if we just closed
         if position is None:

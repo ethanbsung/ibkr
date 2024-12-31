@@ -41,7 +41,6 @@ ONE_TICK = 0.25
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
-
 # -------------------------------------------------------------
 #               STEP 1: LOAD THE 1-MINUTE DATA
 # -------------------------------------------------------------
@@ -147,8 +146,14 @@ def perform_backtest(
     start_time = pd.to_datetime(start_date)
     end_time   = pd.to_datetime(end_date)
     df_filtered = df_intraday.loc[start_time:end_time].copy()
+    
+    # Debug: Print the filtered data range
+    if not df_filtered.empty:
+        print(f"Filtered data range: {df_filtered.index.min()} to {df_filtered.index.max()}")
+    else:
+        print(f"No data available for the specified date range: {start_date} to {end_date}")
+    
     if df_filtered.empty:
-        print("No data available for the specified date range.")
         return -999.0  # penalize no-data scenario
 
     # Step A: Compute Rolling High on 30-min bars
@@ -178,6 +183,15 @@ def perform_backtest(
     df_filtered['Rolling_High'] = df_30m['Rolling_High'].reindex(df_filtered.index, method='ffill')
     df_filtered.dropna(subset=['Rolling_High'], inplace=True)
     
+    # Check if df_filtered is empty after forward-fill
+    if df_filtered.empty:
+        print("No data available after forward-filling Rolling_High.")
+        return -999.0
+    
+    # Debug: Print the data range after processing
+    print(f"Data range after processing: {df_filtered.index.min()} to {df_filtered.index.max()}")
+    print(f"Total rows after processing: {len(df_filtered)}")
+    
     # Step C: 1-Minute Trading Logic
     cash = initial_cash
     position = None
@@ -193,7 +207,41 @@ def perform_backtest(
         if pd.isna(rolling_high_value):
             continue
         
-        if position is None:
+        position_closed = False  # Flag to track if a position was closed in this iteration
+
+        if position is not None:
+            # Manage open position
+            current_high = row['High']
+            current_low  = row['Low']
+            exit_time    = current_time
+            
+            # Stop Loss
+            if current_low <= position['stop_loss']:
+                exit_price = position['stop_loss']
+                pnl = ((exit_price - position['entry_price']) 
+                       * position_size * es_multiplier) - commission
+                cash += pnl
+                trade_results.append(pnl)
+                balance_series.append(cash)
+                balance_dates.append(exit_time)
+                logger.debug(f"Exited position at {exit_price} on {exit_time} with PnL={pnl}")
+                position = None
+                position_closed = True  # Set flag
+            
+            # Take Profit
+            elif current_high >= position['take_profit']:
+                exit_price = position['take_profit']
+                pnl = ((exit_price - position['entry_price']) 
+                       * position_size * es_multiplier) - commission
+                cash += pnl
+                trade_results.append(pnl)
+                balance_series.append(cash)
+                balance_dates.append(exit_time)
+                logger.debug(f"Exited position at {exit_price} on {exit_time} with PnL={pnl}")
+                position = None
+                position_closed = True  # Set flag
+        
+        if not position_closed and position is None:
             # Enter if within RTH (09:30 to 16:00)
             if dt_time(9, 30) <= current_time.time() < dt_time(16, 0):
                 breakout_price = rolling_high_value + ONE_TICK_LOCAL
@@ -211,37 +259,8 @@ def perform_backtest(
                     logger.debug(f"Entered position at {entry_price} on {current_time}")
                     # Update last_breakout_high to the current rolling high
                     last_breakout_high = rolling_high_value
-        else:
-            # Manage open position
-            current_high = row['High']
-            current_low  = row['Low']
-            exit_time    = current_time
-            
-            # Stop Loss
-            if current_low <= position['stop_loss']:
-                exit_price = position['stop_loss']
-                pnl = ((exit_price - position['entry_price']) 
-                       * position_size * es_multiplier) - commission
-                cash += pnl
-                trade_results.append(pnl)
-                balance_series.append(cash)
-                balance_dates.append(exit_time)
-                logger.debug(f"Exited position at {exit_price} on {exit_time} with PnL={pnl}")
-                position = None
-            
-            # Take Profit
-            elif current_high >= position['take_profit']:
-                exit_price = position['take_profit']
-                pnl = ((exit_price - position['entry_price']) 
-                       * position_size * es_multiplier) - commission
-                cash += pnl
-                trade_results.append(pnl)
-                balance_series.append(cash)
-                balance_dates.append(exit_time)
-                logger.debug(f"Exited position at {exit_price} on {exit_time} with PnL={pnl}")
-                position = None
         
-        # If position closed, record equity
+        # Record equity if no position or if we just closed
         if position is None:
             if len(balance_series) == len(balance_dates):
                 balance_series.append(cash)
@@ -434,18 +453,29 @@ def main():
     csv_file = 'es_1m_data.csv'
     df_intraday = load_data(csv_file)
     
+    # Verify that the data covers both training and validation periods
+    train_start_date = "2012-01-01"
+    train_end_date   = "2019-12-31"
+    val_start_date   = "2020-01-01"
+    val_end_date     = "2024-12-23"
+    
+    data_min = df_intraday.index.min()
+    data_max = df_intraday.index.max()
+    print(f"Data spans from {data_min} to {data_max}")
+    
+    if data_min > pd.to_datetime(train_start_date):
+        print("Warning: Training start date is before data's start date.")
+    if data_max < pd.to_datetime(val_end_date):
+        print("Warning: Validation end date exceeds data's end date. Adjusting validation end date to data's end date.")
+        val_end_date = data_max.strftime('%Y-%m-%d')
+        print(f"New Validation Period: {val_start_date} to {val_end_date}")
+    
     # 2) Initialize population
     population = [create_individual() for _ in range(POPULATION_SIZE)]
     print(f"\nInitialized population with {POPULATION_SIZE} individuals.")
     
     best_individual = None
     best_fitness    = float('-inf')
-    
-    # Train/Validation Date Ranges (adjust as needed)
-    train_start_date = "2012-01-01"
-    train_end_date   = "2019-12-31"
-    val_start_date   = "2020-01-01"
-    val_end_date     = "2024-12-23"
     
     # 3) Evolve population
     for gen in range(NUM_GENERATIONS):
@@ -483,42 +513,51 @@ def main():
         gen_end_time = time.time()
         gen_duration = gen_end_time - gen_start_time
         print(f" Generation {gen+1} completed in {gen_duration:.2f} seconds.")
-        print(f"  Best Sharpe this generation: {max(fitnesses):.4f}")
-        print(f"  Mean Sharpe this generation: {np.mean(fitnesses):.4f}")
-        print(f"  Global Best Sharpe so far: {best_fitness:.4f}  Params: {best_individual}")
+        if fitnesses:
+            print(f"  Best Sharpe this generation: {max(fitnesses):.4f}")
+            print(f"  Mean Sharpe this generation: {np.mean(fitnesses):.4f}")
+            print(f"  Global Best Sharpe so far: {best_fitness:.4f}  Params: {best_individual}")
+        else:
+            print("  No fitness scores calculated for this generation.")
         
         # Evolve to the next generation
         population = evolve_population(population, fitnesses)
     
     # 4) Final Best
     print("\n=== Genetic Algorithm Optimization Complete ===")
-    print(f"Best Individual Found: Stop Loss={best_individual[0]}, "
-          f"Take Profit={best_individual[1]}, Rolling Window={best_individual[2]}")
-    print(f"Best Combined Sharpe Ratio: {best_fitness:.4f}")
+    if best_individual:
+        print(f"Best Individual Found: Stop Loss={best_individual[0]}, "
+              f"Take Profit={best_individual[1]}, Rolling Window={best_individual[2]}")
+        print(f"Best Combined Sharpe Ratio: {best_fitness:.4f}")
+    else:
+        print("No valid individuals were found during optimization.")
     
     # 5) Optional: Final check on validation set
-    print("\n--- Running Final Validation Backtest with Best Parameters ---")
-    final_start = time.time()
-    final_sharpe = perform_backtest(
-        df_intraday=df_intraday,
-        stop_loss_points=best_individual[0],
-        take_profit_points=best_individual[1],
-        rolling_window=best_individual[2],
-        initial_cash=INITIAL_CASH,
-        es_multiplier=ES_MULTIPLIER,
-        position_size=POSITION_SIZE,
-        commission=COMMISSION,
-        start_date=val_start_date,
-        end_date=val_end_date
-    )
-    final_end = time.time()
-    final_duration = final_end - final_start
-    print(f"Final Validation Backtest completed in {final_duration:.2f} seconds. Sharpe Ratio: {final_sharpe:.4f}")
+    if best_individual and best_fitness != -999.0:
+        print("\n--- Running Final Validation Backtest with Best Parameters ---")
+        final_start = time.time()
+        final_sharpe = perform_backtest(
+            df_intraday=df_intraday,
+            stop_loss_points=best_individual[0],
+            take_profit_points=best_individual[1],
+            rolling_window=best_individual[2],
+            initial_cash=INITIAL_CASH,
+            es_multiplier=ES_MULTIPLIER,
+            position_size=POSITION_SIZE,
+            commission=COMMISSION,
+            start_date=val_start_date,
+            end_date=val_end_date
+        )
+        final_end = time.time()
+        final_duration = final_end - final_start
+        print(f"Final Validation Backtest completed in {final_duration:.2f} seconds. Sharpe Ratio: {final_sharpe:.4f}")
+    else:
+        print("\nNo valid best individual to run final validation backtest.")
     
     overall_end_time = time.time()
     total_duration = overall_end_time - overall_start_time
     print(f"\nTotal Optimization Time: {total_duration / 60:.2f} minutes.")
-    
+
 
 # -------------------------------------------------------------
 #                   RUN SCRIPT
