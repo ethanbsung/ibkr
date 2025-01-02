@@ -6,14 +6,6 @@ def generate_pinescript_code(entries_df, exits_df):
 //@version=6
 indicator("Backtest Trade Visualization", overlay=true)
 
-// === Time Functions ===
-f_timestamp_to_bar(unix_ms) =>
-    t = time
-    found_bar = int(na)
-    if t == unix_ms
-        found_bar := bar_index
-    found_bar
-
 // === Trade Entries ===
 var entry_timestamps = array.new<int>()
 var entry_prices = array.new<float>()
@@ -53,62 +45,27 @@ if barstate.isfirst
         script += f'    array.push(exit_types, "{trade_type}")\n'
 
     script += """
-
-// === Plot Trades on Current Bar ===
+    
+// === Plot Trade Entries ===
 for i = 0 to array.size(entry_timestamps) - 1
     entry_time = array.get(entry_timestamps, i)
     entry_price = array.get(entry_prices, i)
     entry_type = array.get(entry_types, i)
     
-    bar_idx = f_timestamp_to_bar(entry_time)
-    if not na(bar_idx)
-        label.new(
-            x = bar_idx, 
-            y = entry_price, 
-            text = entry_type, 
-            style = label.style_label_up, 
-            color = (entry_type == "BUY" ? color.green : color.red),
-            textcolor = color.white,
-            size = size.small,
-            tooltip = "Trade Entry",
-            xloc = xloc.bar_index
-        )
+    label.new(x=entry_time, y=entry_price, text=entry_type, style=label.style_label_up, color=(entry_type == "BUY" ? color.green : color.red), textcolor=color.white, size=size.small, tooltip="Trade Entry")
 
-// Plot exits and lines
+// === Plot Trade Exits and Draw Lines ===
 for i = 0 to array.size(exit_timestamps) - 1
     exit_time = array.get(exit_timestamps, i)
     exit_price = array.get(exit_prices, i)
     exit_type = array.get(exit_types, i)
     
-    bar_idx = f_timestamp_to_bar(exit_time)
-    if not na(bar_idx)
-        label.new(
-            x = bar_idx,
-            y = exit_price,
-            text = exit_type,
-            style = label.style_label_down,
-            color = (exit_type == "TAKE PROFIT" ? color.blue : color.orange),
-            textcolor = color.white,
-            size = size.small,
-            tooltip = "Trade Exit",
-            xloc = xloc.bar_index
-        )
-        
-        if i < array.size(entry_timestamps)
-            entry_time = array.get(entry_timestamps, i)
-            entry_price = array.get(entry_prices, i)
-            entry_bar = f_timestamp_to_bar(entry_time)
-            if not na(entry_bar)
-                line.new(
-                    x1 = entry_bar,
-                    y1 = entry_price,
-                    x2 = bar_idx,
-                    y2 = exit_price,
-                    color = (exit_type == "TAKE PROFIT" ? color.blue : color.orange),
-                    width = 1,
-                    style = line.style_dashed,
-                    xloc = xloc.bar_index
-                )
+    label.new(x=exit_time, y=exit_price, text=exit_type, style=label.style_label_down, color=(exit_type == "TAKE PROFIT" ? color.blue : color.orange), textcolor=color.white, size=size.small, tooltip="Trade Exit")
+    
+    if i < array.size(entry_timestamps)
+        entry_time = array.get(entry_timestamps, i)
+        entry_price = array.get(entry_prices, i)
+        line.new(x1=entry_time, y1=entry_price, x2=exit_time, y2=exit_price, color=(exit_type == "TAKE PROFIT" ? color.blue : color.orange), width=1, style=line.style_dashed)
 """
 
     return script
