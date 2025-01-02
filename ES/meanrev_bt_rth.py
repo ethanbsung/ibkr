@@ -195,22 +195,25 @@ def evaluate_exit_vectorized(position_type, entry_price, stop_loss, take_profit,
     if df_period.empty:
         return None, None, None
 
+    # Define a valid maximum timestamp within pandas' supported range
+    max_valid_timestamp = pd.Timestamp('2262-04-11 23:47:16.854775807', tz='UTC')
+
     if position_type == 'long':
         # Identify bars where stop-loss or take-profit is hit
         hit_sl = df_period[df_period['low'] <= stop_loss]
         hit_tp = df_period[df_period['high'] >= take_profit]
 
         # Get the first occurrence of each
-        first_sl = hit_sl.index.min() if not hit_sl.empty else pd.Timestamp.max
-        first_tp = hit_tp.index.min() if not hit_tp.empty else pd.Timestamp.max
+        first_sl = hit_sl.index.min() if not hit_sl.empty else max_valid_timestamp
+        first_tp = hit_tp.index.min() if not hit_tp.empty else max_valid_timestamp
 
         # Determine which condition was hit first
         if first_sl < first_tp:
             return stop_loss, first_sl, False  # Stop-loss hit first
         elif first_tp < first_sl:
             return take_profit, first_tp, True   # Take-profit hit first
-        elif first_sl == first_tp and first_sl != pd.Timestamp.max:
-            # Both hit in the same bar; determine based on open price
+        elif first_sl == first_tp and first_sl != max_valid_timestamp:
+            # Both conditions hit in the same bar; determine based on open price
             row = df_period.loc[first_sl]
             if row['open'] <= stop_loss:
                 return stop_loss, first_sl, False
@@ -223,16 +226,16 @@ def evaluate_exit_vectorized(position_type, entry_price, stop_loss, take_profit,
         hit_tp = df_period[df_period['low'] <= take_profit]
 
         # Get the first occurrence of each
-        first_sl = hit_sl.index.min() if not hit_sl.empty else pd.Timestamp.max
-        first_tp = hit_tp.index.min() if not hit_tp.empty else pd.Timestamp.max
+        first_sl = hit_sl.index.min() if not hit_sl.empty else max_valid_timestamp
+        first_tp = hit_tp.index.min() if not hit_tp.empty else max_valid_timestamp
 
         # Determine which condition was hit first
         if first_sl < first_tp:
             return stop_loss, first_sl, False  # Stop-loss hit first
         elif first_tp < first_sl:
             return take_profit, first_tp, True   # Take-profit hit first
-        elif first_sl == first_tp and first_sl != pd.Timestamp.max:
-            # Both hit in the same bar; determine based on open price
+        elif first_sl == first_tp and first_sl != max_valid_timestamp:
+            # Both conditions hit in the same bar; determine based on open price
             row = df_period.loc[first_sl]
             if row['open'] >= stop_loss:
                 return stop_loss, first_sl, False
@@ -546,13 +549,29 @@ calmar_ratio = (total_return_percentage / abs(max_drawdown)) if max_drawdown != 
 drawdown_periods = drawdowns[drawdowns < 0]
 if not drawdown_periods.empty:
     # Identify contiguous segments of drawdown
-    drawdown_start_times = drawdown_periods.index[~drawdown_periods.index.to_series().is_monotonic_increasing]
-    drawdown_end_times = drawdown_periods.index[drawdown_periods.index.to_series().is_monotonic_increasing]
+    # Create a boolean series where True indicates a drawdown
+    is_drawdown = drawdowns < 0
 
-    # Calculate durations
-    drawdown_durations = (drawdown_end_times - drawdown_start_times).total_seconds() / 86400  # in days
-    max_drawdown_duration_days = drawdown_durations.max() if not drawdown_durations.empty else 0
-    average_drawdown_duration_days = drawdown_durations.mean() if not drawdown_durations.empty else 0
+    # Identify start and end of each drawdown period
+    drawdown_changes = is_drawdown.ne(is_drawdown.shift())
+    drawdown_groups = drawdown_changes.cumsum()
+
+    # Group by drawdown periods
+    drawdown_groups = is_drawdown.groupby(drawdown_groups)
+
+    # Calculate durations for each drawdown period
+    drawdown_durations = []
+    for name, group in drawdown_groups:
+        if group.iloc[0]:  # Only consider groups where drawdown is True
+            duration = (group.index[-1] - group.index[0]).total_seconds() / 86400  # Duration in days
+            drawdown_durations.append(duration)
+
+    if drawdown_durations:
+        max_drawdown_duration_days = max(drawdown_durations)
+        average_drawdown_duration_days = np.mean(drawdown_durations)
+    else:
+        max_drawdown_duration_days = 0
+        average_drawdown_duration_days = 0
 else:
     max_drawdown_duration_days = 0
     average_drawdown_duration_days = 0
@@ -623,11 +642,6 @@ else:
     plt.grid(True)
     plt.tight_layout()
     plt.show()
-
-# --- Plot Histogram of Final Balances ---
-# Since this is a single backtest, the histogram would be trivial. Instead, to perform Monte Carlo,
-# you would need to integrate a simulation loop. However, based on your initial code, you have not
-# implemented Monte Carlo in this script. If needed, you can integrate it similarly to your initial code.
 
 # --- Optional: Save Trade Results to CSV ---
 # Uncomment the following lines if you wish to save trade results for further analysis
