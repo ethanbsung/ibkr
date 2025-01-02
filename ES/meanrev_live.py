@@ -5,7 +5,6 @@ from ib_insync import *
 import logging
 import sys
 import pytz
-import asyncio
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host
@@ -30,8 +29,8 @@ STOP_LOSS_DISTANCE = 5        # Points away from entry
 TAKE_PROFIT_DISTANCE = 10     # Points away from entry
 
 # RTH: 09:30 - 16:00 ET, Monday to Friday
-RTH_START = datetime.time(9, 30)
-RTH_END = datetime.time(16, 0)
+RTH_START = datetime.time(9, 00)
+RTH_END = datetime.time(15, 59)
 EASTERN = pytz.timezone('US/Eastern')
 
 # --- Setup Logging ---
@@ -44,6 +43,7 @@ logger = logging.getLogger()
 
 # --- Connect to IBKR ---
 ib = IB()
+#logger.info("Connecting to IBKR...")
 try:
     ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
     print("Connected to IBKR.")
@@ -123,22 +123,9 @@ def filter_rth(df):
 # Calculate Bollinger Bands on Full Data
 df_30m_full = calculate_bollinger_bands(df_30m_full, BOLLINGER_PERIOD, BOLLINGER_STDDEV)
 
-# Store the latest Bollinger Bands
-latest_bollinger_upper = None
-latest_bollinger_lower = None
-
-def update_latest_bollinger():
-    global latest_bollinger_upper, latest_bollinger_lower
-    if not df_30m_full.empty and 'upper_band' in df_30m_full.columns and 'lower_band' in df_30m_full.columns:
-        latest_bollinger_upper = df_30m_full['upper_band'].iloc[-1]
-        latest_bollinger_lower = df_30m_full['lower_band'].iloc[-1]
-        logger.debug(f"Updated Bollinger Bands - Upper: {latest_bollinger_upper}, Lower: {latest_bollinger_lower}")
-    else:
-        latest_bollinger_upper = None
-        latest_bollinger_lower = None
-
-# Initialize Bollinger Bands
-update_latest_bollinger()
+# Print out the DataFrame to see what's in it after historical load
+#logger.info("df_30m_full after initial Bollinger calculation:")
+#print(df_30m_full.tail(50))
 
 df_30m_rth = filter_rth(df_30m_full)
 #logger.info("RTH filtering applied to 30-minute data for trade execution.")
@@ -195,7 +182,7 @@ def on_order_status(trade):
     except Exception as e:
         logger.error(f"Error in on_order_status handler: {e}")
 
-async def place_bracket_order(action, current_price):
+def place_bracket_order(action, current_price):
     global pending_order
     print(f"Placing bracket order: Action={action}, Current Price={current_price}")
     if action.upper() not in ['BUY', 'SELL']:
@@ -241,6 +228,7 @@ async def place_bracket_order(action, current_price):
         logger.error(f"Failed to place bracket order: {e}")
         pending_order = False
 
+
 def is_rth(timestamp):
     if timestamp is None:
         return False
@@ -276,8 +264,7 @@ def execute_trade(action, current_price, current_time):
     print(f"Lower Threshold (Bollinger Band): {lower_band}")
     print(f"Upper Threshold (Bollinger Band): {upper_band}")
 
-    # Schedule the asynchronous order placement
-    asyncio.ensure_future(place_bracket_order(action, current_price))
+    place_bracket_order(action, current_price)
 
 def on_realtime_bar(ticker, hasNewBar):
     global current_30min_start, current_30min_bars, df_30m_full, df_30m_rth, position, cash, pending_order
@@ -302,7 +289,7 @@ def on_realtime_bar(ticker, hasNewBar):
             if current_30min_start != candle_start_time:
                 # Finalize the previous candle when a new one starts
                 if current_30min_start is not None and current_30min_bars:
-                    # Aggregate the 30-minute bar
+                    # The row should already be updated continuously, but let's confirm final calculation:
                     open_30 = current_30min_bars[0]['open']
                     high_30 = max(b['high'] for b in current_30min_bars)
                     low_30 = min(b['low'] for b in current_30min_bars)
@@ -315,7 +302,9 @@ def on_realtime_bar(ticker, hasNewBar):
                     # Recalculate Bollinger Bands only if we have enough data
                     if len(df_30m_full) >= BOLLINGER_PERIOD:
                         df_30m_full = calculate_bollinger_bands(df_30m_full, BOLLINGER_PERIOD, BOLLINGER_STDDEV)
-                        update_latest_bollinger()
+
+                    #logger.info("df_30m_full after finalizing the old bar:")
+                    #print(df_30m_full.tail(10))
 
                     # Re-filter RTH data
                     df_30m_rth = filter_rth(df_30m_full)
@@ -323,6 +312,7 @@ def on_realtime_bar(ticker, hasNewBar):
                     if is_rth(current_30min_start):
                         current_price = close_30
                         current_time = current_30min_start
+                        #logger.info(f"\nNew 30-min bar closed at {current_time} UTC with close price: {current_price}")
 
                         if current_time in df_30m_full.index:
                             row = df_30m_full.loc[current_time]
@@ -366,6 +356,7 @@ def on_realtime_bar(ticker, hasNewBar):
             })
 
             # Continuously update the current candle row in df_30m_full
+            # This ensures that if we lose connection or something, we always have the latest partial data.
             if current_30min_start is not None:
                 open_30 = current_30min_bars[0]['open']
                 high_30 = max(b['high'] for b in current_30min_bars)
