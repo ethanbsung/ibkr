@@ -7,7 +7,6 @@ Data/es_4h_data.csv
 backtest.log
 launch_ibgateway.sh
 venv/
-Data/es_daily_data.csv
 Data/es_monthly_data.csv
 Data/es_quarterly_data.csv
 Data/es_weekly_data.csv
@@ -16,7 +15,6 @@ Data/nq_4h_data.csv
 Data/nq_30m_data.csv
 Data/nq_15m_data.csv
 Data/nq_5m_data.csv
-Data/nq_daily_data.csv
 Data/cl_5m_data.csv
 Data/cl_15m_data.csv
 Data/cl_30m_data.csv

@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO,  # Set to DEBUG for detailed logs
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------
-#              CONFIGURATION & USER PARAMETERSß
+#              CONFIGURATION & USER PARAMETERS
 # -------------------------------------------------------------
 INTRADAY_DATA_FILE = 'Data/es_1m_data.csv'  # Path to 1-minute CSV data
 
@@ -30,8 +30,8 @@ ONE_TICK            = 0.25    # Tick size for ES
 ROLLING_WINDOW = 13  # Number of 30-minute bars in the rolling window
 
 # Backtest date range
-BACKTEST_START = "2022-01-01"
-BACKTEST_END   = "2024-12-23"
+BACKTEST_START = "2022-01-08"
+BACKTEST_END   = "2024-08-30"
 
 # -------------------------------------------------------------
 #              STEP 1: LOAD 1-MIN DATA
@@ -174,6 +174,9 @@ def backtest_1m(df_1m,
     
     last_breakout_price = -np.inf  # Initialize to -infinity to allow first breakout
     
+    # For plotting/debugging purposes, store points where breakout should occur
+    breakout_points = []
+    
     for idx, (current_time, row) in enumerate(df_filtered.iterrows()):
         rolling_high_value = row['Rolling_High']
         prev_30m_high = row['Prev_30m_High']
@@ -238,6 +241,9 @@ def backtest_1m(df_1m,
             if time(9, 30) <= current_time.time() < time(16, 0):
                 # Entry Condition: High price >= breakout_price
                 if row['High'] >= breakout_price:
+                    # Debugging: Mark the attempt to enter trade
+                    logger.debug(f"Attempting to enter trade at {current_time} with breakout_price {breakout_price}")
+                    
                     entry_price = breakout_price
                     stop_price  = entry_price - stop_loss_points
                     target_price= entry_price + take_profit_points
@@ -251,6 +257,9 @@ def backtest_1m(df_1m,
                     active_bars += 1
                     last_breakout_price = breakout_price  # Update last breakout price
                     logger.info(f"[ENTRY] Long entered at {entry_price} on {current_time}")
+                    
+                    # For debugging: mark this breakout
+                    breakout_points.append(current_time)
                 else:
                     logger.debug(f"No entry: High {row['High']} < Breakout Price {breakout_price}")
             else:
@@ -271,12 +280,19 @@ def backtest_1m(df_1m,
         'Equity': balance_series
     }).set_index('Datetime').sort_index()
     
+    # For debugging: Save breakout points to a CSV
+    if breakout_points:
+        breakout_df = pd.DataFrame({'Breakout_Time': breakout_points})
+        breakout_df.to_csv('breakout_points.csv', index=False)
+        logger.info(f"Saved {len(breakout_points)} breakout points to 'breakout_points.csv'.")
+    
     return {
         'cash': cash,
         'trade_results': trade_results,
         'balance_df': balance_df,
         'exposure_time_pct': exposure_time_percentage,
-        'df_filtered': df_filtered  # We'll use this for benchmark calculations
+        'df_filtered': df_filtered,  # We'll use this for benchmark calculations
+        'breakout_points': breakout_points  # For further analysis if needed
     }
 
 # -------------------------------------------------------------
@@ -288,6 +304,7 @@ def compute_and_plot_metrics(result_dict):
       - Full suite of performance metrics
       - Benchmark equity curve
       - Plot of Strategy vs Benchmark
+      - Plot of Rolling_High vs Close to visualize breakouts
     """
     if not result_dict:
         logger.error("Result dictionary is empty. Cannot compute metrics.")
@@ -298,6 +315,7 @@ def compute_and_plot_metrics(result_dict):
     balance_df   = result_dict['balance_df']
     exposure_pct = result_dict['exposure_time_pct']
     df_filtered  = result_dict['df_filtered']
+    breakout_points = result_dict.get('breakout_points', [])
     
     if len(balance_df) < 2:
         logger.warning("Not enough points in balance_df to compute metrics or plot.")
@@ -443,6 +461,21 @@ def compute_and_plot_metrics(result_dict):
     plt.title('Equity Curve: Strategy vs Benchmark')
     plt.xlabel('Time')
     plt.ylabel('Account Balance ($)')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+    
+    # Plot Rolling_High vs Close to visualize breakouts
+    plt.figure(figsize=(14, 7))
+    plt.plot(df_filtered.index, df_filtered['Close'], label='Close Price', alpha=0.5)
+    plt.plot(df_filtered.index, df_filtered['Rolling_High'], label='Rolling High', alpha=0.7)
+    if breakout_points:
+        plt.scatter(result_dict['breakout_points'], df_filtered.loc[result_dict['breakout_points'], 'Close'], 
+                    color='red', marker='^', label='Breakouts')
+    plt.title('Close Price and Rolling High with Breakouts')
+    plt.xlabel('Time')
+    plt.ylabel('Price')
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
