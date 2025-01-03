@@ -16,7 +16,7 @@ MES_TICK_VALUE = 5  # $ per tick
 # Load ES Futures Data
 # Replace 'es_5m_data.csv' with your actual file path
 # The CSV file should have 'date' and 'close' columns
-es_data = pd.read_csv('es_5m_data.csv', parse_dates=['date'])
+es_data = pd.read_csv('Data/es_5m_data.csv', parse_dates=['date'])
 
 # Ensure es_data is sorted
 es_data.sort_values('date', inplace=True)

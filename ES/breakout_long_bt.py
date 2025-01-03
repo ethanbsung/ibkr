@@ -5,33 +5,33 @@ import logging
 from datetime import time, timedelta
 
 # --- Setup Logging ---
-logging.basicConfig(level=logging.INFO)  # Change to DEBUG for more detailed logs
+logging.basicConfig(level=logging.INFO,  # Set to DEBUG for detailed logs
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    handlers=[
+                        logging.StreamHandler()  # Logs will be printed to console
+                    ])
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------------
-#              CONFIGURATION & USER PARAMETERS
+#              CONFIGURATION & USER PARAMETERSß
 # -------------------------------------------------------------
-INTRADAY_DATA_FILE = 'es_1m_data.csv'  # 1-minute CSV path
+INTRADAY_DATA_FILE = 'Data/es_1m_data.csv'  # Path to 1-minute CSV data
 
 # General Backtesting Parameters
 INITIAL_CASH        = 5000
-ES_MULTIPLIER       = 5       # 1 ES point = $5 per contract for ES
+ES_MULTIPLIER       = 5       # 1 ES point = $5 per contract
 STOP_LOSS_POINTS    = 9       # Stop loss in points
 TAKE_PROFIT_POINTS  = 10      # Take profit in points
-POSITION_SIZE       = 1       # Can be fractional if desired
+POSITION_SIZE       = 1       # Number of contracts per trade
 COMMISSION          = 1.24    # Commission per trade
-ONE_TICK            = 0.25    # For ES, 1 tick = 0.25 points
-
-# Convert points to ticks
-STOP_LOSS_TICKS     = STOP_LOSS_POINTS * 4  # 1 point = 4 ticks
-TAKE_PROFIT_TICKS   = TAKE_PROFIT_POINTS * 4
+ONE_TICK            = 0.25    # Tick size for ES
 
 # Rolling window for the 30-minute bars
-ROLLING_WINDOW = 13  # Adjusted to match RTH (6.5 hours / 30 minutes = 13 bars)
+ROLLING_WINDOW = 13  # Number of 30-minute bars in the rolling window
 
 # Backtest date range
-BACKTEST_START = "2014-01-01"
-BACKTEST_END   = "2019-12-23"
+BACKTEST_START = "2022-01-01"
+BACKTEST_END   = "2024-12-23"
 
 # -------------------------------------------------------------
 #              STEP 1: LOAD 1-MIN DATA
@@ -39,7 +39,7 @@ BACKTEST_END   = "2019-12-23"
 def load_data(csv_file):
     """
     Loads 1-minute intraday data from CSV, parses the Time column as datetime,
-    sorts by time, sets index, and does basic cleanup.
+    sorts by time, sets index, and performs basic cleanup.
     """
     try:
         df = pd.read_csv(
@@ -60,21 +60,24 @@ def load_data(csv_file):
         # If there's a timezone, remove it
         if df['Time'].dt.tz is not None:
             df['Time'] = df['Time'].dt.tz_convert(None)
+            logger.debug("Removed timezone from 'Time' column.")
         
         # Sort by 'Time' and set as index
         df.sort_values('Time', inplace=True)
         df.set_index('Time', inplace=True)
+        logger.info(f"Loaded data with {len(df)} rows.")
         
         # Drop columns if not needed
-        if 'Symbol' in df.columns:
-            df.drop(columns=['Symbol'], inplace=True)
-        if 'Last' in df.columns:
-            df.rename(columns={'Last': 'Close'}, inplace=True)
-        
-        # Optional: drop some columns
-        for col in ['Change', '%Chg', 'Open Int']:
+        columns_to_drop = ['Symbol', 'Change', '%Chg', 'Open Int']
+        for col in columns_to_drop:
             if col in df.columns:
                 df.drop(columns=[col], inplace=True)
+                logger.debug(f"Dropped column: {col}")
+        
+        # Rename 'Last' to 'Close' if present
+        if 'Last' in df.columns:
+            df.rename(columns={'Last': 'Close'}, inplace=True)
+            logger.debug("Renamed 'Last' column to 'Close'.")
         
         return df
     except Exception as e:
@@ -86,12 +89,12 @@ def load_data(csv_file):
 # -------------------------------------------------------------
 def prepare_data(df_1m, rolling_window=ROLLING_WINDOW):
     """
-    1) Resample df_1m to 30-min bars
-    2) Compute the rolling high over 'rolling_window' previous 30-min bars per day
-    3) Forward-fill that rolling high back onto the 1-min DataFrame
+    1) Resample df_1m to 30-minute bars.
+    2) Compute the rolling high over 'rolling_window' previous 30-minute bars.
+    3) Forward-fill Rolling_High and Prev_30m_High back onto the 1-minute DataFrame.
     """
     # Resample to 30-minute bars
-    df_30m = df_1m.resample('30min').agg({
+    df_30m = df_1m.resample('30T').agg({
         'Open': 'first',
         'High': 'max',
         'Low': 'min',
@@ -99,22 +102,29 @@ def prepare_data(df_1m, rolling_window=ROLLING_WINDOW):
         'Volume': 'sum'
     }).dropna()
     
-    # Assign date for grouping
-    df_30m['Date'] = df_30m.index.date
+    logger.info(f"Resampled to 30-minute bars with {len(df_30m)} rows.")
     
-    # Compute Rolling_High per day
+    # Compute Rolling_High (Exclude current bar when calculating)
     df_30m['Rolling_High'] = (
-        df_30m.groupby('Date')['High']
-              .shift(1)  # Exclude current bar
-              .rolling(window=rolling_window, min_periods=rolling_window)
-              .max()
+        df_30m['High']
+        .shift(1)  # Exclude the current bar's high
+        .rolling(window=rolling_window, min_periods=rolling_window)
+        .max()
     )
     
-    # Drop rows where Rolling_High is NaN
-    df_30m.dropna(subset=['Rolling_High'], inplace=True)
+    # Compute previous 30-minute bar's high
+    df_30m['Prev_30m_High'] = df_30m['High'].shift(1)
     
-    # Merge Rolling_High into 1-min data via forward-fill
-    df_1m['Rolling_High'] = df_30m['Rolling_High'].reindex(df_1m.index, method='ffill')
+    # Drop rows where Rolling_High or Prev_30m_High is NaN (e.g., early in the dataset)
+    df_30m.dropna(subset=['Rolling_High', 'Prev_30m_High'], inplace=True)
+    
+    logger.info(f"Computed Rolling_High and Prev_30m_High with {len(df_30m)} valid 30-minute bars.")
+    
+    # Assign Rolling_High and Prev_30m_High to 1-minute data using forward-fill
+    df_1m['Rolling_High'] = df_30m['Rolling_High'].reindex(df_1m.index, method='pad')
+    df_1m['Prev_30m_High'] = df_30m['Prev_30m_High'].reindex(df_1m.index, method='pad')
+    
+    logger.debug("Forward-filled Rolling_High and Prev_30m_High into 1-minute data.")
     
     return df_1m
 
@@ -124,8 +134,8 @@ def prepare_data(df_1m, rolling_window=ROLLING_WINDOW):
 def backtest_1m(df_1m, 
                 initial_cash=INITIAL_CASH,
                 es_multiplier=ES_MULTIPLIER,
-                stop_loss_ticks=STOP_LOSS_TICKS,
-                take_profit_ticks=TAKE_PROFIT_TICKS,
+                stop_loss_points=STOP_LOSS_POINTS,
+                take_profit_points=TAKE_PROFIT_POINTS,
                 position_size=POSITION_SIZE,
                 commission=COMMISSION,
                 one_tick=ONE_TICK,
@@ -133,7 +143,7 @@ def backtest_1m(df_1m,
                 end_date=BACKTEST_END):
     """
     Run a backtest on 1-minute data where:
-    - We buy 1 tick above the 30-min Rolling High when broken.
+    - We buy 1 tick above the 30-minute Rolling High when broken.
     - We manage stops and targets on a 1-minute basis.
     """
     # Filter date range
@@ -145,10 +155,12 @@ def backtest_1m(df_1m,
         logger.error("No data after filtering by date range.")
         return None
     
-    # Verify that Rolling_High was computed
-    if 'Rolling_High' not in df_filtered.columns:
-        logger.error("Rolling_High column not found. Did you run prepare_data()?")
+    # Verify that Rolling_High and Prev_30m_High were computed
+    if 'Rolling_High' not in df_filtered.columns or 'Prev_30m_High' not in df_filtered.columns:
+        logger.error("Rolling_High or Prev_30m_High column not found. Did you run prepare_data()?")
         return None
+    
+    logger.info(f"Backtesting from {start_time} to {end_time} with {len(df_filtered)} 1-minute bars.")
     
     # Initialize backtest variables
     cash = initial_cash
@@ -160,23 +172,30 @@ def backtest_1m(df_1m,
     total_bars = len(df_filtered)
     active_bars = 0  # For measuring "exposure"
     
-    last_breakout_price = None  # Track the last breakout price
+    last_breakout_price = -np.inf  # Initialize to -infinity to allow first breakout
     
     for idx, (current_time, row) in enumerate(df_filtered.iterrows()):
         rolling_high_value = row['Rolling_High']
+        prev_30m_high = row['Prev_30m_High']
         
-        # Skip if Rolling High is NaN (shouldn't happen if we've forward-filled + dropped NaN)
-        if pd.isna(rolling_high_value):
+        # Skip if Rolling High or Prev_30m_High is NaN (shouldn't happen if we've forward-filled + dropped NaN)
+        if pd.isna(rolling_high_value) or pd.isna(prev_30m_high):
+            logger.debug(f"Skipped Time: {current_time} due to NaN in Rolling_High or Prev_30m_High.")
             continue
         
         # Determine current breakout price
         breakout_price = rolling_high_value + one_tick
         
-        # Check if Rolling High has increased
-        if last_breakout_price is None or breakout_price > last_breakout_price:
-            eligible_for_entry = True
-        else:
-            eligible_for_entry = False
+        # Check eligibility:
+        # 1. Breakout Price > last_breakout_price
+        # 2. Breakout Price > Prev_30m_High
+        eligible_for_entry = (breakout_price > last_breakout_price) and (breakout_price > prev_30m_high)
+        
+        # Debug logs for current bar
+        logger.debug(f"Time: {current_time}")
+        logger.debug(f"Rolling_High: {rolling_high_value}, Prev_30m_High: {prev_30m_high}")
+        logger.debug(f"Breakout_Price: {breakout_price}, Last_Breakout_Price: {last_breakout_price}")
+        logger.debug(f"Eligible for Entry: {eligible_for_entry}")
         
         position_closed = False  # Flag to track if a position was closed in this iteration
         
@@ -198,7 +217,8 @@ def backtest_1m(df_1m,
                 logger.info(f"[STOP LOSS] Exit at {exit_price} on {exit_time}, PnL: ${pnl:,.2f}")
                 position = None
                 position_closed = True  # Set flag
-                last_breakout_price = None  # Reset last breakout price
+                # Do not reset last_breakout_price; keep it to prevent same breakout
+                
             # If still open, check Take Profit
             elif current_high >= position['take_profit']:
                 exit_price = position['take_profit']
@@ -211,16 +231,16 @@ def backtest_1m(df_1m,
                 logger.info(f"[TAKE PROFIT] Exit at {exit_price} on {exit_time}, PnL: ${pnl:,.2f}")
                 position = None
                 position_closed = True  # Set flag
-                last_breakout_price = None  # Reset last breakout price
+                # Do not reset last_breakout_price; keep it to prevent same breakout
         
         if not position_closed and position is None and eligible_for_entry:
-            # Only trade between 09:30 and 16:00
+            # Only trade during Regular Trading Hours (09:30 - 16:00)
             if time(9, 30) <= current_time.time() < time(16, 0):
-                # Entry Condition: Breakout above Rolling_High
+                # Entry Condition: High price >= breakout_price
                 if row['High'] >= breakout_price:
                     entry_price = breakout_price
-                    stop_price  = entry_price - stop_loss_ticks * one_tick
-                    target_price= entry_price + take_profit_ticks * one_tick
+                    stop_price  = entry_price - stop_loss_points
+                    target_price= entry_price + take_profit_points
                     
                     position = {
                         'entry_time': current_time,
@@ -231,6 +251,10 @@ def backtest_1m(df_1m,
                     active_bars += 1
                     last_breakout_price = breakout_price  # Update last breakout price
                     logger.info(f"[ENTRY] Long entered at {entry_price} on {current_time}")
+                else:
+                    logger.debug(f"No entry: High {row['High']} < Breakout Price {breakout_price}")
+            else:
+                logger.debug(f"No entry: Outside Regular Trading Hours at {current_time.time()}")
         
         # Record equity if no position or if we just closed
         if position is None:
@@ -239,6 +263,8 @@ def backtest_1m(df_1m,
                 balance_dates.append(current_time)
     
     exposure_time_percentage = (active_bars / total_bars) * 100
+    logger.info(f"Total Bars: {total_bars}, Active Bars (Trades Entered): {active_bars}")
+    logger.info(f"Exposure Time Percentage: {exposure_time_percentage:.2f}%")
     
     balance_df = pd.DataFrame({
         'Datetime': balance_dates,
@@ -326,15 +352,14 @@ def compute_and_plot_metrics(result_dict):
     # Strategy returns for ratio calculations
     returns = balance_df['Equity'].pct_change().dropna()
     
-    # Sharpe Ratio (approx, using ~ 252 trading days * ~6.5 hrs * 60 min = ~ 98k minutes)
-    # This is not an exact formula, but a ballpark. Adjust to your preference.
+    # Sharpe Ratio (annualized)
     if returns.std() != 0:
-        sharpe_ratio = returns.mean() / returns.std() * np.sqrt(252 * 6.5 * 60)
+        sharpe_ratio = returns.mean() / returns.std() * np.sqrt(252 * 6.5 * 60)  # Adjusted for intraday
     else:
         sharpe_ratio = 0
     
     # Sortino Ratio
-    mar = 0
+    mar = 0  # Minimum Acceptable Return
     strategy_returns = np.array(trade_results) / initial_cash
     downside_returns = np.where(strategy_returns < mar, strategy_returns - mar, 0)
     expected_return  = np.mean(strategy_returns) if len(strategy_returns) > 0 else 0
@@ -345,7 +370,7 @@ def compute_and_plot_metrics(result_dict):
         sortino_ratio = np.nan
     
     # Calmar Ratio (annualized return / abs(max_drawdown))
-    # We'll approximate the days in the dataset:
+    # Approximate the number of days in the dataset
     days_in_period = (df_filtered.index[-1] - df_filtered.index[0]).days
     if days_in_period > 0:
         annualized_return_percentage = ((final_cash / initial_cash)**(365.0 / days_in_period) - 1) * 100
@@ -365,13 +390,12 @@ def compute_and_plot_metrics(result_dict):
     # Create a 1-min benchmark equity curve: (price / initial_price) * initial_cash
     benchmark_equity = (df_filtered['Close'] / initial_close) * initial_cash
     # Align it with balance_df (the strategy equity)
-    benchmark_equity = benchmark_equity.reindex(balance_df.index, method='ffill')
+    benchmark_equity = benchmark_equity.reindex(balance_df.index, method='pad')
     # Fill any remaining NaNs
     benchmark_equity.fillna(method='ffill', inplace=True)
     
     # Volatility (Annual)
-    # We'll again approximate by scaling the std dev of minute returns.
-    vol_annual = returns.std() * np.sqrt(252 * 6.5 * 60) * 100
+    vol_annual = returns.std() * np.sqrt(252 * 6.5 * 60) * 100  # Adjusted for intraday
     
     # Create results dictionary
     results = {
@@ -394,8 +418,8 @@ def compute_and_plot_metrics(result_dict):
         "Calmar Ratio": f"{calmar_ratio:.2f}",
         "Max Drawdown": f"{max_drawdown:.2f}%",
         "Average Drawdown": f"{average_drawdown:.2f}%",
-        "Max Drawdown Duration": f"{max_drawdown_duration_days:.2f} days",
-        "Average Drawdown Duration": f"{average_drawdown_duration_days:.2f} days",
+        "Max Drawdown Duration": f"{max_drawdown_duration_days:.4f} days",
+        "Average Drawdown Duration": f"{average_drawdown_duration_days:.4f} days",
     }
     
     # Print the Performance Summary
@@ -429,20 +453,25 @@ def compute_and_plot_metrics(result_dict):
 # -------------------------------------------------------------
 def main():
     # 1) Load the 1-minute data
-    df_intraday = load_data(INTRADAY_DATA_FILE)
-    print("Full Data Range:", df_intraday.index.min(), "to", df_intraday.index.max())
+    try:
+        df_intraday = load_data(INTRADAY_DATA_FILE)
+        print("Full Data Range:", df_intraday.index.min(), "to", df_intraday.index.max())
+    except Exception as e:
+        logger.error("Failed to load data. Exiting.")
+        return
     
     # 2) Prepare data (30-min Rolling High -> forward-fill -> 1-min)
     df_prepared = prepare_data(df_intraday, rolling_window=ROLLING_WINDOW)
-    df_prepared.dropna(subset=['Rolling_High'], inplace=True)
+    df_prepared.dropna(subset=['Rolling_High', 'Prev_30m_High'], inplace=True)
+    logger.info(f"Prepared data with {len(df_prepared)} 1-minute bars after dropping NaNs.")
     
     # 3) Run the backtest on 1-minute data
     backtest_result = backtest_1m(
         df_1m=df_prepared,
         initial_cash=INITIAL_CASH,
         es_multiplier=ES_MULTIPLIER,
-        stop_loss_ticks=STOP_LOSS_TICKS,
-        take_profit_ticks=TAKE_PROFIT_TICKS,
+        stop_loss_points=STOP_LOSS_POINTS,
+        take_profit_points=TAKE_PROFIT_POINTS,
         position_size=POSITION_SIZE,
         commission=COMMISSION,
         one_tick=ONE_TICK,

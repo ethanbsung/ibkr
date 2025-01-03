@@ -450,7 +450,7 @@ def main():
     print("=== Starting Genetic Algorithm Optimization ===")
     
     # 1) Load the 1-minute data
-    csv_file = 'es_1m_data.csv'
+    csv_file = 'Data/es_1m_data.csv'
     df_intraday = load_data(csv_file)
     
     # Verify that the data covers both training and validation periods
