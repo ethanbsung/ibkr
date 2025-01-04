@@ -5,6 +5,7 @@ from ib_insync import *
 import logging
 import sys
 import pytz
+from datetime import timedelta
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host

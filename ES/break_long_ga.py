@@ -29,7 +29,7 @@ ES_MULTIPLIER   = 5       # 1 ES point = $5 profit/loss per contract (ES)
 POSITION_SIZE   = 1       # can be fractional if desired
 COMMISSION      = 1.24    # commission per trade
 ONE_TICK        = 0.25    # Tick size for ES
-SLIPPAGE        = 1       # Slippage in points
+SLIPPAGE        = 0       # Slippage in points
 
 # We'll discover these via the GA:
 # STOP_LOSS_POINTS, TAKE_PROFIT_POINTS, ROLLING_WINDOW
@@ -161,10 +161,11 @@ def prepare_data(df_1m, df_30m, rolling_window, backtest_start_date=None):
     df_1m['Rolling_High'] = df_30m['Rolling_High'].reindex(df_1m.index, method='pad')
     df_1m['Prev_30m_High'] = df_30m['Prev_30m_High'].reindex(df_1m.index, method='pad')
 
-    # Reset Rolling_High and Prev_30m_High at the start of the backtest period
-    if backtest_start_date:
-        backtest_start = pd.to_datetime(backtest_start_date)
-        df_1m.loc[:backtest_start, ['Rolling_High', 'Prev_30m_High']] = np.nan
+    # Remove the resetting of Rolling_High and Prev_30m_High before backtest_start_date
+    # This is the primary fix to ensure Rolling_High has historical data
+    # if backtest_start_date:
+    #     backtest_start = pd.to_datetime(backtest_start_date)
+    #     df_1m.loc[:backtest_start, ['Rolling_High', 'Prev_30m_High']] = np.nan
 
     # Add a '30m_bar' column indicating the 30-minute bar each 1-minute bar belongs to
     df_1m['30m_bar'] = df_1m.index.floor('30min')
@@ -264,9 +265,7 @@ def perform_backtest(
         # 1. Breakout Price > Prev_30m_High
         # 2. No trade has been taken in the current 30-minute bar
         # 3. Rolling_High has increased since the last trade
-        eligible_for_entry = (breakout_price > prev_30m_high) and \
-                              (current_30m_bar != last_trade_30m_bar) and \
-                              (rolling_high_value > previous_rolling_high)
+        eligible_for_entry = (breakout_price != prev_30m_high + ONE_TICK_LOCAL) and (current_30m_bar != last_trade_30m_bar) and (rolling_high_value != previous_rolling_high)
 
         # Debug logs for current bar
         logger.debug(f"Time: {current_time}")
@@ -286,7 +285,7 @@ def perform_backtest(
             # Check Stop Loss
             if current_low <= position['stop_loss']:
                 exit_price = position['stop_loss']
-                pnl = ((exit_price - position['entry_price']) 
+                pnl = ((exit_price - (position['entry_price'] + slippage)) 
                        * position_size * es_multiplier) - commission
                 cash += pnl
                 trade_results.append(pnl)
@@ -301,7 +300,7 @@ def perform_backtest(
             # If still open, check Take Profit
             elif current_high >= position['take_profit']:
                 exit_price = position['take_profit']
-                pnl = ((exit_price - position['entry_price']) 
+                pnl = ((exit_price - (position['entry_price'] + slippage)) 
                        * position_size * es_multiplier) - commission
                 cash += pnl
                 trade_results.append(pnl)
@@ -321,7 +320,7 @@ def perform_backtest(
                     # Debugging: Mark the attempt to enter trade
                     logger.debug(f"Attempting to enter trade at {current_time} with breakout_price {breakout_price}")
 
-                    entry_price = breakout_price + slippage
+                    entry_price = breakout_price
                     stop_price  = entry_price - stop_loss_points
                     target_price= entry_price + take_profit_points
 
@@ -361,11 +360,6 @@ def perform_backtest(
         'Equity': balance_series
     }).set_index('Datetime').sort_index()
 
-    # For debugging: Save breakout points to a CSV
-    if breakout_points:
-        breakout_df = pd.DataFrame({'Breakout_Time': breakout_points})
-        breakout_df.to_csv('breakout_points_ga.csv', index=False)
-        logger.info(f"Saved {len(breakout_points)} breakout points to 'breakout_points_ga.csv'.")
 
     # Step D: Compute Sharpe Ratio
     returns = balance_df['Equity'].pct_change().dropna()
@@ -394,9 +388,9 @@ def run_backtest(
     position_size=POSITION_SIZE,
     commission=COMMISSION,
     slippage=SLIPPAGE,
-    train_start_date="2012-01-01",
-    train_end_date="2019-12-31",
-    val_start_date="2020-01-01",
+    train_start_date="2018-01-01",
+    train_end_date="2021-12-31",
+    val_start_date="2022-01-01",
     val_end_date="2024-12-23"
 ):
     """
@@ -576,11 +570,28 @@ def main():
     df_intraday_1m = load_data(csv_file_1m, data_type='1m')
     df_intraday_30m = load_data(csv_file_30m, data_type='30m')
 
-    # 2) Define backtest periods
-    train_start_date = "2022-01-08"
-    train_end_date   = "2024-12-23"  # Adjusted to match backtest_end
-    val_start_date   = "2025-01-04"  # Assuming continuation beyond backtest_end
-    val_end_date     = "2025-12-31"  # Example dates; adjust as needed
+    # 2) Define backtest periods based on data range
+    train_start_date = "2018-01-01"
+    train_end_date   = "2021-12-31"
+    val_start_date   = "2022-01-01"
+    val_end_date     = "2024-12-23"
+
+    # Verify data ranges
+    print(f"1-Minute Data Range: {df_intraday_1m.index.min()} to {df_intraday_1m.index.max()}")
+    print(f"30-Minute Data Range: {df_intraday_30m.index.min()} to {df_intraday_30m.index.max()}")
+
+    # Ensure backtest periods are within data ranges
+    if pd.to_datetime(train_start_date) < df_intraday_1m.index.min():
+        train_start_date = df_intraday_1m.index.min().strftime('%Y-%m-%d')
+        print(f"Adjusted Training Start Date to {train_start_date} to fit data.")
+
+    if pd.to_datetime(train_end_date) > df_intraday_1m.index.max():
+        train_end_date = df_intraday_1m.index.max().strftime('%Y-%m-%d')
+        print(f"Adjusted Training End Date to {train_end_date} to fit data.")
+
+    if pd.to_datetime(val_end_date) > df_intraday_1m.index.max():
+        val_end_date = df_intraday_1m.index.max().strftime('%Y-%m-%d')
+        print(f"Adjusted Validation End Date to {val_end_date} to fit data.")
 
     # 3) Initialize population
     population = [create_individual() for _ in range(POPULATION_SIZE)]

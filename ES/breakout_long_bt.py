@@ -21,18 +21,18 @@ INTRADAY_30M_DATA_FILE = 'Data/es_30m_data.csv'  # Path to 30-minute CSV data
 # General Backtesting Parameters
 INITIAL_CASH        = 5000
 ES_MULTIPLIER       = 5       # 1 ES point = $5 per contract
-STOP_LOSS_POINTS    = 9       # Stop loss in points
-TAKE_PROFIT_POINTS  = 10      # Take profit in points
+STOP_LOSS_POINTS    = 8       # Stop loss in points
+TAKE_PROFIT_POINTS  = 23      # Take profit in points
 POSITION_SIZE       = 1       # Number of contracts per trade
 COMMISSION          = 1.24    # Commission per trade
 ONE_TICK            = 0.25    # Tick size for ES
-SLIPPAGE            = 1       # Slippage in points
+SLIPPAGE            = 0       # Slippage in points
 
 # Rolling window for the 30-minute bars
-ROLLING_WINDOW = 13  # Number of 30-minute bars in the rolling window
+ROLLING_WINDOW = 30  # Number of 30-minute bars in the rolling window
 
 # Backtest date range
-BACKTEST_START = "2022-01-08"
+BACKTEST_START = "2018-01-08"
 BACKTEST_END   = "2024-12-23"
 
 # -------------------------------------------------------------
@@ -133,10 +133,11 @@ def prepare_data(df_1m, df_30m, rolling_window=ROLLING_WINDOW):
     
     logger.debug("Forward-filled Rolling_High and Prev_30m_High into 1-minute data.")
     
-    # After forward-filling, ensure that Rolling_High is calculated only based on the last 13 30-minute bars
-    # Reset Rolling_High at the start of the backtest to prevent influence from prior data
-    backtest_start = pd.to_datetime(BACKTEST_START)
-    df_1m.loc[:backtest_start, ['Rolling_High', 'Prev_30m_High']] = np.nan
+    # Remove the resetting of Rolling_High and Prev_30m_High before backtest_start_date
+    # This is the primary fix to ensure Rolling_High has historical data
+    # Removed the following lines:
+    # backtest_start = pd.to_datetime(BACKTEST_START)
+    # df_1m.loc[:backtest_start, ['Rolling_High', 'Prev_30m_High']] = np.nan
     
     # Add a '30m_bar' column indicating the 30-minute bar each 1-minute bar belongs to
     df_1m['30m_bar'] = df_1m.index.floor('30min')
@@ -171,7 +172,7 @@ def backtest_1m(df_1m,
     Returns:
     - result_dict: Dictionary containing backtest results and data.
     """
-    # Filter date range
+    # Filter date range AFTER preparing data
     start_time = pd.to_datetime(start_date)
     end_time   = pd.to_datetime(end_date)
     df_filtered = df_1m.loc[start_time:end_time].copy()
@@ -222,8 +223,12 @@ def backtest_1m(df_1m,
         # Check eligibility:
         # 1. Breakout Price > Prev_30m_High
         # 2. No trade has been taken in the current 30-minute bar
-        # 3. Rolling_High has increased since the last trade
-        eligible_for_entry = (breakout_price != prev_30m_high + one_tick) and (current_30m_bar != last_trade_30m_bar) and (rolling_high_value != previous_rolling_high)
+        # 3. Rolling_High has increased since the last trade (OPTIONAL)
+        # To increase trade frequency, consider removing this condition
+        # eligible_for_entry = (breakout_price > prev_30m_high + one_tick) and (current_30m_bar != last_trade_30m_bar) and (rolling_high_value > previous_rolling_high)
+        eligible_for_entry = (breakout_price > prev_30m_high + one_tick) and (current_30m_bar != last_trade_30m_bar)
+        # Optionally, you can keep the rolling_high_value > previous_rolling_high condition
+        # but it's causing fewer trades. You may want to experiment with it.
         
         # Debug logs for current bar
         logger.debug(f"Time: {current_time}")
@@ -238,7 +243,7 @@ def backtest_1m(df_1m,
             # Manage open position
             current_high = row['High']
             current_low  = row['Low']
-            exit_time    = current_time
+            exit_time = current_time
             
             # Check Stop Loss
             if current_low <= position['stop_loss']:
@@ -252,7 +257,7 @@ def backtest_1m(df_1m,
                 logger.info(f"[STOP LOSS] Exit at {exit_price} on {exit_time}, PnL: ${pnl:,.2f}")
                 position = None
                 position_closed = True  # Set flag
-                # No need to reset last_trade_30m_bar
+                # Optionally reset previous_rolling_high if needed
             
             # If still open, check Take Profit
             elif current_high >= position['take_profit']:
@@ -266,7 +271,7 @@ def backtest_1m(df_1m,
                 logger.info(f"[TAKE PROFIT] Exit at {exit_price} on {exit_time}, PnL: ${pnl:,.2f}")
                 position = None
                 position_closed = True  # Set flag
-                # No need to reset last_trade_30m_bar
+                # Optionally reset previous_rolling_high if needed
         
         if not position_closed and position is None and eligible_for_entry:
             # Only trade during Regular Trading Hours (09:30 - 16:00)
@@ -288,7 +293,8 @@ def backtest_1m(df_1m,
                     }
                     active_trades += 1
                     last_trade_30m_bar = current_30m_bar  # Update last trade 30m bar
-                    previous_rolling_high = rolling_high_value  # Update previous rolling high
+                    # Optionally, track previous_rolling_high
+                    # previous_rolling_high = rolling_high_value
                     logger.info(f"[ENTRY] Long entered at {entry_price} on {current_time}")
                     
                     # For debugging: mark this breakout
@@ -531,8 +537,11 @@ def compute_and_plot_metrics(result_dict):
     plt.plot(df_filtered.index, df_filtered['Close'], label='Close Price', alpha=0.5)
     plt.plot(df_filtered.index, df_filtered['Rolling_High'], label='Rolling High', alpha=0.7)
     if breakout_points:
-        plt.scatter(result_dict['breakout_points'], df_filtered.loc[result_dict['breakout_points'], 'Close'], 
-                    color='red', marker='^', label='Breakouts')
+        # Ensure breakout_points are within df_filtered index
+        valid_breakouts = [pt for pt in breakout_points if pt in df_filtered.index]
+        if valid_breakouts:
+            plt.scatter(valid_breakouts, df_filtered.loc[valid_breakouts, 'Close'], 
+                        color='red', marker='^', label='Breakouts')
     plt.title('Close Price and Rolling High with Breakouts')
     plt.xlabel('Time')
     plt.ylabel('Price')
@@ -561,22 +570,10 @@ def main():
         logger.error("Failed to load 30-minute data. Exiting.")
         return
     
-    # 3) Filter both datasets to the backtest date range
-    backtest_start = pd.to_datetime(BACKTEST_START)
-    backtest_end   = pd.to_datetime(BACKTEST_END)
-    
-    df_intraday_1m = df_intraday_1m.loc[backtest_start:backtest_end].copy()
-    df_intraday_30m = df_intraday_30m.loc[backtest_start:backtest_end].copy()
-    
-    logger.info(f"Filtered 1-Minute Data to {len(df_intraday_1m)} bars from {BACKTEST_START} to {BACKTEST_END}.")
-    logger.info(f"Filtered 30-Minute Data to {len(df_intraday_30m)} bars from {BACKTEST_START} to {BACKTEST_END}.")
-    
-    # 4) Prepare data (merge Rolling_High and Prev_30m_High into 1-minute data)
+    # 3) Prepare data (merge Rolling_High and Prev_30m_High into 1-minute data)
     df_prepared = prepare_data(df_intraday_1m, df_intraday_30m, rolling_window=ROLLING_WINDOW)
-    df_prepared.dropna(subset=['Rolling_High', 'Prev_30m_High'], inplace=True)
-    logger.info(f"Prepared data with {len(df_prepared)} 1-minute bars after dropping NaNs.")
     
-    # 5) Run the backtest on 1-minute data
+    # 4) Run the backtest on 1-minute data
     backtest_result = backtest_1m(
         df_1m=df_prepared,
         initial_cash=INITIAL_CASH,
@@ -594,7 +591,7 @@ def main():
         logger.error("Backtest returned None. Please check your data and parameters.")
         return
     
-    # 6) Compute extended metrics and plot
+    # 5) Compute extended metrics and plot
     compute_and_plot_metrics(backtest_result)
 
 if __name__ == '__main__':
