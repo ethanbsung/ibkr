@@ -3,43 +3,53 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import timedelta
 import math
+import pytz
 
 # ----------------------------- #
 #          Parameters           #
 # ----------------------------- #
 
 # Backtest Period
-BACKTEST_START = '2020-06-01'  # Start date in 'YYYY-MM-DD' format
+BACKTEST_START = '2022-01-01'  # Start date in 'YYYY-MM-DD' format
 BACKTEST_END = '2024-12-23'    # End date in 'YYYY-MM-DD' format
 
 # SMA Parameters
-SMA_TIMEFRAME = '15T'  # 15-minute timeframe for SMA ('T' stands for minutes)
-SMA_PERIOD = 25         # Number of SMA periods (each period is 15 minutes)
+SMA_TIMEFRAME = '1h'  # 1-hour timeframe for SMA ('h' stands for hours)
+SMA_PERIOD = 25        # Number of SMA periods (each period is 1 hour)
+
+# ATR Parameters
+ATR_TIMEFRAME = '1h'    # ATR calculated on 1-hour timeframe
+ATR_PERIOD = 14            # Standard ATR period
+STOP_LOSS_ATR_MULTIPLE = 0.5  # Stop loss multiple of ATR
+TAKE_PROFIT_ATR_MULTIPLE = 1  # Take profit multiple of ATR
 
 # Trading Strategy Parameters
-THRESHOLD = 20          # Points deviation to trigger trades
+THRESHOLD = 50          # Points deviation to trigger trades
 INITIAL_BALANCE = 5000  # Initial account balance in $
 CONTRACT_SIZE = 1       # Number of MES contracts
-STOP_LOSS = 4           # Points
-TAKE_PROFIT = 10        # Points
 MES_TICK_VALUE = 5      # $ per tick
 
 # Slippage Parameters
-SLIPPAGE_POINTS = 0.5  # Slippage in points (1 tick for ES futures)
+SLIPPAGE_POINTS = 0     # Slippage in points (1 tick for ES futures)
 
 # Commission Parameters
 COMMISSION_PER_TRADE = 1.24  # Commission per round-trip trade in $
 
 # File Path
-DATA_FILE_PATH = 'Data/es_1m_data.csv'  # Replace with your actual file path
+DATA_FILE_PATH = 'Data/es_5m_data.csv'  # Replace with your actual file path
 
 # ----------------------------- #
 #       Load and Prepare Data    #
 # ----------------------------- #
 
-# Load ES Futures 1-Minute Data
+# Load ES Futures 5-Minute Data
 # The CSV file should have columns: Symbol, Time, Open, High, Low, Last, Change, %Chg, Volume, Open Int
-es_data = pd.read_csv(DATA_FILE_PATH, parse_dates=['Time'])
+try:
+    es_data = pd.read_csv(DATA_FILE_PATH, parse_dates=['Time'])
+except FileNotFoundError:
+    raise FileNotFoundError(f"The data file at '{DATA_FILE_PATH}' was not found.")
+except Exception as e:
+    raise Exception(f"An error occurred while reading the data file: {e}")
 
 # Ensure data is sorted by Time
 es_data.sort_values('Time', inplace=True)
@@ -59,20 +69,69 @@ es_data = es_data[(es_data['date'] >= pd.to_datetime(BACKTEST_START)) &
 if es_data.empty:
     raise ValueError("No data available for the specified backtest period. Please check the dates and data file.")
 
-# Calculate 15-Minute SMA
-# Resample to 15-minute bars to calculate SMA
-sma_15m = es_data.set_index('date').resample(SMA_TIMEFRAME).agg({'close': 'last'})
-sma_15m['SMA_15m'] = sma_15m['close'].rolling(window=SMA_PERIOD).mean()
-sma_15m = sma_15m[['SMA_15m']]
+# ----------------------------- #
+#    Filter Regular Trading Hours (RTH)  #
+# ----------------------------- #
 
-# Merge SMA back to 1-minute data
-es_data = es_data.set_index('date').join(sma_15m, how='left').reset_index()
+# Define US/Eastern timezone
+eastern = pytz.timezone('US/Eastern')
 
-# Forward-fill the SMA values to align with 1-minute data
-es_data['SMA_15m'].fillna(method='ffill', inplace=True)
+# Ensure 'date' is timezone-aware. Assuming the data is in UTC.
+# If data is not in UTC, adjust the localization accordingly.
+es_data['date'] = es_data['date'].dt.tz_localize('UTC').dt.tz_convert(eastern)
 
-# Calculate Deviation from 15-Minute SMA
-es_data['Deviation'] = es_data['close'] - es_data['SMA_15m']
+# Filter for weekdays (Monday=0 to Friday=4)
+es_data = es_data[es_data['date'].dt.weekday < 5]
+
+# Set 'date' as index to use between_time
+es_data.set_index('date', inplace=True)
+
+# Filter for RTH hours: 09:30 to 16:00 ET
+es_data = es_data.between_time('09:30', '16:00')
+
+# Convert back to UTC for backtesting
+es_data = es_data.tz_convert('UTC')
+
+# Reset index
+es_data = es_data.reset_index()
+
+# ----------------------------- #
+#      Calculate 1-Hour SMA and ATR    #
+# ----------------------------- #
+
+# Resample to 1-hour bars
+resampled_1h = es_data.set_index('date').resample(SMA_TIMEFRAME).agg({
+    'Open': 'first',
+    'High': 'max',
+    'Low': 'min',
+    'close': 'last',
+    'Volume': 'sum'
+}).dropna()
+
+# Calculate 1-Hour SMA
+resampled_1h['SMA_1H'] = resampled_1h['close'].rolling(window=SMA_PERIOD).mean()
+
+# Calculate 1-Hour ATR
+# ATR = max(high - low, abs(high - previous close), abs(low - previous close))
+resampled_1h['prev_close'] = resampled_1h['close'].shift(1)
+resampled_1h['TR'] = resampled_1h.apply(
+    lambda row: max(row['High'] - row['Low'], 
+                   abs(row['High'] - row['prev_close']), 
+                   abs(row['Low'] - row['prev_close'])), axis=1)
+resampled_1h['ATR_1H'] = resampled_1h['TR'].rolling(window=ATR_PERIOD).mean()
+
+# Drop rows with NaN ATR
+resampled_1h.dropna(subset=['ATR_1H'], inplace=True)
+
+# Merge SMA and ATR back to 5-minute data
+es_data = es_data.set_index('date').join(resampled_1h[['SMA_1H', 'ATR_1H']], how='left').reset_index()
+
+# Forward-fill the SMA and ATR values to align with 5-minute data
+es_data['SMA_1H'] = es_data['SMA_1H'].ffill()
+es_data['ATR_1H'] = es_data['ATR_1H'].ffill()
+
+# Calculate Deviation from 1-Hour SMA
+es_data['Deviation'] = es_data['close'] - es_data['SMA_1H']
 
 # ----------------------------- #
 #       Initialize Variables     #
@@ -120,23 +179,26 @@ for idx, row in es_data.iterrows():
         benchmark_balance *= (1 + benchmark_return)
         benchmark_balance_history.append(benchmark_balance)
     
-    if np.isnan(row['SMA_15m']):
-        # Not enough data to compute SMA
+    if np.isnan(row['SMA_1H']) or np.isnan(row['ATR_1H']):
+        # Not enough data to compute SMA or ATR
         balance_history.append(balance)
         equity_history.append(balance)
         positions_history.append(position)
+        benchmark_balance_history[-1] = benchmark_balance  # Keep benchmark_balance
         continue
 
     if position == 0:
-        # Check for entry signals based on deviation
+        # Check for entry signals based on deviation crossing the threshold
         if row['Deviation'] <= -THRESHOLD:
-            # Enter Long
+            # Long Entry: Price is below SMA by THRESHOLD
             position = 1
-            signal_price = row['close']
-            # Adjust entry price for slippage (buy higher)
-            entry_price = row['close'] + SLIPPAGE_POINTS
-            stop_loss_price = entry_price - STOP_LOSS
-            take_profit_price = entry_price + TAKE_PROFIT
+            signal_price = row['SMA_1H'] - THRESHOLD  # SMA - THRESHOLD
+            entry_price = signal_price + SLIPPAGE_POINTS  # Adjust for slippage (buy higher)
+            
+            # Calculate Stop Loss and Take Profit based on ATR
+            stop_loss_price = entry_price - (row['ATR_1H'] * STOP_LOSS_ATR_MULTIPLE)
+            take_profit_price = entry_price + (row['ATR_1H'] * TAKE_PROFIT_ATR_MULTIPLE)
+            
             trade = {
                 'Entry_Time': row['date'],
                 'Signal_Price': signal_price,
@@ -153,13 +215,15 @@ for idx, row in es_data.iterrows():
             exposure_time += 1
             print(f"Long Entry Signal at {trade['Entry_Time']} | Signal Price: {signal_price:.2f} | Actual Entry Price: {entry_price:.2f}")
         elif row['Deviation'] >= THRESHOLD:
-            # Enter Short
+            # Short Entry: Price is above SMA by THRESHOLD
             position = -1
-            signal_price = row['close']
-            # Adjust entry price for slippage (sell lower)
-            entry_price = row['close'] - SLIPPAGE_POINTS
-            stop_loss_price = entry_price + STOP_LOSS
-            take_profit_price = entry_price - TAKE_PROFIT
+            signal_price = row['SMA_1H'] + THRESHOLD  # SMA + THRESHOLD
+            entry_price = signal_price - SLIPPAGE_POINTS  # Adjust for slippage (sell lower)
+            
+            # Calculate Stop Loss and Take Profit based on ATR
+            stop_loss_price = entry_price + (row['ATR_1H'] * STOP_LOSS_ATR_MULTIPLE)
+            take_profit_price = entry_price - (row['ATR_1H'] * TAKE_PROFIT_ATR_MULTIPLE)
+            
             trade = {
                 'Entry_Time': row['date'],
                 'Signal_Price': signal_price,
@@ -186,21 +250,21 @@ for idx, row in es_data.iterrows():
 
         if position == 1:
             # Long Position
-            # Take Profit
+            # Take Profit: Reached take profit price
             if row['close'] >= take_profit_price:
                 exit_price = take_profit_price
                 exit_reason = 'Take Profit'
-            # Stop Loss
+            # Stop Loss: Reached stop loss price
             elif row['close'] <= stop_loss_price:
                 exit_price = stop_loss_price
                 exit_reason = 'Stop Loss'
         elif position == -1:
             # Short Position
-            # Take Profit
+            # Take Profit: Reached take profit price
             if row['close'] <= take_profit_price:
                 exit_price = take_profit_price
                 exit_reason = 'Take Profit'
-            # Stop Loss
+            # Stop Loss: Reached stop loss price
             elif row['close'] >= stop_loss_price:
                 exit_price = stop_loss_price
                 exit_reason = 'Stop Loss'
@@ -315,9 +379,9 @@ annualized_return = ((final_balance / INITIAL_BALANCE) ** (365 / total_days) - 1
 benchmark_return = (es_data['Benchmark_Equity'].iloc[-1] - INITIAL_BALANCE) / INITIAL_BALANCE * 100
 
 # Volatility (Annual)
-# Adjusted for 1-minute data: 252 trading days * 6.5 trading hours * 60 minutes
-trading_minutes_per_year = 252 * 6.5 * 60
-volatility_annual = es_data['Returns'].std() * math.sqrt(trading_minutes_per_year)
+# Adjusted for 5-minute data: 252 trading days * 6.5 trading hours * 12 5-min periods per hour = 252*6.5*12=19656 periods per year
+trading_periods_per_year = 252 * 6.5 * 12  # 5-minute data
+volatility_annual = es_data['Returns'].std() * math.sqrt(trading_periods_per_year)
 
 # Win Rate and Profit Factor
 total_trades = len(trade_results)
@@ -330,11 +394,11 @@ profit_factor = (sum_profits / sum_losses) if sum_losses != 0 else math.inf
 
 # Sharpe Ratio
 risk_free_rate = 0.0  # Assuming risk-free rate is 0
-sharpe_ratio = (es_data['Returns'].mean() - risk_free_rate) / es_data['Returns'].std() * math.sqrt(trading_minutes_per_year) if es_data['Returns'].std() != 0 else 0
+sharpe_ratio = (es_data['Returns'].mean() - risk_free_rate) / es_data['Returns'].std() * math.sqrt(trading_periods_per_year) if es_data['Returns'].std() != 0 else 0
 
 # Sortino Ratio
 downside_returns = es_data['Returns'][es_data['Returns'] < 0]
-sortino_ratio = (es_data['Returns'].mean() - risk_free_rate) / downside_returns.std() * math.sqrt(trading_minutes_per_year) if downside_returns.std() != 0 else 0
+sortino_ratio = (es_data['Returns'].mean() - risk_free_rate) / downside_returns.std() * math.sqrt(trading_periods_per_year) if downside_returns.std() != 0 else 0
 
 # Calmar Ratio
 calmar_ratio = (total_return / (max_drawdown / MES_TICK_VALUE)) if max_drawdown != 0 else math.inf
@@ -387,9 +451,23 @@ for key, value in results.items():
 
 # Plot Equity Curve with Benchmark
 plt.figure(figsize=(14, 7))
-plt.plot(es_data['date'], es_data['Equity'], label='Strategy Equity', color='blue')
-plt.plot(es_data['date'], es_data['Benchmark_Equity'], label='Benchmark Equity (Buy & Hold)', color='orange', linestyle='--')
+plt.plot(es_data['date'], equity_history, label='Strategy Equity', color='blue')
+plt.plot(es_data['date'], benchmark_balance_history, label='Benchmark Equity (Buy & Hold)', color='orange', linestyle='--')
 plt.title('Equity Curve Comparison')
+plt.xlabel('Date')
+plt.ylabel('Equity ($)')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Plot Drawdowns
+plt.figure(figsize=(14, 4))
+plt.plot(es_data['date'], equity_history, label='Equity', color='blue')
+plt.fill_between(es_data['date'], equity_history, equity_peak_final - max_drawdown, 
+                 where=np.array(equity_history) < (equity_peak_final - max_drawdown), 
+                 color='red', alpha=0.3, label='Drawdown')
+plt.title('Drawdown Visualization')
 plt.xlabel('Date')
 plt.ylabel('Equity ($)')
 plt.legend()
@@ -403,7 +481,8 @@ plt.show()
 
 # Optional: Save trade results to a CSV file
 # trades_df = pd.DataFrame(trade_results)
-# trades_df.to_csv('trade_results.csv', index=False)
+# trades_df.to_csv('trade_results_atr_adjusted.csv', index=False)
+# print("Trade log saved to 'trade_results_atr_adjusted.csv'.")
 
 # ----------------------------- #
 #             End                #
