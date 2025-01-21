@@ -18,11 +18,11 @@ POSITION_SIZE = 1            # Number of contracts per trade
 CONTRACT_MULTIPLIER = 5      # Contract multiplier
 COMMISSION = 1.24            # Commission per trade
 
-SHORT_EMA_PERIOD = 10        # Short EMA period (50-day EMA)
-LONG_EMA_PERIOD = 120        # Long EMA period (200-day EMA)
+SHORT_EMA_PERIOD = 20        # Short EMA period (10-period EMA)
+LONG_EMA_PERIOD = 50         # Long EMA period (50-period EMA)
 
 # --- Data File ---
-CSV_FILE_DAILY = 'es_daily_data.csv'
+CSV_FILE_DAILY = 'Data/es_30m_data.csv'
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -38,7 +38,7 @@ logger = logging.getLogger()
 
 def load_data(csv_file):
     """
-    Loads daily CSV data into a pandas DataFrame with appropriate data types and datetime parsing.
+    Loads hourly futures data into a pandas DataFrame with appropriate data types and datetime parsing.
 
     Parameters:
         csv_file (str): Path to the CSV file.
@@ -47,7 +47,7 @@ def load_data(csv_file):
         pd.DataFrame: Loaded and indexed DataFrame.
     """
     try:
-        # Define column names for daily data
+        logger.info(f"Reading CSV file: {csv_file}")
         df = pd.read_csv(
             csv_file,
             dtype={
@@ -59,13 +59,10 @@ def load_data(csv_file):
                 'Volume': float,
                 'Open Int': float  # May contain NaN
             },
-            parse_dates=['Time'],
-            date_format="%Y-%m-%d"  # Adjust based on your CSV's date format
+            parse_dates=['Time'],  # Parse 'Time' as datetime
+            infer_datetime_format=True
+            # Removed 'date_format' as it's not a valid parameter
         )
-
-        # Sort by Time to ensure chronological order
-        df.sort_values('Time', inplace=True)
-        df.set_index('Time', inplace=True)
 
         # Rename columns to match the script's expectations
         df.rename(columns={
@@ -77,12 +74,21 @@ def load_data(csv_file):
             # 'Open Int' is optional and ignored in calculations
         }, inplace=True)
 
-        # Drop unnecessary columns if they exist
-        columns_to_keep = ['open', 'high', 'low', 'close', 'volume']
-        existing_columns = [col for col in columns_to_keep if col in df.columns]
-        df = df[existing_columns]
+        # Verify that 'Time' is parsed correctly
+        if df['Time'].isnull().any():
+            logger.error("Some 'Time' entries could not be parsed as datetime.")
+            sys.exit(1)
 
-        # **Localize to UTC directly**
+        # Sort by Time to ensure chronological order
+        df.sort_values('Time', inplace=True)
+        df.set_index('Time', inplace=True)
+
+        # Verify that the index is a DatetimeIndex
+        if not isinstance(df.index, pd.DatetimeIndex):
+            logger.error(f"The 'Time' column was not parsed as datetime. Check the CSV format.")
+            sys.exit(1)
+
+        # Localize to UTC directly
         if df.index.tz is None:
             df = df.tz_localize('UTC')
             logger.debug(f"Localized naive datetime index to UTC for {csv_file}.")
@@ -90,10 +96,19 @@ def load_data(csv_file):
             df = df.tz_convert('UTC')
             logger.debug(f"Converted timezone-aware datetime index to UTC for {csv_file}.")
 
-        # Remove duplicate timestamps by keeping the last entry (most liquid contract)
-        df = df[~df.index.duplicated(keep='last')]
-        logger.debug(f"Removed duplicate timestamps for {csv_file}.")
+        # Drop unnecessary columns if they exist
+        columns_to_keep = ['open', 'high', 'low', 'close', 'volume']
+        existing_columns = [col for col in columns_to_keep if col in df.columns]
+        df = df[existing_columns]
 
+        # Remove duplicate timestamps by keeping the last entry (most liquid contract)
+        initial_length = len(df)
+        df = df[~df.index.duplicated(keep='last')]
+        duplicates_removed = initial_length - len(df)
+        if duplicates_removed > 0:
+            logger.debug(f"Removed {duplicates_removed} duplicate timestamps for {csv_file}.")
+
+        logger.info(f"Successfully loaded {len(df)} rows from {csv_file}.")
         return df
     except FileNotFoundError:
         logger.error(f"File not found: {csv_file}")
@@ -119,6 +134,7 @@ def calculate_emas(df, short_period, long_period):
     """
     df[f'short_ema_{short_period}'] = df['close'].ewm(span=short_period, adjust=False).mean()
     df[f'long_ema_{long_period}'] = df['close'].ewm(span=long_period, adjust=False).mean()
+    logger.debug(f"Calculated short EMA ({short_period}) and long EMA ({long_period}).")
     return df
 
 def detect_crossovers(df, short_period, long_period):
@@ -148,19 +164,21 @@ def detect_crossovers(df, short_period, long_period):
     bearish = (df[short_ema] < df[long_ema]) & (df[short_ema].shift(1) >= df[long_ema].shift(1))
     df.loc[bearish, 'crossover'] = -1
 
+    crossover_count = df['crossover'].abs().sum()
+    logger.debug(f"Detected {crossover_count} crossover events.")
     return df
 
 # --- Load and Prepare Data ---
 
-logger.info("Loading daily dataset...")
+logger.info("Loading dataset...")
 df_daily = load_data(CSV_FILE_DAILY)  # Load daily data
-logger.info("Daily dataset loaded successfully.")
-print(f"Daily Data Range: {df_daily.index.min()} to {df_daily.index.max()}")
-print(f"Daily Data Sample:\n{df_daily.head()}")
+logger.info("Dataset loaded successfully.")
+print(f"Data Range: {df_daily.index.min()} to {df_daily.index.max()}")
+print(f"Data Sample:\n{df_daily.head()}")
 
 # --- Define Backtest Period ---
 # Custom Backtest Period (Replace These Dates as needed)
-custom_start_date = "2020-02-25"
+custom_start_date = "2024-01-01"
 custom_end_date = "2024-12-11"
 
 # Convert custom dates to UTC
@@ -174,29 +192,29 @@ except Exception as e:
 logger.info(f"Backtest Period: {start_time} to {end_time}")
 
 # --- Slice Dataframe to Backtest Period ---
-logger.info(f"Slicing daily data from {start_time} to {end_time}...")
-df_daily_bt = df_daily.loc[start_time:end_time]
-logger.info("Daily data sliced to backtest period.")
-print(f"Sliced Daily Data Range: {df_daily_bt.index.min()} to {df_daily_bt.index.max()}")
-print(f"Sliced Daily Data Sample:\n{df_daily_bt.head()}")
+logger.info(f"Slicing data from {start_time} to {end_time}...")
+df_bt = df_daily.loc[start_time:end_time]
+logger.info("Data sliced to backtest period.")
+print(f"Sliced Data Range: {df_bt.index.min()} to {df_bt.index.max()}")
+print(f"Sliced Data Sample:\n{df_bt.head()}")
 
-# --- Calculate EMAs on Daily Data ---
-logger.info("Calculating EMAs on daily data...")
-df_daily_bt = calculate_emas(df_daily_bt, SHORT_EMA_PERIOD, LONG_EMA_PERIOD)
-df_daily_bt.dropna(inplace=True)
-logger.info("EMAs calculated on daily data.")
-print(f"EMAs on Daily Data Sample:\n{df_daily_bt.head()}")
+# --- Calculate EMAs on Backtest Data ---
+logger.info("Calculating EMAs on backtest data...")
+df_bt = calculate_emas(df_bt, SHORT_EMA_PERIOD, LONG_EMA_PERIOD)
+df_bt.dropna(inplace=True)
+logger.info("EMAs calculated on backtest data.")
+print(f"EMAs on Backtest Data Sample:\n{df_bt.head()}")
 
 # --- Detect Crossovers on EMAs ---
-logger.info("Detecting EMA crossovers on daily data...")
-df_daily_bt = detect_crossovers(df_daily_bt, SHORT_EMA_PERIOD, LONG_EMA_PERIOD)
-logger.info("EMA crossovers detected on daily data.")
-print(f"EMA Crossovers on Daily Data Sample:\n{df_daily_bt[['short_ema_10', 'long_ema_120', 'crossover']].head()}")
+logger.info("Detecting EMA crossovers on backtest data...")
+df_bt = detect_crossovers(df_bt, SHORT_EMA_PERIOD, LONG_EMA_PERIOD)
+logger.info("EMA crossovers detected on backtest data.")
+print(f"EMA Crossovers on Backtest Data Sample:\n{df_bt[[f'short_ema_{SHORT_EMA_PERIOD}', f'long_ema_{LONG_EMA_PERIOD}', 'crossover']].head()}")
 
 # --- Confirm Data Points After Filtering ---
 print(f"\nBacktesting Parameters:")
 print(f"Backtesting Period       : {start_time.strftime('%Y-%m-%d')} to {end_time.strftime('%Y-%m-%d')}")
-print(f"Daily Data Points        : {len(df_daily_bt)}")
+print(f"Data Points              : {len(df_bt)}")
 
 # --- Initialize Backtest Variables ---
 position_size = 0
@@ -205,7 +223,7 @@ position_type = None
 cash = INITIAL_CASH
 trade_results = []
 balance_series = [INITIAL_CASH]  # Initialize with starting cash
-balance_times = [df_daily_bt.index[0]]  # Initialize with first date
+balance_times = [df_bt.index[0]]  # Initialize with first date
 exposure_days = 0
 
 # For Drawdown Duration Calculations
@@ -218,9 +236,9 @@ drawdown_durations = []
 logger.info("Starting backtesting loop...")
 start_backtest_time = time.time()
 
-for i in range(len(df_daily_bt)):
-    current_bar = df_daily_bt.iloc[i]
-    current_time = df_daily_bt.index[i]
+for i in range(len(df_bt)):
+    current_bar = df_bt.iloc[i]
+    current_time = df_bt.index[i]
     current_price = current_bar['close']
 
     # Count exposure when position is active
@@ -263,8 +281,8 @@ for i in range(len(df_daily_bt)):
 # Handle the case where the last position is still open at the end of the backtest
 if position_size != 0:
     logger.info("Position still open at the end of the backtest. Closing at last available price.")
-    exit_price = df_daily_bt.iloc[-1]['close']
-    exit_time = df_daily_bt.index[-1]
+    exit_price = df_bt.iloc[-1]['close']
+    exit_time = df_bt.index[-1]
     pnl = (exit_price - entry_price) * CONTRACT_MULTIPLIER * position_size - COMMISSION
     trade_results.append(pnl)
     cash += pnl
@@ -283,8 +301,8 @@ balance_series = pd.Series(balance_series, index=balance_times)
 
 # --- Calculate Benchmark Equity Curve ---
 # Scale the benchmark to reflect the initial cash investment
-initial_price = df_daily_bt['close'].iloc[0]  # First closing price in the backtest period
-benchmark_equity_curve = (df_daily_bt['close'] / initial_price) * INITIAL_CASH
+initial_price = df_bt['close'].iloc[0]  # First closing price in the backtest period
+benchmark_equity_curve = (df_bt['close'] / initial_price) * INITIAL_CASH
 
 # --- Drawdown Duration Tracking ---
 for i in range(len(balance_series)):
@@ -348,9 +366,9 @@ def calculate_sortino_ratio(daily_returns, target_return=0):
 # --- Performance Metrics ---
 
 total_return_percentage = ((cash - INITIAL_CASH) / INITIAL_CASH) * 100
-trading_days = max((df_daily_bt.index.max() - df_daily_bt.index.min()).days, 1)
+trading_days = max((df_bt.index.max() - df_bt.index.min()).days, 1)
 annualized_return_percentage = ((cash / INITIAL_CASH) ** (252 / trading_days)) - 1
-benchmark_return = ((df_daily_bt['close'].iloc[-1] - df_daily_bt['close'].iloc[0]) / df_daily_bt['close'].iloc[0]) * 100
+benchmark_return = ((df_bt['close'].iloc[-1] - df_bt['close'].iloc[0]) / df_bt['close'].iloc[0]) * 100
 equity_peak = balance_series.max()
 
 volatility_annual = daily_returns.std() * np.sqrt(252) * 100
@@ -365,7 +383,7 @@ max_drawdown = drawdowns.min() * 100
 average_drawdown = drawdowns[drawdowns < 0].mean() * 100
 
 # Exposure Time
-exposure_time_percentage = (exposure_days / len(df_daily_bt)) * 100
+exposure_time_percentage = (exposure_days / len(df_bt)) * 100
 
 # Profit Factor
 winning_trades = [pnl for pnl in trade_results if pnl > 0]
@@ -386,8 +404,8 @@ else:
 # --- Results Summary ---
 print("\nPerformance Summary:")
 results = {
-    "Start Date": df_daily_bt.index.min().strftime("%Y-%m-%d"),
-    "End Date": df_daily_bt.index.max().strftime("%Y-%m-%d"),
+    "Start Date": df_bt.index.min().strftime("%Y-%m-%d"),
+    "End Date": df_bt.index.max().strftime("%Y-%m-%d"),
     "Exposure Time": f"{exposure_time_percentage:.2f}%",
     "Final Account Balance": f"${cash:,.2f}",
     "Equity Peak": f"${equity_peak:,.2f}",
@@ -419,7 +437,7 @@ plt.figure(figsize=(14, 7))
 plt.plot(balance_series.index, balance_series.values, label='Strategy Equity Curve', color='blue')
 
 # Plot scaled benchmark equity curve (Buy-and-Hold)
-plt.plot(df_daily_bt.index, benchmark_equity_curve, label='Buy-and-Hold Benchmark (ES Future)', color='orange')
+plt.plot(df_bt.index, benchmark_equity_curve, label='Buy-and-Hold Benchmark (ES Future)', color='orange')
 
 # Add titles and labels
 plt.title('Equity Curve Comparison: Strategy vs. Buy-and-Hold Benchmark (ES Future)')

@@ -151,8 +151,13 @@ def on_trade_filled(trade):
         # Debugging: Check the type of trade.filled
         print(f"trade.filled: {trade.filled} (type: {type(trade.filled)})")
 
-        # Ensure 'trade.filled' is accessed as an attribute, not a method
-        filled_quantity = trade.filled  # Should be an integer or float
+        # Correctly assign filled_quantity based on whether 'filled' is a method or a property
+        if callable(trade.filled):
+            filled_quantity = trade.filled()  # If 'filled' is a method, call it
+        else:
+            filled_quantity = trade.filled  # If 'filled' is a property, access it directly
+
+        print(f"Filled Quantity: {filled_quantity} (type: {type(filled_quantity)})")
 
         if filled_quantity > 0:
             action = trade.order.action.upper()
