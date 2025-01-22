@@ -30,8 +30,8 @@ STOP_LOSS_DISTANCE = 5        # Points away from entry
 TAKE_PROFIT_DISTANCE = 10     # Points away from entry
 
 # RTH: 09:30 - 16:00 ET, Monday to Friday
-RTH_START = datetime.time(9, 00)
-RTH_END = datetime.time(15, 59)
+RTH_START = datetime.time(9, 30)
+RTH_END = datetime.time(16, 0)
 EASTERN = pytz.timezone('US/Eastern')
 
 # --- Setup Logging ---
@@ -44,7 +44,6 @@ logger = logging.getLogger()
 
 # --- Connect to IBKR ---
 ib = IB()
-#logger.info("Connecting to IBKR...")
 try:
     ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
     print("Connected to IBKR.")
@@ -124,13 +123,10 @@ def filter_rth(df):
 # Calculate Bollinger Bands on Full Data
 df_30m_full = calculate_bollinger_bands(df_30m_full, BOLLINGER_PERIOD, BOLLINGER_STDDEV)
 
-# Print out the DataFrame to see what's in it after historical load
-#logger.info("df_30m_full after initial Bollinger calculation:")
-#print(df_30m_full.tail(50))
-
+# Filter RTH Data Separately for Trade Execution
 df_30m_rth = filter_rth(df_30m_full)
-#logger.info("RTH filtering applied to 30-minute data for trade execution.")
 
+# --- Initialize Backtest Variables ---
 cash = INITIAL_CASH
 balance_series = [INITIAL_CASH]
 position = None
@@ -171,7 +167,13 @@ def on_trade_filled(trade):
             else:
                 # This is an exit order
                 exit_price = fill.execution.price
-                exit_type = "TAKE PROFIT" if action == 'SELL' and trade.order.orderType == 'LIMIT' else "STOP LOSS"
+                # Determine exit type based on order type and action
+                if trade.order.orderType == 'LIMIT' and action == 'SELL':
+                    exit_type = "TAKE PROFIT"
+                elif trade.order.orderType == 'STOP':
+                    exit_type = "STOP LOSS"
+                else:
+                    exit_type = "EXIT"
                 print(f"Exited position via {exit_type} at {exit_price}")
                 position = None
                 pending_order = False
@@ -216,16 +218,22 @@ def place_bracket_order(action, current_price):
         parent_trade = ib.placeOrder(mes_contract, bracket[0])
         print(f"Placed Parent {bracket[0].orderType} Order ID {bracket[0].orderId} for {bracket[0].action} at {bracket[0].lmtPrice}")
 
-        # Attach event handlers to the Trade object
+        # Attach event handlers to the parent Trade object
         parent_trade.filledEvent += on_trade_filled
         parent_trade.statusEvent += on_order_status
 
-        # Place Take-Profit and Stop-Loss Orders
+        # Place Take-Profit and Stop-Loss Orders and attach event handlers
         take_profit_trade = ib.placeOrder(mes_contract, bracket[1])
         print(f"Placed Take-Profit {bracket[1].orderType} Order ID {bracket[1].orderId} for {bracket[1].action} at {bracket[1].lmtPrice}")
 
+        take_profit_trade.filledEvent += on_trade_filled
+        take_profit_trade.statusEvent += on_order_status
+
         stop_loss_trade = ib.placeOrder(mes_contract, bracket[2])
         print(f"Placed Stop-Loss {bracket[2].orderType} Order ID {bracket[2].orderId} for {bracket[2].action} at {bracket[2].auxPrice}")
+
+        stop_loss_trade.filledEvent += on_trade_filled
+        stop_loss_trade.statusEvent += on_order_status
 
         pending_order = True
         print("Bracket order placed successfully and event handlers attached.")
@@ -233,7 +241,6 @@ def place_bracket_order(action, current_price):
     except Exception as e:
         logger.error(f"Failed to place bracket order: {e}")
         pending_order = False
-
 
 def is_rth(timestamp):
     if timestamp is None:
@@ -295,7 +302,7 @@ def on_realtime_bar(ticker, hasNewBar):
             if current_30min_start != candle_start_time:
                 # Finalize the previous candle when a new one starts
                 if current_30min_start is not None and current_30min_bars:
-                    # The row should already be updated continuously, but let's confirm final calculation:
+                    # Aggregate the 30-minute candle data
                     open_30 = current_30min_bars[0]['open']
                     high_30 = max(b['high'] for b in current_30min_bars)
                     low_30 = min(b['low'] for b in current_30min_bars)
@@ -309,16 +316,12 @@ def on_realtime_bar(ticker, hasNewBar):
                     if len(df_30m_full) >= BOLLINGER_PERIOD:
                         df_30m_full = calculate_bollinger_bands(df_30m_full, BOLLINGER_PERIOD, BOLLINGER_STDDEV)
 
-                    #logger.info("df_30m_full after finalizing the old bar:")
-                    #print(df_30m_full.tail(10))
-
                     # Re-filter RTH data
                     df_30m_rth = filter_rth(df_30m_full)
 
                     if is_rth(current_30min_start):
                         current_price = close_30
                         current_time = current_30min_start
-                        #logger.info(f"\nNew 30-min bar closed at {current_time} UTC with close price: {current_price}")
 
                         if current_time in df_30m_full.index:
                             row = df_30m_full.loc[current_time]
@@ -329,7 +332,7 @@ def on_realtime_bar(ticker, hasNewBar):
                             lower_band = np.nan
 
                         if not pd.isna(upper_band) and not pd.isna(lower_band):
-                            print(f"Bollinger Bands - Upper: {upper_band}, Lower: {lower_band}")
+                            print(f"\nBollinger Bands - Upper: {upper_band}, Lower: {lower_band}")
                             print(f"Current Price: {current_price}")
 
                             print(f"Evaluating trade signals: Position={position}, Pending Order={pending_order}")
