@@ -22,8 +22,8 @@ COMMISSION = 0.62                    # Commission per trade (entry or exit)
 SLIPPAGE = 0.5                       # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2015-01-01'           # Format: 'YYYY-MM-DD'
-END_DATE = '2024-12-31'             # Format: 'YYYY-MM-DD'
+START_DATE = '2024-11-15'           # Format: 'YYYY-MM-DD'
+END_DATE = '2024-11-30'             # Format: 'YYYY-MM-DD'
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -560,7 +560,7 @@ class MESFuturesBacktest:
         # Ensure no NaNs in benchmark_equity
         benchmark_equity = benchmark_equity.fillna(method='ffill')
 
-        # Plotting
+        # Plotting Equity Curve and Benchmark
         plt.figure(figsize=(14, 7))
         plt.plot(equity_df['Equity'], label='Strategy Equity')
         plt.plot(benchmark_equity, label='Benchmark Equity (Buy & Hold)', alpha=0.7)
@@ -571,6 +571,40 @@ class MESFuturesBacktest:
         plt.grid(True)
         plt.tight_layout()
         plt.show()
+
+        # --- Plot Price and VWAP ---
+        plt.figure(figsize=(14, 7))
+        plt.plot(self.data_15m.index, self.data_15m['close'], label='Close Price')
+        plt.plot(self.data_15m.index, self.data_15m['vwap'], label='VWAP', linestyle='--')
+        plt.title('Price vs VWAP')
+        plt.xlabel('Time')
+        plt.ylabel('Price ($)')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        # --- Plot RSI ---
+        plt.figure(figsize=(14, 4))
+        plt.plot(self.data_15m.index, self.data_15m['rsi'], label='RSI', color='orange')
+        plt.axhline(70, color='red', linestyle='--', label='Overbought (70)')
+        plt.axhline(30, color='green', linestyle='--', label='Oversold (30)')
+        plt.title('Relative Strength Index (RSI)')
+        plt.xlabel('Time')
+        plt.ylabel('RSI')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        # Optional: Save Trade Results and Equity Curve
+        # Uncomment the following lines if you wish to save trade results and equity curve
+        # trade_results = pd.DataFrame(backtester.trade_log)
+        # trade_results.to_csv('trade_results.csv', index=False)
+        # logger.info("Trade results saved to 'trade_results.csv'.")
+
+        # equity_df.to_csv('equity_curve.csv')
+        # logger.info("Equity curve saved to 'equity_curve.csv'.")
 
 # --- Main Execution ---
 if __name__ == "__main__":
