@@ -1,11 +1,14 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns  # Added seaborn for better visualization
 import os
 from datetime import datetime, timedelta
 import pytz
 import logging
 import sys
+import random
+from tqdm import tqdm  # For progress bar
 
 # --- Configuration Parameters ---
 DATA_PATH = 'Data/es_1m_data.csv'  # Path to your 1-minute data CSV
@@ -13,16 +16,16 @@ INITIAL_CAPITAL = 5000             # Starting cash in USD
 POSITION_SIZE = 1                  # Number of contracts per trade
 CONTRACT_MULTIPLIER = 5            # Contract multiplier for MES
 
-TIMEFRAME = '15min'                   # 15-minute timeframe
+TIMEFRAME = '15min'                 # 15-minute timeframe
 
-STOP_LOSS_POINTS = 4                # Stop loss in points
-TAKE_PROFIT_POINTS = 18             # Take profit in points
+STOP_LOSS_POINTS = 8                # Stop loss in points
+TAKE_PROFIT_POINTS = 20             # Take profit in points
 
-COMMISSION = 0.62                    # Commission per trade (entry or exit)
-SLIPPAGE = 0.5                       # Slippage in points on entry
+COMMISSION = 0.62                   # Commission per trade (entry or exit)
+SLIPPAGE = 0.5                      # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2015-01-01'           # Format: 'YYYY-MM-DD'
+START_DATE = '2017-01-01'           # Format: 'YYYY-MM-DD'
 END_DATE = '2024-12-31'             # Format: 'YYYY-MM-DD'
 
 # --- Setup Logging ---
@@ -61,7 +64,7 @@ def filter_rth(df):
     df = df[df.index.weekday < 5]
 
     # Filter for RTH hours: 09:30 to 16:00
-    df = df.between_time('09:30', '16:00')  # Changed to include 16:00
+    df = df.between_time('09:30', '15:59')
 
     # Convert back to UTC for consistency
     df = df.tz_convert('UTC')
@@ -276,17 +279,13 @@ class MESFuturesBacktest:
         }).dropna()
         logger.info(f"Resampled data to {self.timeframe}. Total bars: {len(self.data_15m)}")
 
-        # Calculate VWAP per day using Typical Price
-        self.data_15m['date'] = self.data_15m.index.date
-        self.data_15m['typical_price'] = (self.data_15m['high'] + self.data_15m['low'] + self.data_15m['close']) / 3
-        self.data_15m['cum_typical_price_volume'] = self.data_15m['typical_price'] * self.data_15m['volume']
-        self.data_15m['cum_typical_price_volume'] = self.data_15m.groupby('date')['cum_typical_price_volume'].cumsum()
-        self.data_15m['cum_volume'] = self.data_15m.groupby('date')['volume'].cumsum()
-        self.data_15m['vwap'] = self.data_15m['cum_typical_price_volume'] / self.data_15m['cum_volume']
-        self.data_15m.drop(['date', 'typical_price', 'cum_typical_price_volume', 'cum_volume'], axis=1, inplace=True)
+        # Calculate VWAP
+        typical_price = (self.data_15m['high'] + self.data_15m['low'] + self.data_15m['close']) / 3
+        self.data_15m['vwap'] = (typical_price * self.data_15m['volume']).cumsum() / self.data_15m['volume'].cumsum()
 
         # Calculate RSI
         self.data_15m['rsi'] = calculate_rsi(self.data_15m['close'])
+
         # Drop initial rows with NaN RSI
         self.data_15m.dropna(inplace=True)
         logger.info("Calculated VWAP and RSI.")
@@ -424,7 +423,8 @@ class MESFuturesBacktest:
                 drawdown_duration = (idx - self.drawdown_start).total_seconds() / 86400  # in days
                 self.drawdown_durations.append(drawdown_duration)
 
-        # Close any open position at the end of the backtest
+    def close_open_position(self):
+        """Closes any open position at the end of the backtest."""
         if self.position is not None:
             exit_price = self.data_15m['close'].iloc[-1]
             idx = self.data_15m.index[-1]
@@ -443,9 +443,15 @@ class MESFuturesBacktest:
             })
             logger.debug(f"Exited {self.position.upper()} at {exit_price} on {idx} via End of Data for P&L: ${pnl:.2f}")
             self.equity_curve.append({'Time': idx, 'Equity': self.equity})
+            self.position = None  # Reset position after closing
 
-    def analyze_results(self):
-        """Analyzes and prints the backtest results."""
+    def analyze_results(self, plot_equity_curve=True):
+        """
+        Analyzes and prints the backtest results. Optionally plots the equity curve.
+
+        Parameters:
+            plot_equity_curve (bool): If True, plots the equity curve vs benchmark.
+        """
         if not self.trade_log:
             print("No trades were executed.")
             return
@@ -456,6 +462,9 @@ class MESFuturesBacktest:
         # Convert equity curve to DataFrame
         equity_df = pd.DataFrame(self.equity_curve)
         equity_df.set_index('Time', inplace=True)
+
+        # Close any open positions
+        self.close_open_position()
 
         # Calculate performance metrics
         start_date = equity_df.index.min().strftime("%Y-%m-%d")
@@ -488,18 +497,13 @@ class MESFuturesBacktest:
 
         # Sortino Ratio
         downside_returns = daily_returns[daily_returns < 0]
-        sortino_ratio = (daily_returns.mean() * np.sqrt(252)) / (downside_returns.std() * np.sqrt(252)) if not downside_returns.empty else np.inf
+        sortino_ratio = (daily_returns.mean() * 252) / (downside_returns.std() * np.sqrt(252)) if not downside_returns.empty else np.inf
 
         # Drawdown Calculations
         running_max = equity_df['Equity'].cummax()
-        drawdowns_percentage = (equity_df['Equity'] - running_max) / running_max * 100
-        max_drawdown_percentage = drawdowns_percentage.min()
-        average_drawdown_percentage = drawdowns_percentage[drawdowns_percentage < 0].mean() if not drawdowns_percentage[drawdowns_percentage < 0].empty else 0
-
-        # Dollar Drawdown Calculations
-        drawdowns_dollar = running_max - equity_df['Equity']
-        max_drawdown_dollar = drawdowns_dollar.max()
-        average_drawdown_dollar = drawdowns_dollar[drawdowns_dollar > 0].mean() if not drawdowns_dollar[drawdowns_dollar > 0].empty else 0
+        drawdowns = (equity_df['Equity'] - running_max) / running_max * 100
+        max_drawdown = drawdowns.min()
+        average_drawdown = drawdowns[drawdowns < 0].mean() if not drawdowns[drawdowns < 0].empty else 0
 
         # Profit Factor
         winning_trades = trade_results[trade_results['Result'] == 'Take Profit']['Profit']
@@ -507,7 +511,7 @@ class MESFuturesBacktest:
         profit_factor = winning_trades.sum() / abs(losing_trades.sum()) if not losing_trades.empty else np.inf
 
         # Calmar Ratio
-        calmar_ratio = (total_return_percentage / abs(max_drawdown_percentage)) if abs(max_drawdown_percentage) != 0 else np.inf
+        calmar_ratio = (total_return_percentage / abs(max_drawdown)) if abs(max_drawdown) != 0 else np.inf
 
         # Drawdown Durations
         max_drawdown_duration_days = max(self.drawdown_durations) if self.drawdown_durations else 0
@@ -536,10 +540,8 @@ class MESFuturesBacktest:
             "Sharpe Ratio": f"{sharpe_ratio:.2f}",
             "Sortino Ratio": f"{sortino_ratio:.2f}",
             "Calmar Ratio": f"{calmar_ratio:.2f}",
-            "Max Drawdown (%)": f"{max_drawdown_percentage:.2f}%",
-            "Average Drawdown (%)": f"{average_drawdown_percentage:.2f}%",
-            "Max Drawdown ($)": f"${max_drawdown_dollar:,.2f}",
-            "Average Drawdown ($)": f"${average_drawdown_dollar:,.2f}",
+            "Max Drawdown": f"{max_drawdown:.2f}%",
+            "Average Drawdown": f"{average_drawdown:.2f}%",
             "Max Drawdown Duration": f"{max_drawdown_duration_days:.2f} days",
             "Average Drawdown Duration": f"{average_drawdown_duration_days:.2f} days",
         }
@@ -547,30 +549,235 @@ class MESFuturesBacktest:
         # Print Results Summary
         print("\nPerformance Summary:")
         for key, value in results.items():
-            print(f"{key:30}: {value:>15}")
+            print(f"{key:25}: {value:>15}")
 
-        # --- Plot Equity Curve vs Benchmark ---
-        # Create benchmark equity curve (Buy & Hold)
-        initial_close = self.data_15m['close'].iloc[0]
-        benchmark_equity = (self.data_15m['close'] / initial_close) * self.initial_capital
+        if plot_equity_curve:
+            # --- Plot Equity Curve vs Benchmark ---
+            # Create benchmark equity curve (Buy & Hold)
+            initial_close = self.data_15m['close'].iloc[0]
+            benchmark_equity = (self.data_15m['close'] / initial_close) * self.initial_capital
 
-        # Align the benchmark to the strategy's equity_curve
-        benchmark_equity = benchmark_equity.reindex(equity_df.index, method='ffill')
+            # Align the benchmark to the strategy's equity_curve
+            benchmark_equity = benchmark_equity.reindex(equity_df.index, method='ffill')
 
-        # Ensure no NaNs in benchmark_equity
-        benchmark_equity = benchmark_equity.fillna(method='ffill')
+            # Ensure no NaNs in benchmark_equity
+            benchmark_equity = benchmark_equity.fillna(method='ffill')
 
-        # Plotting
+            # Plotting
+            plt.figure(figsize=(14, 7))
+            plt.plot(equity_df['Equity'], label='Strategy Equity')
+            plt.plot(benchmark_equity, label='Benchmark Equity (Buy & Hold)', alpha=0.7)
+            plt.title('Equity Curve: Strategy vs Benchmark')
+            plt.xlabel('Time')
+            plt.ylabel('Account Balance ($)')
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            plt.show()
+
+        # Return performance metrics for Monte Carlo aggregation
+        return results
+
+# --- Monte Carlo Simulation Class ---
+class MonteCarloSimulation:
+    def __init__(self, data_path, start_date, end_date, timeframe, initial_capital,
+                 position_size, contract_multiplier, base_stop_loss_points, base_take_profit_points,
+                 base_commission, base_slippage, num_simulations=100):
+        """
+        Initializes the Monte Carlo Simulation.
+
+        Parameters:
+            data_path (str): Path to the CSV data file.
+            start_date (str): Start date for the backtest in 'YYYY-MM-DD' format.
+            end_date (str): End date for the backtest in 'YYYY-MM-DD' format.
+            timeframe (str): Resampling timeframe for the strategy.
+            initial_capital (float): Starting capital for the backtest.
+            position_size (int): Number of contracts per trade.
+            contract_multiplier (int): Contract multiplier for MES.
+            base_stop_loss_points (int): Base stop loss in points.
+            base_take_profit_points (int): Base take profit in points.
+            base_commission (float): Base commission per trade.
+            base_slippage (float): Base slippage in points on entry.
+            num_simulations (int): Number of Monte Carlo iterations.
+        """
+        self.data_path = data_path
+        self.start_date = start_date
+        self.end_date = end_date
+        self.timeframe = timeframe
+        self.initial_capital = initial_capital
+        self.position_size = position_size
+        self.contract_multiplier = contract_multiplier
+        self.base_stop_loss_points = base_stop_loss_points
+        self.base_take_profit_points = base_take_profit_points
+        self.base_commission = base_commission
+        self.base_slippage = base_slippage
+        self.num_simulations = num_simulations
+
+        # To store results
+        self.simulation_results = []
+        self.equity_curves = []  # To store equity curves from each simulation
+
+    def run_simulation(self):
+        """Runs the Monte Carlo simulation."""
+        logger.info(f"Starting Monte Carlo Simulation with {self.num_simulations} iterations...")
+        for i in tqdm(range(self.num_simulations), desc="Monte Carlo Runs"):
+            # Randomly vary parameters within defined ranges
+            # Example variations:
+            # Slippage: ±10%
+            slippage = self.base_slippage * random.uniform(0.9, 1.1)
+            # Commission: ±10%
+            commission = self.base_commission * random.uniform(0.9, 1.1)
+            # Stop Loss Points: ±1 point
+            stop_loss_points = self.base_stop_loss_points + random.randint(-1, 1)
+            # Take Profit Points: ±2 points
+            take_profit_points = self.base_take_profit_points + random.randint(-2, 2)
+
+            # Ensure stop_loss_points and take_profit_points are positive
+            stop_loss_points = max(1, stop_loss_points)
+            take_profit_points = max(1, take_profit_points)
+
+            # Initialize Backtest with varied parameters
+            backtest = MESFuturesBacktest(
+                data_path=self.data_path,
+                start_date=self.start_date,
+                end_date=self.end_date,
+                timeframe=self.timeframe,
+                initial_capital=self.initial_capital,
+                position_size=self.position_size,
+                contract_multiplier=self.contract_multiplier,
+                stop_loss_points=stop_loss_points,
+                take_profit_points=take_profit_points,
+                commission=commission,
+                slippage=slippage
+            )
+
+            # Run Backtest
+            backtest.run_backtest()
+
+            # Analyze Results and collect metrics
+            # Set plot_equity_curve=False to avoid plotting each simulation's equity curve
+            metrics = backtest.analyze_results(plot_equity_curve=False)
+            metrics['Simulation'] = i + 1  # Add simulation number
+            self.simulation_results.append(metrics)
+
+            # Collect equity curve
+            equity_df = pd.DataFrame(backtest.equity_curve)
+            equity_df.set_index('Time', inplace=True)
+            self.equity_curves.append(equity_df['Equity'])
+
+        logger.info("Monte Carlo Simulation completed.")
+
+    def analyze_simulation_results(self):
+        """Analyzes the aggregated Monte Carlo simulation results."""
+        if not self.simulation_results:
+            logger.error("No simulation results to analyze.")
+            return
+
+        # Convert to DataFrame
+        results_df = pd.DataFrame(self.simulation_results)
+
+        # Select numerical metrics for statistical analysis
+        numerical_metrics = [
+            'Final Account Balance',
+            'Total Return',
+            'Annualized Return',
+            'Benchmark Return',
+            'Volatility (Annual)',
+            'Profit Factor',
+            'Sharpe Ratio',
+            'Sortino Ratio',
+            'Calmar Ratio',
+            'Max Drawdown',
+            'Average Drawdown'
+        ]
+
+        # Convert percentage and currency strings to float
+        for metric in numerical_metrics:
+            if metric in ['Final Account Balance', 'Equity Peak']:
+                results_df[metric] = results_df[metric].replace('[\$,]', '', regex=True).astype(float)
+            else:
+                results_df[metric] = results_df[metric].replace('[\%,]', '', regex=True).astype(float)
+
+        # Plot distributions
+        for metric in numerical_metrics:
+            plt.figure(figsize=(10, 6))
+            sns.histplot(results_df[metric], bins=30, kde=True, edgecolor='k', alpha=0.7)
+            plt.title(f'Distribution of {metric}')
+            plt.xlabel(metric)
+            plt.ylabel('Frequency')
+            plt.grid(True)
+            plt.tight_layout()
+            plt.show()
+
+        # Summary Statistics
+        summary = results_df[numerical_metrics].describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]).T
+        print("\nMonte Carlo Simulation Summary Statistics:")
+        print(summary[['min', 'mean', 'max']])
+
+        # Explicitly print max, min, mean for each metric
+        print("\nMax, Min, and Mean for Each Performance Metric:")
+        for metric in numerical_metrics:
+            mean_val = results_df[metric].mean()
+            min_val = results_df[metric].min()
+            max_val = results_df[metric].max()
+            print(f"{metric}:")
+            print(f"    Mean: {mean_val:.2f}")
+            print(f"    Min : {min_val:.2f}")
+            print(f"    Max : {max_val:.2f}\n")
+
+        # Correlation Matrix
+        plt.figure(figsize=(12, 10))
+        sns.heatmap(results_df[numerical_metrics].corr(), annot=True, cmap='coolwarm', fmt=".2f")
+        plt.title('Correlation Matrix of Performance Metrics')
+        plt.tight_layout()
+        plt.show()
+
+        # --- Plot All Equity Curves on One Graph ---
         plt.figure(figsize=(14, 7))
-        plt.plot(equity_df['Equity'], label='Strategy Equity')
-        plt.plot(benchmark_equity, label='Benchmark Equity (Buy & Hold)', alpha=0.7)
-        plt.title('Equity Curve: Strategy vs Benchmark')
+        for equity in self.equity_curves:
+            plt.plot(equity, color='blue', alpha=0.1)  # Light blue with high transparency
+        plt.title('Monte Carlo Simulation: All Equity Curves')
+        plt.xlabel('Time')
+        plt.ylabel('Account Balance ($)')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        # --- Plot Equity Curves with Benchmark ---
+        # Compute benchmark equity curve once
+        backtest_example = MESFuturesBacktest(
+            data_path=self.data_path,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            timeframe=self.timeframe,
+            initial_capital=self.initial_capital,
+            position_size=self.position_size,
+            contract_multiplier=self.contract_multiplier,
+            stop_loss_points=self.base_stop_loss_points,
+            take_profit_points=self.base_take_profit_points,
+            commission=self.base_commission,
+            slippage=self.base_slippage
+        )
+        backtest_example.run_backtest()
+        benchmark_initial_close = backtest_example.data_15m['close'].iloc[0]
+        benchmark_equity = (backtest_example.data_15m['close'] / benchmark_initial_close) * self.initial_capital
+        benchmark_equity = benchmark_equity.reindex(self.equity_curves[0].index, method='ffill').fillna(method='ffill')
+
+        plt.figure(figsize=(14, 7))
+        for equity in self.equity_curves:
+            plt.plot(equity, color='blue', alpha=0.1)  # Light blue with high transparency
+        plt.plot(benchmark_equity, label='Benchmark Equity (Buy & Hold)', color='red', linewidth=2)
+        plt.title('Monte Carlo Simulation: All Equity Curves with Benchmark')
         plt.xlabel('Time')
         plt.ylabel('Account Balance ($)')
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
         plt.show()
+
+        # Save simulation results to CSV for further analysis if needed
+        results_df.to_csv('monte_carlo_simulation_results.csv', index=False)
+        logger.info("Monte Carlo simulation results saved to 'monte_carlo_simulation_results.csv'.")
 
 # --- Main Execution ---
 if __name__ == "__main__":
@@ -580,7 +787,8 @@ if __name__ == "__main__":
         sys.exit(1)
     else:
         try:
-            # Initialize Backtest
+            # Initialize and run the primary backtest
+            logger.info("Running primary backtest...")
             backtester = MESFuturesBacktest(
                 data_path=DATA_PATH,
                 start_date=START_DATE,
@@ -594,10 +802,26 @@ if __name__ == "__main__":
                 commission=COMMISSION,
                 slippage=SLIPPAGE
             )
-            # Run Backtest
             backtester.run_backtest()
-            # Analyze Results
-            backtester.analyze_results()
+            primary_results = backtester.analyze_results(plot_equity_curve=True)
+
+            # Initialize and run the Monte Carlo simulation
+            monte_carlo = MonteCarloSimulation(
+                data_path=DATA_PATH,
+                start_date=START_DATE,
+                end_date=END_DATE,
+                timeframe=TIMEFRAME,
+                initial_capital=INITIAL_CAPITAL,
+                position_size=POSITION_SIZE,
+                contract_multiplier=CONTRACT_MULTIPLIER,
+                base_stop_loss_points=STOP_LOSS_POINTS,
+                base_take_profit_points=TAKE_PROFIT_POINTS,
+                base_commission=COMMISSION,
+                base_slippage=SLIPPAGE,
+                num_simulations=100  # Adjust the number of simulations as needed
+            )
+            monte_carlo.run_simulation()
+            monte_carlo.analyze_simulation_results()
 
             # Optional: Save Trade Results to CSV
             # Uncomment the following lines if you wish to save trade results for further analysis
@@ -612,5 +836,5 @@ if __name__ == "__main__":
             # logger.info("Equity curve saved to 'equity_curve.csv'.")
 
         except Exception as e:
-            logger.error(f"An error occurred during backtesting: {e}")
+            logger.error(f"An error occurred during backtesting or simulation: {e}")
             sys.exit(1)

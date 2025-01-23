@@ -20,7 +20,7 @@ STOP_LOSS_POINTS = 10               # Stop loss in points
 TAKE_PROFIT_POINTS = 20             # Take profit in points
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2020-01-01'           # Format: 'YYYY-MM-DD'
+START_DATE = '2021-01-01'           # Format: 'YYYY-MM-DD'
 END_DATE = '2024-12-31'             # Format: 'YYYY-MM-DD'
 
 # --- Setup Logging ---
@@ -192,7 +192,7 @@ def calculate_rsi(series, period=14):
 
 # --- Backtest Class ---
 class MESFuturesBacktest:
-    def __init__(self, data_path, start_date, end_date, timeframe, initial_capital, risk_reward,
+    def __init__(self, data_path, start_date, end_date, timeframe, initial_capital,
                  position_size, contract_multiplier, stop_loss_points, take_profit_points,
                  rsi_upper, rsi_lower):
         """
@@ -217,7 +217,6 @@ class MESFuturesBacktest:
         self.end_date = pd.to_datetime(end_date).tz_localize('UTC')
         self.timeframe = timeframe
         self.initial_capital = initial_capital
-        self.risk_reward = risk_reward
         self.position_size = position_size
         self.contract_multiplier = contract_multiplier
         self.stop_loss_points = stop_loss_points
@@ -565,7 +564,6 @@ def optimize_strategy(param_grid, data_path, start_date, end_date):
                 end_date=end_date,
                 timeframe=TIMEFRAME,
                 initial_capital=INITIAL_CAPITAL,
-                risk_reward=params['risk_reward'],
                 position_size=POSITION_SIZE,
                 contract_multiplier=CONTRACT_MULTIPLIER,
                 stop_loss_points=params['stop_loss_points'],
@@ -581,7 +579,6 @@ def optimize_strategy(param_grid, data_path, start_date, end_date):
                 result = {
                     'rsi_upper': params['rsi_upper'],
                     'rsi_lower': params['rsi_lower'],
-                    'risk_reward': params['risk_reward'],
                     'stop_loss_points': params['stop_loss_points'],
                     'take_profit_points': params['take_profit_points'],
                     'Total Return (%)': metrics['Total Return (%)'],
@@ -593,7 +590,6 @@ def optimize_strategy(param_grid, data_path, start_date, end_date):
                 result = {
                     'rsi_upper': params['rsi_upper'],
                     'rsi_lower': params['rsi_lower'],
-                    'risk_reward': params['risk_reward'],
                     'stop_loss_points': params['stop_loss_points'],
                     'take_profit_points': params['take_profit_points'],
                     'Total Return (%)': np.nan,
@@ -619,11 +615,10 @@ if __name__ == "__main__":
         try:
             # Define parameter grid for optimization
             param_grid = {
-                'rsi_upper': [65, 70, 75, 80],        # Upper RSI threshold for long entry
-                'rsi_lower': [25, 30, 35],            # Lower RSI threshold for short entry
-                'risk_reward': [1.5, 2, 2.5],         # Risk-Reward Ratio
-                'stop_loss_points': [8, 10, 12],      # Stop loss in points
-                'take_profit_points': [16, 20, 24]    # Take profit in points
+                'rsi_upper': [70, 80],        # Upper RSI threshold for long entry
+                'rsi_lower': [20, 30],            # Lower RSI threshold for short entry
+                'stop_loss_points': range(4, 10, 1),      # Stop loss in points
+                'take_profit_points': range(15, 30, 1)    # Take profit in points
             }
 
             # Run optimization
