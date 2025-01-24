@@ -109,7 +109,7 @@ def calculate_rsi(series, period=14):
 # --- Live Trading Strategy Class ---
 class MESFuturesLiveStrategy:
     def __init__(self, ib, es_contract, mes_contract, initial_cash=5000, position_size=1,
-                 contract_multiplier=5, stop_loss_points=8, take_profit_points=20,
+                 contract_multiplier=5, stop_loss_points=4, take_profit_points=18,
                  vwap_period=15, rsi_period=14,
                  rsi_overbought=70, rsi_oversold=30):
         """
@@ -169,7 +169,6 @@ class MESFuturesLiveStrategy:
             'close': None,
             'volume': 0
         }
-        self.bars_15m = []
 
         # Historical Data for Indicators
         self.historical_data = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'rsi'])
@@ -210,9 +209,6 @@ class MESFuturesLiveStrategy:
 
             logger.info(f"Fetched {len(df)} historical ES bars.")
 
-            # No RTH filtering for VWAP calculation
-            # However, if you still want to filter RTH for other purposes, handle separately
-
             # Resample to 15-minute bars
             df_15m = df.resample('15T').agg({
                 'open': 'first',
@@ -235,6 +231,9 @@ class MESFuturesLiveStrategy:
             initial_vwap = (typical_price * recent_bars['volume']).sum() / recent_bars['volume'].sum()
 
             logger.info(f"Initialized indicators with VWAP: {initial_vwap:.2f}, RSI: {initial_rsi:.2f}")
+
+            # Print Initial VWAP and RSI
+            print(f"Initial VWAP: {initial_vwap:.2f}, Initial RSI: {initial_rsi:.2f}")
 
             # Initialize cumulative VWAP and volume
             self.cumulative_vwap = (typical_price * recent_bars['volume']).sum()
@@ -323,6 +322,8 @@ class MESFuturesLiveStrategy:
                     if self.cumulative_volume != 0:
                         vwap = self.cumulative_vwap / self.cumulative_volume
                         logger.info(f"Calculated VWAP: {vwap:.2f}, RSI: {latest_rsi:.2f}")
+                        # Print the indicators and trade conditions
+                        self.print_status(vwap, latest_rsi)
                         self.apply_trading_logic(vwap, latest_rsi)
                     else:
                         logger.warning("Cumulative volume is zero. Cannot calculate VWAP.")
@@ -344,6 +345,24 @@ class MESFuturesLiveStrategy:
                 self.current_bar['close'] = bar.close
                 self.current_bar['volume'] += bar.volume
                 logger.debug(f"Updated current 15-minute bar at {self.current_bar_start}: {self.current_bar}")
+
+    def print_status(self, vwap, rsi):
+        """
+        Prints the current status of the strategy at each 15-minute interval.
+
+        Parameters:
+            vwap (float): The calculated VWAP.
+            rsi (float): The calculated RSI.
+        """
+        position_status = self.position if self.position else "No Position"
+        logger.info(f"--- 15-Minute Interval ---")
+        logger.info(f"Position Status: {position_status}")
+        logger.info(f"Current Price: {self.historical_data['close'].iloc[-1]:.2f}")
+        logger.info(f"VWAP: {vwap:.2f}, RSI: {rsi:.2f}")
+        #logger.info(f"Trade Conditions:")
+        #logger.info(f"  Long Entry: Price > VWAP and RSI > {self.rsi_overbought}")
+        #logger.info(f"  Short Entry: Price < VWAP and RSI < {self.rsi_oversold}")
+        logger.info(f"--------------------------")
 
     def apply_trading_logic(self, vwap, rsi):
         """
@@ -410,7 +429,7 @@ class MESFuturesLiveStrategy:
                                           lmtPrice=take_profit_price)
             stop_loss_order = StopOrder('SELL' if action.upper() == 'BUY' else 'BUY',
                                         totalQuantity=self.position_size,
-                                        stopPrice=stop_loss_price)  # Corrected parameter
+                                        stopPrice=stop_loss_price)
 
             # Place the parent order and get the Trade object
             parent_trade = self.ib.placeOrder(self.mes_contract, parent_order)
@@ -456,63 +475,67 @@ class MESFuturesLiveStrategy:
             logger.info(f"Trade Filled: {trade.order.action} {fill_qty} @ {fill_price} on {fill_time}")
 
             if trade.order.action.upper() == 'BUY':
-                # Entering Long Position
-                self.position = 'LONG'
-                self.entry_price = fill_price
-                self.stop_loss = self.entry_price - self.stop_loss_points
-                self.take_profit = self.entry_price + self.take_profit_points
-                self.trade_log.append({
-                    'Type': 'LONG',
-                    'Entry Time': fill_time,
-                    'Entry Price': self.entry_price,
-                    'Exit Time': None,
-                    'Exit Price': None,
-                    'Result': None,
-                    'Profit': 0
-                })
-                logger.debug(f"Entered LONG Position at {self.entry_price}")
+                if self.position is None:
+                    # Entering Long Position
+                    self.position = 'LONG'
+                    self.entry_price = fill_price
+                    self.stop_loss = self.entry_price - self.stop_loss_points
+                    self.take_profit = self.entry_price + self.take_profit_points
+                    self.trade_log.append({
+                        'Type': 'LONG',
+                        'Entry Time': fill_time,
+                        'Entry Price': self.entry_price,
+                        'Exit Time': None,
+                        'Exit Price': None,
+                        'Result': None,
+                        'Profit': 0
+                    })
+                    logger.debug(f"Entered LONG Position at {self.entry_price}")
+                else:
+                    # Exiting Long Position via Take Profit or Stop Loss
+                    if self.position == 'LONG':
+                        pnl = (fill_price - self.entry_price) * self.position_size * self.contract_multiplier
+                        self.cash += pnl
+                        self.equity += pnl
+                        self.trade_log[-1].update({
+                            'Exit Time': fill_time,
+                            'Exit Price': fill_price,
+                            'Result': 'Take Profit' if fill_price >= self.take_profit else 'Stop Loss',
+                            'Profit': pnl
+                        })
+                        logger.info(f"Exited LONG Position at {fill_price} for P&L: ${pnl:.2f}")
+                        self.position = None
             elif trade.order.action.upper() == 'SELL':
-                # Entering Short Position
-                self.position = 'SHORT'
-                self.entry_price = fill_price
-                self.stop_loss = self.entry_price + self.stop_loss_points
-                self.take_profit = self.entry_price - self.take_profit_points
-                self.trade_log.append({
-                    'Type': 'SHORT',
-                    'Entry Time': fill_time,
-                    'Entry Price': self.entry_price,
-                    'Exit Time': None,
-                    'Exit Price': None,
-                    'Result': None,
-                    'Profit': 0
-                })
-                logger.debug(f"Entered SHORT Position at {self.entry_price}")
-            elif trade.order.action.upper() in ['SELL', 'BUY']:
-                # Exiting Position
-                if self.position == 'LONG' and trade.order.action.upper() == 'SELL':
-                    pnl = (fill_price - self.entry_price) * self.position_size * self.contract_multiplier
-                    self.cash += pnl
-                    self.equity += pnl
-                    self.trade_log[-1].update({
-                        'Exit Time': fill_time,
-                        'Exit Price': fill_price,
-                        'Result': 'Take Profit' if fill_price >= self.take_profit else 'Stop Loss',
-                        'Profit': pnl
+                if self.position is None:
+                    # Entering Short Position
+                    self.position = 'SHORT'
+                    self.entry_price = fill_price
+                    self.stop_loss = self.entry_price + self.stop_loss_points
+                    self.take_profit = self.entry_price - self.take_profit_points
+                    self.trade_log.append({
+                        'Type': 'SHORT',
+                        'Entry Time': fill_time,
+                        'Entry Price': self.entry_price,
+                        'Exit Time': None,
+                        'Exit Price': None,
+                        'Result': None,
+                        'Profit': 0
                     })
-                    logger.info(f"Exited LONG Position at {fill_price} for P&L: ${pnl:.2f}")
-                    self.position = None
-                elif self.position == 'SHORT' and trade.order.action.upper() == 'BUY':
-                    pnl = (self.entry_price - fill_price) * self.position_size * self.contract_multiplier
-                    self.cash += pnl
-                    self.equity += pnl
-                    self.trade_log[-1].update({
-                        'Exit Time': fill_time,
-                        'Exit Price': fill_price,
-                        'Result': 'Take Profit' if fill_price <= self.take_profit else 'Stop Loss',
-                        'Profit': pnl
-                    })
-                    logger.info(f"Exited SHORT Position at {fill_price} for P&L: ${pnl:.2f}")
-                    self.position = None
+                    logger.debug(f"Entered SHORT Position at {self.entry_price}")
+                else:
+                    # Exiting Short Position via Take Profit or Stop Loss
+                    if self.position == 'SHORT':
+                        pnl = (self.entry_price - fill_price) * self.position_size * self.contract_multiplier
+                        self.cash += pnl
+                        self.equity += pnl
+                        self.trade_log[-1].update({
+                            'Exit Time': fill_time,
+                            'Exit Price': fill_price,
+                            'Result': 'Take Profit' if fill_price <= self.take_profit else 'Stop Loss',
+                            'Profit': pnl
+                        })
+                        logger.info(f"Exited SHORT Position at {fill_price} for P&L: ${pnl:.2f}")
+                        self.position = None
 
             # Update Equity Curve
             self.equity_curve.append({'Time': fill_time, 'Equity': self.equity})
@@ -546,7 +569,7 @@ class MESFuturesLiveStrategy:
             self.fetch_historical_data(duration='3 D', bar_size='15 mins')  # Adjust duration as needed
 
             # Subscribe to real-time ES bars
-            print("Requesting real-time 5-second bars for ES...")
+            logger.info("Requesting real-time 5-second bars for ES...")
             ticker = self.ib.reqRealTimeBars(
                 contract=self.es_contract,
                 barSize=5,
@@ -555,10 +578,10 @@ class MESFuturesLiveStrategy:
                 realTimeBarsOptions=[]
             )
             ticker.updateEvent += self.on_realtime_bar
-            print("Real-time bar handler assigned.")
+            logger.info("Real-time bar handler assigned.")
 
             # Start the event loop
-            logger.info("Starting trend bot...")
+            logger.info("Starting live trading strategy...")
             self.ib.run()
         except Exception as e:
             logger.error(f"Failed to start live trading strategy: {e}")
@@ -591,7 +614,7 @@ if __name__ == "__main__":
     ib = IB()
     try:
         ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
-        print("Connected to IBKR.")
+        logger.info("Connected to IBKR.")
     except Exception as e:
         logger.error(f"Failed to connect to IBKR: {e}")
         sys.exit(1)
@@ -607,8 +630,8 @@ if __name__ == "__main__":
         qualified_contracts = ib.qualifyContracts(es_contract, mes_contract)
         es_contract = qualified_contracts[0]
         mes_contract = qualified_contracts[1]
-        print(f"Qualified ES Contract: {es_contract}")
-        print(f"Qualified MES Contract: {mes_contract}")
+        logger.info(f"Qualified ES Contract: {es_contract}")
+        logger.info(f"Qualified MES Contract: {mes_contract}")
     except Exception as e:
         logger.error(f"Error qualifying contracts: {e}")
         ib.disconnect()
@@ -634,11 +657,20 @@ if __name__ == "__main__":
     try:
         strategy.run()
     except KeyboardInterrupt:
-        print("Interrupt received, shutting down...")
+        logger.info("Interrupt received, shutting down...")
     finally:
         # Optional: Plot Equity Curve
-        # Uncomment the following line if you wish to plot the equity curve upon shutdown
-        # strategy.plot_equity_curve()
+        if strategy.equity_curve:
+            strategy.plot_equity_curve()
+
+        # Log final equity
+        logger.info(f"Final Equity: ${strategy.equity:.2f}")
+        # Optionally, print trade log
+        if strategy.trade_log:
+            trade_df = pd.DataFrame(strategy.trade_log)
+            logger.info(f"Trade Log:\n{trade_df}")
+        else:
+            logger.info("No trades were executed.")
 
         ib.disconnect()
-        print("Disconnected from IBKR.")
+        logger.info("Disconnected from IBKR.")

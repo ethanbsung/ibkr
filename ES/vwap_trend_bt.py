@@ -13,7 +13,7 @@ INITIAL_CAPITAL = 5000             # Starting cash in USD
 POSITION_SIZE = 1                  # Number of contracts per trade
 CONTRACT_MULTIPLIER = 5            # Contract multiplier for MES
 
-TIMEFRAME = '15min'                   # 15-minute timeframe
+TIMEFRAME = '15min'                 # 15-minute timeframe
 
 STOP_LOSS_POINTS = 4                # Stop loss in points
 TAKE_PROFIT_POINTS = 18             # Take profit in points
@@ -22,12 +22,12 @@ COMMISSION = 0.62                    # Commission per trade (entry or exit)
 SLIPPAGE = 0.5                       # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2024-11-15'           # Format: 'YYYY-MM-DD'
-END_DATE = '2024-11-30'             # Format: 'YYYY-MM-DD'
+START_DATE = '2021-01-15'           # Format: 'YYYY-MM-DD'
+END_DATE = '2024-12-30'             # Format: 'YYYY-MM-DD'
 
 # --- Setup Logging ---
 logging.basicConfig(
-    level=logging.INFO,  # Set to INFO or DEBUG for more verbosity
+    level=logging.DEBUG,  # Set to DEBUG for more verbosity
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout)
@@ -298,6 +298,9 @@ class MESFuturesBacktest:
             price = row['close']
             vwap = row['vwap']
             rsi = row['rsi']
+
+            # Log the current VWAP and RSI values
+            #logger.info(f"Time: {idx}, Price: {price:.2f}, VWAP: {vwap:.2f}, RSI: {rsi:.2f}")
 
             # Check if we are in a position
             if self.position is None:

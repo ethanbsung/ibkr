@@ -1,108 +1,105 @@
-from ib_insync import IB, Future
+from ib_insync import *
 import pandas as pd
 import numpy as np
-import asyncio
+from datetime import datetime, time, timedelta
 
-class IBKRMarketDataAnalyzer:
-    def __init__(self, host='127.0.0.1', port=7497, client_id=2):
-        """
-        Initialize connection to Interactive Brokers TWS/Gateway
-        
-        :param host: IB API host
-        :param port: IB API port
-        :param client_id: Unique client identifier
-        """
-        self.ib = IB()
-        self.host = host
-        self.port = port
-        self.client_id = client_id
-        
-        # Technical analysis data storage
-        self.price_history = []
-        self.volume_history = []
-        self.last_volume = 0  # Track previous volume for incremental VWAP
+# Connect to Interactive Brokers
+ib = IB()
+ib.connect('127.0.0.1', 7497, clientId=1)  # Ensure TWS or IB Gateway is running
 
-    async def connect(self):
-        """Establish connection to IBKR API"""
-        try:
-            await self.ib.connectAsync(self.host, self.port, self.client_id)
-            print("Connected to IBKR")
-        except Exception as e:
-            print(f"Connection error: {e}")
+# Define the futures contract
+contract = Future(symbol='ES', lastTradeDateOrContractMonth='202503', exchange='CME', currency='USD')
+contract = ib.qualifyContracts(contract)[0]
 
-    def create_es_contract(self):
-        """Create E-mini S&P 500 Futures contract"""
-        return Future('ES', exchange='CME', lastTradeDateOrContractMonth='202503')
+# Subscribed data
+data = []
 
-    async def stream_market_data(self, contract):
-        """Stream real-time market data and perform technical analysis"""
-        ticker = self.ib.reqMktData(contract)
+# Define RSI function
+def rsi(ohlc: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calculate the Relative Strength Index (RSI)."""
+    delta = ohlc['close'].diff()
 
-        def on_price_change(ticker):
-            if ticker.last:
-                self.price_history.append(ticker.last)
+    up, down = delta.copy(), delta.copy()
+    up[up < 0] = 0
+    down[down > 0] = 0
 
-                # Calculate incremental volume
-                incremental_volume = ticker.volume - self.last_volume
-                self.last_volume = ticker.volume
+    _gain = up.ewm(com=(period - 1), min_periods=period).mean()
+    _loss = down.abs().ewm(com=(period - 1), min_periods=period).mean()
 
-                # Only append positive incremental volume
-                if incremental_volume > 0:
-                    self.volume_history.append(incremental_volume)
+    RS = _gain / _loss
+    return pd.Series(100 - (100 / (1 + RS)), name="RSI")
 
-                # Ensure enough data for calculations
-                if len(self.price_history) > 14 and len(self.volume_history) > 0:
-                    rsi = self.calculate_rsi()
-                    vwap = self.calculate_vwap()
-                    print(f"RSI: {rsi:.2f}, VWAP: {vwap:.2f}")
+def vwap(ohlc: pd.DataFrame) -> pd.Series:
+    """Calculate the Volume Weighted Average Price (VWAP) since market open."""
+    # Convert index to US/Eastern time
+    ohlc['date'] = ohlc.index  # Reset the index temporarily
+    ohlc['date'] = ohlc['date'].dt.tz_convert('US/Eastern')  # Convert directly
 
-        ticker.updateEvent += on_price_change
-        return ticker
-
-    def calculate_rsi(self, periods=14):
-        """Calculate RSI"""
-        prices = pd.Series(self.price_history[-(periods + 1):])  # Get the last `periods + 1` prices
-        delta = prices.diff()
-
-        # Separate gains and losses
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-
-        # Use Exponential Weighted Moving Average (EWMA) for smoothing
-        avg_gain = gain.ewm(span=periods, min_periods=periods).mean()
-        avg_loss = loss.ewm(span=periods, min_periods=periods).mean()
-
-        # Calculate RSI
-        rs = avg_gain / avg_loss
-        rsi = 100.0 - (100.0 / (1.0 + rs))
-
-        return rsi.iloc[-1] if not rsi.empty else np.nan
-
-    def calculate_vwap(self):
-        """Calculate Volume Weighted Average Price"""
-        prices = np.array(self.price_history)
-        volumes = np.array(self.volume_history)
-        
-        # Ensure volumes are not zero to avoid division by zero
-        if np.sum(volumes) == 0:
-            return np.nan
-
-        return np.sum(prices * volumes) / np.sum(volumes)
-
-async def main():
-    analyzer = IBKRMarketDataAnalyzer()
-    await analyzer.connect()
+    # Determine the start of the trading day (6 PM EST / 23:00 UTC)
+    market_open = ohlc['date'].apply(
+        lambda x: x.replace(hour=18, minute=0, second=0) if x.time() >= time(18, 0) else (x - timedelta(days=1)).replace(hour=18, minute=0, second=0)
+    )
     
-    es_contract = analyzer.create_es_contract()
-    ticker = await analyzer.stream_market_data(es_contract)
-    
-    # Keep script running to receive updates
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except KeyboardInterrupt:
-        print("Exiting...")
-        analyzer.ib.disconnect()
+    # Filter data since the most recent market open
+    ohlc = ohlc[ohlc['date'] >= market_open]
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    # Calculate VWAP
+    typical_price = (ohlc['high'] + ohlc['low'] + ohlc['close']) / 3
+    cumulative_vwap = (typical_price * ohlc['volume']).cumsum() / ohlc['volume'].cumsum()
+    return pd.Series(cumulative_vwap, name="VWAP")
+
+# Process live market data
+def on_bar_update(bars, has_new_bar):
+    global data
+    # Append new bar data
+    for bar in bars:
+        data.append({
+            'date': bar.date,
+            'open': bar.open,
+            'high': bar.high,
+            'low': bar.low,
+            'close': bar.close,
+            'volume': bar.volume
+        })
+
+    # Convert to DataFrame and aggregate to 15-minute bars
+    df = pd.DataFrame(data)
+    df['date'] = pd.to_datetime(df['date'])
+    df.set_index('date', inplace=True)
+
+    # Resample to 15-minute intervals
+    ohlc = df.resample('15min').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum'
+    }).dropna()
+
+    # Calculate RSI
+    ohlc['RSI'] = rsi(ohlc)
+
+    # Calculate VWAP since market open
+    ohlc['VWAP'] = vwap(ohlc)
+
+    # Display the latest RSI and VWAP values
+    print(f"Latest RSI: {ohlc['RSI'].iloc[-1]:.2f}, Latest VWAP: {ohlc['VWAP'].iloc[-1]:.2f}")
+
+# Subscribe to live market data
+bars = ib.reqHistoricalData(
+    contract=contract,
+    endDateTime='',
+    durationStr='1 D',
+    barSizeSetting='5 secs',
+    whatToShow='TRADES',
+    useRTH=False,
+    keepUpToDate=True
+)
+bars.updateEvent += on_bar_update
+
+# Start the event loop
+try:
+    ib.run()
+except KeyboardInterrupt:
+    print("Exiting...")
+    ib.disconnect()
