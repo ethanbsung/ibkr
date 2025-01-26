@@ -13,13 +13,13 @@ INITIAL_CAPITAL = 5000             # Starting cash in USD
 POSITION_SIZE = 1                  # Number of contracts per trade
 CONTRACT_MULTIPLIER = 5            # Contract multiplier for MES
 
-TIMEFRAME = '15min'                 # 15-minute timeframe
+TIMEFRAME = '1T'                    # 1-minute timeframe
 
 STOP_LOSS_POINTS = 4                # Stop loss in points
 TAKE_PROFIT_POINTS = 18             # Take profit in points
 
-COMMISSION = 0.62                    # Commission per trade (entry or exit)
-SLIPPAGE = 0.5                       # Slippage in points on entry
+COMMISSION = 0.62                   # Commission per trade (entry or exit)
+SLIPPAGE = 0.5                      # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
 START_DATE = '2021-01-15'           # Format: 'YYYY-MM-DD'
@@ -168,35 +168,27 @@ def load_data(csv_file):
         logger.error(f"An error occurred while reading the CSV '{csv_file}': {e}")
         sys.exit(1)
 
-def calculate_rsi(series, period=14):
-    """
-    Calculates the Relative Strength Index (RSI) for a given pandas Series.
+def rsi(ohlc: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calculate the Relative Strength Index (RSI)."""
+    delta = ohlc['close'].diff()
 
-    Parameters:
-        series (pd.Series): Series of prices.
-        period (int): Period for RSI calculation.
+    up, down = delta.copy(), delta.copy()
+    up[up < 0] = 0
+    down[down > 0] = 0
 
-    Returns:
-        pd.Series: RSI values.
-    """
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    _gain = up.ewm(com=(period - 1), min_periods=period).mean()
+    _loss = down.abs().ewm(com=(period - 1), min_periods=period).mean()
 
-    # Calculate exponential moving averages
-    avg_gain = gain.ewm(com=(period - 1), min_periods=period).mean()
-    avg_loss = loss.ewm(com=(period - 1), min_periods=period).mean()
-
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-
-    return rsi
+    RS = _gain / _loss
+    rsi_series = 100 - (100 / (1 + RS))
+    rsi_series.name = "RSI"
+    return rsi_series
 
 # --- Backtest Class ---
 class MESFuturesBacktest:
     def __init__(self, data_path, start_date, end_date, timeframe, initial_capital,
                  position_size, contract_multiplier, stop_loss_points, take_profit_points,
-                 commission, slippage):
+                 commission, slippage, rsi_period=210):
         """
         Initializes the backtest.
 
@@ -212,6 +204,7 @@ class MESFuturesBacktest:
             take_profit_points (int): Take profit in points.
             commission (float): Commission per trade.
             slippage (float): Slippage in points on entry.
+            rsi_period (int): Period for RSI calculation based on 1-minute bars.
         """
         self.data_path = data_path
         self.start_date = pd.to_datetime(start_date).tz_localize('UTC')
@@ -224,6 +217,7 @@ class MESFuturesBacktest:
         self.take_profit_points = take_profit_points
         self.commission = commission
         self.slippage = slippage
+        self.rsi_period = rsi_period  # Set RSI period to 210
 
         self.load_data()
         self.prepare_data()
@@ -238,7 +232,7 @@ class MESFuturesBacktest:
         self.stop_loss = 0
         self.take_profit = 0
         self.exposed_bars = 0
-        self.total_bars = len(self.data_15m)
+        self.total_bars = len(self.data_1m)
         self.equity_peak = initial_capital
         self.drawdowns = []
         self.current_drawdown = 0
@@ -253,7 +247,7 @@ class MESFuturesBacktest:
         logger.info("Data loaded successfully.")
 
     def prepare_data(self):
-        """Prepares data by filtering RTH, resampling, calculating indicators, and applying date filters."""
+        """Prepares data by filtering RTH, calculating indicators, and applying date filters."""
         logger.info("Preparing data for backtest...")
 
         # Filter Regular Trading Hours
@@ -264,53 +258,47 @@ class MESFuturesBacktest:
         self.data_rth = self.data_rth[(self.data_rth.index >= self.start_date) & (self.data_rth.index <= self.end_date)]
         logger.info(f"Filtered data by date from {self.start_date.date()} to {self.end_date.date()}. Total data points: {len(self.data_rth)}")
 
-        # Resample to specified timeframe
-        self.data_15m = self.data_rth.resample(self.timeframe).agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum',
-            'average': 'mean',
-            'barCount': 'sum'
-        }).dropna()
-        logger.info(f"Resampled data to {self.timeframe}. Total bars: {len(self.data_15m)}")
+        # Ensure data is sorted
+        self.data_rth.sort_index(inplace=True)
 
         # Calculate VWAP per day using Typical Price
-        self.data_15m['date'] = self.data_15m.index.date
-        self.data_15m['typical_price'] = (self.data_15m['high'] + self.data_15m['low'] + self.data_15m['close']) / 3
-        self.data_15m['cum_typical_price_volume'] = self.data_15m['typical_price'] * self.data_15m['volume']
-        self.data_15m['cum_typical_price_volume'] = self.data_15m.groupby('date')['cum_typical_price_volume'].cumsum()
-        self.data_15m['cum_volume'] = self.data_15m.groupby('date')['volume'].cumsum()
-        self.data_15m['vwap'] = self.data_15m['cum_typical_price_volume'] / self.data_15m['cum_volume']
-        self.data_15m.drop(['date', 'typical_price', 'cum_typical_price_volume', 'cum_volume'], axis=1, inplace=True)
+        self.data_rth['date'] = self.data_rth.index.date
+        self.data_rth['typical_price'] = (self.data_rth['high'] + self.data_rth['low'] + self.data_rth['close']) / 3
+        self.data_rth['cum_typical_price_volume'] = self.data_rth['typical_price'] * self.data_rth['volume']
+        self.data_rth['cum_typical_price_volume'] = self.data_rth.groupby('date')['cum_typical_price_volume'].cumsum()
+        self.data_rth['cum_volume'] = self.data_rth.groupby('date')['volume'].cumsum()
+        self.data_rth['vwap'] = self.data_rth['cum_typical_price_volume'] / self.data_rth['cum_volume']
 
-        # Calculate RSI
-        self.data_15m['rsi'] = calculate_rsi(self.data_15m['close'])
+        # Calculate RSI using the last 210 1-minute bars
+        self.data_rth['rsi'] = rsi(self.data_rth, period=self.rsi_period)
         # Drop initial rows with NaN RSI
-        self.data_15m.dropna(inplace=True)
+        initial_rsi_nans = self.data_rth['rsi'].isna().sum()
+        if initial_rsi_nans > 0:
+            logger.info(f"Dropping first {initial_rsi_nans} bars due to NaN RSI.")
+            self.data_rth = self.data_rth.dropna(subset=['rsi'])
+            logger.info(f"Remaining data points after dropping NaN RSI: {len(self.data_rth)}")
+
+        # Assign to data_1m for clarity
+        self.data_1m = self.data_rth.copy()
         logger.info("Calculated VWAP and RSI.")
 
     def run_backtest(self):
-        """Executes the backtest by iterating over each 15-minute bar."""
+        """Executes the backtest by iterating over each 1-minute bar."""
         logger.info("Starting backtest execution...")
-        for idx, row in self.data_15m.iterrows():
+        for idx, row in self.data_1m.iterrows():
             price = row['close']
             vwap = row['vwap']
-            rsi = row['rsi']
-
-            # Log the current VWAP and RSI values
-            #logger.info(f"Time: {idx}, Price: {price:.2f}, VWAP: {vwap:.2f}, RSI: {rsi:.2f}")
+            rsi_value = row['rsi']
 
             # Check if we are in a position
             if self.position is None:
                 # Check for Long Entry
-                if price > vwap and rsi > 70:
+                if price > vwap and rsi_value > 70:
                     self.position = 'long'
                     # Apply slippage: buy at price + slippage
                     self.entry_price = price + self.slippage
-                    self.stop_loss = price - self.stop_loss_points
-                    self.take_profit = price + self.take_profit_points
+                    self.stop_loss = self.entry_price - self.stop_loss_points
+                    self.take_profit = self.entry_price + self.take_profit_points
                     self.cash -= self.commission  # Deduct commission for entry
                     self.trade_log.append({
                         'Type': 'Long',
@@ -324,12 +312,12 @@ class MESFuturesBacktest:
                     logger.debug(f"Entered LONG at {self.entry_price} on {idx}")
                     self.exposed_bars += 1
                 # Check for Short Entry
-                elif price < vwap and rsi < 30:
+                elif price < vwap and rsi_value < 30:
                     self.position = 'short'
                     # Apply slippage: sell at price - slippage
                     self.entry_price = price - self.slippage
-                    self.stop_loss = price + self.stop_loss_points
-                    self.take_profit = price - self.take_profit_points
+                    self.stop_loss = self.entry_price + self.stop_loss_points
+                    self.take_profit = self.entry_price - self.take_profit_points
                     self.cash -= self.commission  # Deduct commission for entry
                     self.trade_log.append({
                         'Type': 'Short',
@@ -396,12 +384,13 @@ class MESFuturesBacktest:
                 else:
                     self.exposed_bars += 1
 
-            # Update Equity Curve
-            self.equity_curve.append({'Time': idx, 'Equity': self.equity})
+            # Update Equity Curve with Unrealized P&L
+            self.equity_curve.append({'Time': idx, 'Equity': self.equity + self.get_unrealized_pnl(price)})
 
             # Update Equity Peak
-            if self.equity > self.equity_peak:
-                self.equity_peak = self.equity
+            current_total_equity = self.equity + self.get_unrealized_pnl(price)
+            if current_total_equity > self.equity_peak:
+                self.equity_peak = current_total_equity
                 if self.in_drawdown:
                     drawdown_duration = (idx - self.drawdown_start).total_seconds() / 86400  # in days
                     self.drawdown_durations.append(drawdown_duration)
@@ -409,7 +398,7 @@ class MESFuturesBacktest:
                     self.current_drawdown = 0
 
             # Calculate Drawdown
-            current_drawdown = (self.equity_peak - self.equity) / self.equity_peak * 100
+            current_drawdown = (self.equity_peak - current_total_equity) / self.equity_peak * 100
             if current_drawdown > self.current_drawdown:
                 self.current_drawdown = current_drawdown
                 if not self.in_drawdown:
@@ -423,14 +412,13 @@ class MESFuturesBacktest:
                 # Recovery from drawdown
                 self.drawdowns.append(self.current_drawdown)
                 self.current_drawdown = 0
-                self.in_drawdown = False
                 drawdown_duration = (idx - self.drawdown_start).total_seconds() / 86400  # in days
                 self.drawdown_durations.append(drawdown_duration)
 
         # Close any open position at the end of the backtest
         if self.position is not None:
-            exit_price = self.data_15m['close'].iloc[-1]
-            idx = self.data_15m.index[-1]
+            exit_price = self.data_1m['close'].iloc[-1]
+            idx = self.data_1m.index[-1]
             if self.position == 'long':
                 pnl = (exit_price - self.entry_price) * self.position_size * self.contract_multiplier
             elif self.position == 'short':
@@ -446,6 +434,15 @@ class MESFuturesBacktest:
             })
             logger.debug(f"Exited {self.position.upper()} at {exit_price} on {idx} via End of Data for P&L: ${pnl:.2f}")
             self.equity_curve.append({'Time': idx, 'Equity': self.equity})
+
+    def get_unrealized_pnl(self, current_price):
+        """Calculates unrealized P&L based on current price and open position."""
+        if self.position == 'long':
+            return (current_price - self.entry_price) * self.position_size * self.contract_multiplier
+        elif self.position == 'short':
+            return (self.entry_price - current_price) * self.position_size * self.contract_multiplier
+        else:
+            return 0
 
     def analyze_results(self):
         """Analyzes and prints the backtest results."""
@@ -474,8 +471,8 @@ class MESFuturesBacktest:
         annualized_return_percentage = ((final_account_balance / self.initial_capital) ** (1 / years) - 1) * 100 if years > 0 else 0
 
         # Benchmark Return (Buy and Hold)
-        benchmark_start_price = self.data_15m['close'].iloc[0]
-        benchmark_end_price = self.data_15m['close'].iloc[-1]
+        benchmark_start_price = self.data_1m['close'].iloc[0]
+        benchmark_end_price = self.data_1m['close'].iloc[-1]
         benchmark_return = ((benchmark_end_price - benchmark_start_price) / benchmark_start_price) * 100
 
         # Daily Returns for volatility and Sharpe Ratio
@@ -554,8 +551,8 @@ class MESFuturesBacktest:
 
         # --- Plot Equity Curve vs Benchmark ---
         # Create benchmark equity curve (Buy & Hold)
-        initial_close = self.data_15m['close'].iloc[0]
-        benchmark_equity = (self.data_15m['close'] / initial_close) * self.initial_capital
+        initial_close = self.data_1m['close'].iloc[0]
+        benchmark_equity = (self.data_1m['close'] / initial_close) * self.initial_capital
 
         # Align the benchmark to the strategy's equity_curve
         benchmark_equity = benchmark_equity.reindex(equity_df.index, method='ffill')
@@ -577,8 +574,8 @@ class MESFuturesBacktest:
 
         # --- Plot Price and VWAP ---
         plt.figure(figsize=(14, 7))
-        plt.plot(self.data_15m.index, self.data_15m['close'], label='Close Price')
-        plt.plot(self.data_15m.index, self.data_15m['vwap'], label='VWAP', linestyle='--')
+        plt.plot(self.data_1m.index, self.data_1m['close'], label='Close Price')
+        plt.plot(self.data_1m.index, self.data_1m['vwap'], label='VWAP', linestyle='--')
         plt.title('Price vs VWAP')
         plt.xlabel('Time')
         plt.ylabel('Price ($)')
@@ -589,7 +586,7 @@ class MESFuturesBacktest:
 
         # --- Plot RSI ---
         plt.figure(figsize=(14, 4))
-        plt.plot(self.data_15m.index, self.data_15m['rsi'], label='RSI', color='orange')
+        plt.plot(self.data_1m.index, self.data_1m['rsi'], label='RSI', color='orange')
         plt.axhline(70, color='red', linestyle='--', label='Overbought (70)')
         plt.axhline(30, color='green', linestyle='--', label='Oversold (30)')
         plt.title('Relative Strength Index (RSI)')
@@ -602,12 +599,14 @@ class MESFuturesBacktest:
 
         # Optional: Save Trade Results and Equity Curve
         # Uncomment the following lines if you wish to save trade results and equity curve
-        # trade_results = pd.DataFrame(backtester.trade_log)
         # trade_results.to_csv('trade_results.csv', index=False)
         # logger.info("Trade results saved to 'trade_results.csv'.")
 
         # equity_df.to_csv('equity_curve.csv')
         # logger.info("Equity curve saved to 'equity_curve.csv'.")
+
+    # --- Optional: Additional Methods for Advanced Metrics ---
+    # You can add more methods here if needed for further analysis
 
 # --- Main Execution ---
 if __name__ == "__main__":
@@ -629,7 +628,8 @@ if __name__ == "__main__":
                 stop_loss_points=STOP_LOSS_POINTS,
                 take_profit_points=TAKE_PROFIT_POINTS,
                 commission=COMMISSION,
-                slippage=SLIPPAGE
+                slippage=SLIPPAGE,
+                rsi_period=210  # Set RSI period to 210 to match 14 periods of 15-minute bars
             )
             # Run Backtest
             backtester.run_backtest()
