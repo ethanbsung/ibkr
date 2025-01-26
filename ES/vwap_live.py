@@ -314,7 +314,7 @@ class MESFuturesLiveStrategy:
             self.cumulative_vwap_1m = (typical_price_1m * recent_bars_1m['volume']).sum()
             self.cumulative_volume_1m = recent_bars_1m['volume'].sum()
         except:
-            print("Failure...")
+            print("Failure fetching historical data...")
             sys.exit(1)
 
         def on_realtime_bar(self, ticker, hasNewBar):

@@ -22,8 +22,8 @@ COMMISSION = 0.62                   # Commission per trade (entry or exit)
 SLIPPAGE = 1                      # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2017-01-15'           # Format: 'YYYY-MM-DD'
-END_DATE = '2024-12-30'             # Format: 'YYYY-MM-DD'
+START_DATE = '2019-03-15'           # Format: 'YYYY-MM-DD'
+END_DATE = '2020-01-01'             # Format: 'YYYY-MM-DD'
 
 # --- Setup Logging ---
 logging.basicConfig(
