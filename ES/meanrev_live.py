@@ -6,6 +6,9 @@ import logging
 import sys
 import pytz
 from datetime import timedelta
+import os
+import matplotlib.pyplot as plt
+from datetime import datetime as dt
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host
@@ -42,6 +45,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
+# --- Define Log Paths ---
+LOG_DIR = 'performance_logs'
+os.makedirs(LOG_DIR, exist_ok=True)
+TRADE_LOG_FILE = os.path.join(LOG_DIR, 'trade_log.csv')
+EQUITY_LOG_FILE = os.path.join(LOG_DIR, 'equity_log.csv')
+
+# --- Initialize or Load Trade Log ---
+if os.path.exists(TRADE_LOG_FILE):
+    trade_log = pd.read_csv(TRADE_LOG_FILE, parse_dates=['Entry Time', 'Exit Time'])
+    print(f"Loaded existing trade log with {len(trade_log)} records.")
+else:
+    trade_log = pd.DataFrame(columns=[
+        'Entry Time', 'Entry Price', 'Exit Time', 'Exit Price',
+        'Position', 'Quantity', 'PnL'
+    ])
+    trade_log.to_csv(TRADE_LOG_FILE, index=False)
+    print("Initialized new trade log.")
+
+# --- Initialize or Load Equity Log ---
+if os.path.exists(EQUITY_LOG_FILE):
+    equity_log = pd.read_csv(EQUITY_LOG_FILE, parse_dates=['Timestamp'])
+    print(f"Loaded existing equity log with {len(equity_log)} records.")
+else:
+    equity_log = pd.DataFrame(columns=['Timestamp', 'Equity'])
+    equity_log.to_csv(EQUITY_LOG_FILE, index=False)
+    print("Initialized new equity log.")
+
+# --- Initialize Backtest Variables ---
+cash = INITIAL_CASH
+equity = INITIAL_CASH
+total_pnl = 0
+peak_equity = INITIAL_CASH
+max_drawdown = 0
+position = None
+pending_order = False
+current_30min_start = None
+current_30min_bars = []
+
 # --- Connect to IBKR ---
 ib = IB()
 try:
@@ -55,7 +96,7 @@ except Exception as e:
 es_contract = Future(symbol=DATA_SYMBOL, lastTradeDateOrContractMonth=DATA_EXPIRY, exchange=DATA_EXCHANGE, currency=CURRENCY)
 mes_contract = Future(symbol=EXEC_SYMBOL, lastTradeDateOrContractMonth=EXEC_EXPIRY, exchange=EXEC_EXCHANGE, currency=CURRENCY)
 
-# Qualify Contracts
+# --- Qualify Contracts ---
 try:
     qualified_contracts = ib.qualifyContracts(es_contract, mes_contract)
     es_contract = qualified_contracts[0]
@@ -97,6 +138,8 @@ except Exception as e:
     ib.disconnect()
     sys.exit(1)
 
+# --- Define Helper Functions ---
+
 def calculate_bollinger_bands(df, period=15, stddev=2):
     if len(df) < period:
         return df
@@ -120,68 +163,175 @@ def filter_rth(df):
     df_rth.index = df_rth.index.tz_convert('UTC')
     return df_rth
 
-# Calculate Bollinger Bands on Full Data
+def log_equity(timestamp):
+    global equity, equity_log
+    equity_log.loc[len(equity_log)] = {
+        'Timestamp': timestamp,
+        'Equity': equity
+    }
+    equity_log.to_csv(EQUITY_LOG_FILE, index=False)
+
+def calculate_performance(trade_log, equity_log):
+    total_trades = len(trade_log)
+    winning_trades = trade_log[trade_log['PnL'] > 0]
+    losing_trades = trade_log[trade_log['PnL'] <= 0]
+    win_rate = (len(winning_trades) / total_trades * 100) if total_trades > 0 else 0
+    total_pnl = trade_log['PnL'].sum()
+    average_pnl = trade_log['PnL'].mean() if total_trades > 0 else 0
+    if not equity_log.empty:
+        max_drawdown = equity_log['Equity'].max() - equity_log['Equity'].min()
+    else:
+        max_drawdown = 0
+
+    performance = {
+        'Total Trades': total_trades,
+        'Winning Trades': len(winning_trades),
+        'Losing Trades': len(losing_trades),
+        'Win Rate (%)': win_rate,
+        'Total PnL': total_pnl,
+        'Average PnL': average_pnl,
+        'Max Drawdown': max_drawdown
+    }
+
+    return performance
+
+def plot_equity(equity_log):
+    plt.figure(figsize=(12, 6))
+    plt.plot(equity_log['Timestamp'], equity_log['Equity'], label='Equity')
+    plt.xlabel('Time')
+    plt.ylabel('Equity ($)')
+    plt.title('Strategy Equity Over Time')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(LOG_DIR, 'equity_over_time.png'))
+    plt.show()
+
+def plot_drawdown(equity_log):
+    if equity_log.empty:
+        logger.warning("Equity log is empty. Cannot plot drawdown.")
+        return
+    peak = equity_log['Equity'].cummax()
+    drawdown = peak - equity_log['Equity']
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(equity_log['Timestamp'], drawdown, label='Drawdown', color='red')
+    plt.xlabel('Time')
+    plt.ylabel('Drawdown ($)')
+    plt.title('Drawdown Over Time')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(LOG_DIR, 'drawdown_over_time.png'))
+    plt.show()
+
+# --- Calculate Bollinger Bands on Full Data ---
 df_30m_full = calculate_bollinger_bands(df_30m_full, BOLLINGER_PERIOD, BOLLINGER_STDDEV)
 
-# Filter RTH Data Separately for Trade Execution
+# --- Filter RTH Data Separately for Trade Execution ---
 df_30m_rth = filter_rth(df_30m_full)
 
-# --- Initialize Backtest Variables ---
-cash = INITIAL_CASH
-balance_series = [INITIAL_CASH]
-position = None
-pending_order = False
-current_30min_start = None
-current_30min_bars = []
+# --- Define Trade Event Handlers ---
 
 def on_trade_filled(trade):
-    global position, pending_order  # Ensure these globals are accessible
+    global position, pending_order, cash, equity, total_pnl, peak_equity, max_drawdown
+
     try:
         if not trade.fills:
             logger.warning("Trade filled event received but no fills are present.")
             return
 
         fill = trade.fills[-1]  # Get the latest fill
-        print(f"Trade Filled - Order ID {trade.order.orderId}: {trade.order.action} {fill.execution.shares} @ {fill.execution.price}")
+        fill_time = dt.now(EASTERN)  # Capture fill time in Eastern Time
+        fill_price = fill.execution.price
+        fill_qty = fill.execution.shares
 
-        # Debugging: Check the type of trade.filled
-        print(f"trade.filled: {trade.filled} (type: {type(trade.filled)})")
+        print(f"Trade Filled - Order ID {trade.order.orderId}: {trade.order.action} {fill_qty} @ {fill_price}")
 
-        # Correctly assign filled_quantity based on whether 'filled' is a method or a property
-        if callable(trade.filled):
-            filled_quantity = trade.filled()  # If 'filled' is a method, call it
+        # Determine if it's an entry or exit trade
+        if trade.order.parentId == 0:
+            # Entry Trade
+            entry_time = fill_time
+            entry_price = fill_price
+            current_position = 'LONG' if trade.order.action.upper() == 'BUY' else 'SHORT'
+            position = current_position
+
+            # Log entry in trade_log
+            trade_log.loc[len(trade_log)] = {
+                'Entry Time': entry_time,
+                'Entry Price': entry_price,
+                'Exit Time': None,
+                'Exit Price': None,
+                'Position': current_position,
+                'Quantity': fill_qty,
+                'PnL': None
+            }
+
+            # Save trade log
+            trade_log.to_csv(TRADE_LOG_FILE, index=False)
+
+            print(f"Entered {current_position} position at {entry_price}")
+
         else:
-            filled_quantity = trade.filled  # If 'filled' is a property, access it directly
+            # Exit Trade
+            exit_time = fill_time
+            exit_price = fill_price
+            current_position = 'LONG' if trade.order.action.upper() == 'SELL' else 'SHORT'
+            position = None
 
-        print(f"Filled Quantity: {filled_quantity} (type: {type(filled_quantity)})")
+            # Retrieve the last open trade
+            if len(trade_log) == 0:
+                logger.error("Exit trade received but trade_log is empty.")
+                return
 
-        if filled_quantity > 0:
-            action = trade.order.action.upper()
-            if trade.order.parentId == 0:
-                # This is an entry order
-                position_type = 'LONG' if action == 'BUY' else 'SHORT'
-                entry_price = fill.execution.price
-                print(f"Entered {position_type} position at {entry_price}")
-                position = position_type
-                pending_order = False
+            last_trade = trade_log.iloc[-1]
+            if pd.notna(last_trade['Exit Time']):
+                logger.error("Last trade in trade_log is already closed.")
+                return
+
+            entry_price = last_trade['Entry Price']
+            position_type = last_trade['Position']
+            if position_type == 'LONG':
+                pnl = (exit_price - entry_price) * fill_qty
+            elif position_type == 'SHORT':
+                pnl = (entry_price - exit_price) * fill_qty
             else:
-                # This is an exit order
-                exit_price = fill.execution.price
-                # Determine exit type based on order type and action
-                if trade.order.orderType == 'LIMIT' and action == 'SELL':
-                    exit_type = "TAKE PROFIT"
-                elif trade.order.orderType == 'STOP':
-                    exit_type = "STOP LOSS"
-                else:
-                    exit_type = "EXIT"
-                print(f"Exited position via {exit_type} at {exit_price}")
-                position = None
-                pending_order = False
+                pnl = 0
+
+            total_pnl += pnl
+            cash += pnl
+            equity = cash  # Update equity; for more complex strategies, include unrealized PnL
+
+            # Update trade_log with exit details
+            trade_log.at[last_trade.name, 'Exit Time'] = exit_time
+            trade_log.at[last_trade.name, 'Exit Price'] = exit_price
+            trade_log.at[last_trade.name, 'PnL'] = pnl
+
+            # Save trade log
+            trade_log.to_csv(TRADE_LOG_FILE, index=False)
+
+            # Update peak equity and drawdown
+            if equity > peak_equity:
+                peak_equity = equity
+            drawdown = peak_equity - equity
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+
+            exit_type = "TAKE PROFIT" if trade.order.orderType == 'LIMIT' else "STOP LOSS"
+
+            print(f"Exited position via {exit_type} at {exit_price}")
+            print(f"Trade PnL: {pnl:.2f} | Total PnL: {total_pnl:.2f} | Equity: {equity:.2f} | Max Drawdown: {max_drawdown:.2f}")
+
+            # Log equity after exit
+            log_equity(exit_time)
+
+        pending_order = False
+
     except Exception as e:
         logger.error(f"Error in on_trade_filled handler: {e}")
 
 def on_order_status(trade):
-    global position, pending_order
+    global pending_order
     try:
         print(f"Trade Status Update - Order ID {trade.order.orderId}: {trade.orderStatus.status}")
         if trade.orderStatus.status in ('Cancelled', 'Inactive', 'Filled'):
@@ -189,6 +339,8 @@ def on_order_status(trade):
             pending_order = False
     except Exception as e:
         logger.error(f"Error in on_order_status handler: {e}")
+
+# --- Define Bracket Order Function ---
 
 def place_bracket_order(action, current_price):
     global pending_order
@@ -242,6 +394,8 @@ def place_bracket_order(action, current_price):
         logger.error(f"Failed to place bracket order: {e}")
         pending_order = False
 
+# --- Define RTH and Trade Execution Functions ---
+
 def is_rth(timestamp):
     if timestamp is None:
         return False
@@ -279,8 +433,10 @@ def execute_trade(action, current_price, current_time):
 
     place_bracket_order(action, current_price)
 
+# --- Define Real-Time Bar Handler ---
+
 def on_realtime_bar(ticker, hasNewBar):
-    global current_30min_start, current_30min_bars, df_30m_full, df_30m_rth, position, cash, pending_order
+    global current_30min_start, current_30min_bars, df_30m_full, df_30m_rth, position, cash, pending_order, equity_log
 
     try:
         if hasNewBar:
@@ -351,6 +507,9 @@ def on_realtime_bar(ticker, hasNewBar):
                     else:
                         print(f"New 30-min bar at {current_30min_start} UTC is outside RTH. No trade executed.")
 
+                    # Log equity after processing the closed candle
+                    log_equity(dt.now(EASTERN))
+
                 # Start a new 30-minute candle
                 current_30min_start = candle_start_time
                 current_30min_bars = []
@@ -365,7 +524,6 @@ def on_realtime_bar(ticker, hasNewBar):
             })
 
             # Continuously update the current candle row in df_30m_full
-            # This ensures that if we lose connection or something, we always have the latest partial data.
             if current_30min_start is not None:
                 open_30 = current_30min_bars[0]['open']
                 high_30 = max(b['high'] for b in current_30min_bars)
@@ -381,6 +539,12 @@ def on_realtime_bar(ticker, hasNewBar):
     except Exception as e:
         logger.error(f"Error in on_realtime_bar handler: {e}")
 
+# --- Attach Event Handlers ---
+
+# Attach the trade filled event handler
+ib.tradeEvent += on_trade_filled
+
+# Request real-time bars and attach the real-time bar handler
 try:
     print("Requesting real-time 5-second bars (including ETH)...")
     ticker = ib.reqRealTimeBars(
@@ -397,11 +561,30 @@ except Exception as e:
     ib.disconnect()
     sys.exit(1)
 
+# --- Define Shutdown Procedure ---
+def shutdown():
+    # Save logs
+    trade_log.to_csv(TRADE_LOG_FILE, index=False)
+    equity_log.to_csv(EQUITY_LOG_FILE, index=False)
+    print(f"Logs saved to {LOG_DIR}/")
+
+    # Calculate and display performance
+    performance = calculate_performance(trade_log, equity_log)
+    print(f"--- Final Performance Report ---")
+    for key, value in performance.items():
+        print(f"{key}: {value}")
+
+    # Plot performance
+    plot_equity(equity_log)
+    plot_drawdown(equity_log)
+
+# --- Start the Trading Bot ---
 print("Starting mean reversion bot...")
 try:
     ib.run()
 except KeyboardInterrupt:
     print("Interrupt received, shutting down...")
 finally:
+    shutdown()
     ib.disconnect()
     print("Disconnected from IBKR.")
