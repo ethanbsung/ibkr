@@ -6,7 +6,6 @@ import logging
 import sys
 import pytz
 from datetime import timedelta
-import os
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host
@@ -35,12 +34,9 @@ RTH_START = datetime.time(9, 30)
 RTH_END = datetime.time(16, 0)
 EASTERN = pytz.timezone('US/Eastern')
 
-# PnL CSV Configuration
-PNL_CSV = 'pnl.csv'
-
 # --- Setup Logging ---
 logging.basicConfig(
-    level=logging.WARNING,  # Set to INFO or DEBUG for more verbosity
+    level=logging.WARNING,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
@@ -59,7 +55,7 @@ except Exception as e:
 es_contract = Future(symbol=DATA_SYMBOL, lastTradeDateOrContractMonth=DATA_EXPIRY, exchange=DATA_EXCHANGE, currency=CURRENCY)
 mes_contract = Future(symbol=EXEC_SYMBOL, lastTradeDateOrContractMonth=EXEC_EXPIRY, exchange=EXEC_EXCHANGE, currency=CURRENCY)
 
-# --- Qualify Contracts ---
+# Qualify Contracts
 try:
     qualified_contracts = ib.qualifyContracts(es_contract, mes_contract)
     es_contract = qualified_contracts[0]
@@ -101,8 +97,6 @@ except Exception as e:
     ib.disconnect()
     sys.exit(1)
 
-# --- Helper Functions ---
-
 def calculate_bollinger_bands(df, period=15, stddev=2):
     if len(df) < period:
         return df
@@ -140,46 +134,8 @@ pending_order = False
 current_30min_start = None
 current_30min_bars = []
 
-# Initialize Trade Log and PnL Tracking
-df_trade_log = []  # List to store closed trades
-cumulative_pnl = 0  # Initialize cumulative PnL
-
-# --- PnL CSV Setup ---
-if os.path.exists(PNL_CSV):
-    df_pnl = pd.read_csv(PNL_CSV, parse_dates=['Date'])
-    cumulative_pnl = df_pnl['Cumulative_PnL'].iloc[-1]
-    print(f"Loaded existing PnL data. Cumulative PnL: ${cumulative_pnl:.2f}")
-else:
-    df_pnl = pd.DataFrame(columns=['Date', 'Daily_PnL', 'Cumulative_PnL'])
-    cumulative_pnl = 0
-    df_pnl.to_csv(PNL_CSV, index=False)
-    print("Created new PnL CSV file.")
-
-last_trading_day = None  # To track when a new trading day starts
-
-# --- Define Functions for PnL Tracking ---
-
-def save_daily_pnl(date):
-    global cumulative_pnl, df_trade_log, df_pnl
-    # Filter trade_log for trades closed on 'date'
-    daily_pnl = 0
-    for trade in df_trade_log:
-        exit_time = trade.get('Exit Time')
-        profit = trade.get('Profit', 0)
-        if exit_time and exit_time.date() == date:
-            daily_pnl += profit
-    cumulative_pnl += daily_pnl
-    # Append to CSV
-    new_row = {'Date': date, 'Daily_PnL': daily_pnl, 'Cumulative_PnL': cumulative_pnl}
-    df_pnl = pd.read_csv(PNL_CSV)
-    df_pnl = df_pnl.append(new_row, ignore_index=True)
-    df_pnl.to_csv(PNL_CSV, index=False)
-    print(f"Saved PnL for {date}: Daily PnL=${daily_pnl:.2f}, Cumulative PnL=${cumulative_pnl:.2f}")
-
-# --- Define Trade Event Handlers ---
-
 def on_trade_filled(trade):
-    global position, pending_order, df_trade_log, cash, balance_series
+    global position, pending_order  # Ensure these globals are accessible
     try:
         if not trade.fills:
             logger.warning("Trade filled event received but no fills are present.")
@@ -189,8 +145,14 @@ def on_trade_filled(trade):
         print(f"Trade Filled - Order ID {trade.order.orderId}: {trade.order.action} {fill.execution.shares} @ {fill.execution.price}")
 
         # Debugging: Check the type of trade.filled
-        # Note: 'filled' is a property in ib_insync's Trade object
-        filled_quantity = trade.filled  # Access the 'filled' property directly
+        print(f"trade.filled: {trade.filled} (type: {type(trade.filled)})")
+
+        # Correctly assign filled_quantity based on whether 'filled' is a method or a property
+        if callable(trade.filled):
+            filled_quantity = trade.filled()  # If 'filled' is a method, call it
+        else:
+            filled_quantity = trade.filled  # If 'filled' is a property, access it directly
+
         print(f"Filled Quantity: {filled_quantity} (type: {type(filled_quantity)})")
 
         if filled_quantity > 0:
@@ -201,19 +163,6 @@ def on_trade_filled(trade):
                 entry_price = fill.execution.price
                 print(f"Entered {position_type} position at {entry_price}")
                 position = position_type
-                # Store entry details for PnL calculation
-                trade_entry_time = fill.execution.time
-                trade_entry_price = entry_price
-                # Append to trade_log as an open position (exit details will be filled upon exit)
-                df_trade_log.append({
-                    'Type': position_type,
-                    'Entry Time': trade_entry_time,
-                    'Entry Price': trade_entry_price,
-                    'Exit Time': None,
-                    'Exit Price': None,
-                    'Result': None,
-                    'Profit': 0
-                })
                 pending_order = False
             else:
                 # This is an exit order
@@ -226,23 +175,6 @@ def on_trade_filled(trade):
                 else:
                     exit_type = "EXIT"
                 print(f"Exited position via {exit_type} at {exit_price}")
-                # Calculate PnL
-                last_trade = df_trade_log[-1]
-                if last_trade['Type'] == 'LONG':
-                    pnl = (exit_price - last_trade['Entry Price']) * POSITION_SIZE * BOLLINGER_STDDEV  # Assuming multiplier is stddev
-                elif last_trade['Type'] == 'SHORT':
-                    pnl = (last_trade['Entry Price'] - exit_price) * POSITION_SIZE * BOLLINGER_STDDEV
-                else:
-                    pnl = 0
-                cash += pnl
-                print(f"PnL for trade: ${pnl:.2f}")
-                # Update trade_log with exit details
-                last_trade['Exit Time'] = fill.execution.time
-                last_trade['Exit Price'] = exit_price
-                last_trade['Result'] = exit_type
-                last_trade['Profit'] = pnl
-                # Update balance series
-                balance_series.append(cash)
                 position = None
                 pending_order = False
     except Exception as e:
@@ -258,8 +190,6 @@ def on_order_status(trade):
     except Exception as e:
         logger.error(f"Error in on_order_status handler: {e}")
 
-# --- Define Trading Functions ---
-
 def place_bracket_order(action, current_price):
     global pending_order
     print(f"Placing bracket order: Action={action}, Current Price={current_price}")
@@ -267,14 +197,21 @@ def place_bracket_order(action, current_price):
         logger.error(f"Invalid action: {action}. Must be 'BUY' or 'SELL'.")
         return
 
+    if action.upper() == 'BUY':
+        take_profit_price = current_price + TAKE_PROFIT_DISTANCE
+        stop_loss_price = current_price - STOP_LOSS_DISTANCE
+    else:
+        take_profit_price = current_price - TAKE_PROFIT_DISTANCE
+        stop_loss_price = current_price + STOP_LOSS_DISTANCE
+
     try:
         # Create a standard bracket order with the parent as a limit order
         bracket = ib.bracketOrder(
             action=action.upper(),
             quantity=POSITION_SIZE,
             limitPrice=current_price,      # Parent is a limit order at current_price
-            takeProfitPrice=current_price + TAKE_PROFIT_DISTANCE if action.upper() == 'BUY' else current_price - TAKE_PROFIT_DISTANCE,
-            stopLossPrice=current_price - STOP_LOSS_DISTANCE if action.upper() == 'BUY' else current_price + STOP_LOSS_DISTANCE
+            takeProfitPrice=take_profit_price,
+            stopLossPrice=stop_loss_price
         )
 
         # Place the parent order and get the Trade object
@@ -342,11 +279,8 @@ def execute_trade(action, current_price, current_time):
 
     place_bracket_order(action, current_price)
 
-# --- Define Real-Time Bar Handler ---
-
 def on_realtime_bar(ticker, hasNewBar):
     global current_30min_start, current_30min_bars, df_30m_full, df_30m_rth, position, cash, pending_order
-    global last_trading_day, cumulative_pnl, df_trade_log
 
     try:
         if hasNewBar:
@@ -364,8 +298,9 @@ def on_realtime_bar(ticker, hasNewBar):
             candle_start_minute = (minute // 30) * 30
             candle_start_time = bar_time.replace(minute=candle_start_minute, second=0, microsecond=0)
 
+            # If we detect a new 30-minute candle
             if current_30min_start != candle_start_time:
-                # Finalize the previous candle
+                # Finalize the previous candle when a new one starts
                 if current_30min_start is not None and current_30min_bars:
                     # Aggregate the 30-minute candle data
                     open_30 = current_30min_bars[0]['open']
@@ -384,17 +319,6 @@ def on_realtime_bar(ticker, hasNewBar):
                     # Re-filter RTH data
                     df_30m_rth = filter_rth(df_30m_full)
 
-                    # Check if the day has changed
-                    candle_day = current_30min_start.astimezone(EASTERN).date()
-                    if last_trading_day and candle_day > last_trading_day:
-                        # A new day has started, save PnL for last_trading_day
-                        save_daily_pnl(last_trading_day)
-
-                    # Update last_trading_day
-                    if last_trading_day is None or candle_day > last_trading_day:
-                        last_trading_day = candle_day
-
-                    # Check if the finalized candle is within RTH
                     if is_rth(current_30min_start):
                         current_price = close_30
                         current_time = current_30min_start
@@ -453,66 +377,31 @@ def on_realtime_bar(ticker, hasNewBar):
                 df_30m_full.loc[current_30min_start, ['open', 'high', 'low', 'close', 'volume']] = [open_30, high_30, low_30, close_30, volume_30]
 
                 logger.debug(f"Updated current candle: {current_30min_start} - O:{open_30}, H:{high_30}, L:{low_30}, C:{close_30}, V:{volume_30}")
-    except:
-        print("failure...")
-        sys.exit
 
-    # --- Subscribe to Real-Time Bars ---
-    try:
-        print("Requesting real-time 5-second bars (including ETH)...")
-        ticker = ib.reqRealTimeBars(
-            contract=es_contract,
-            barSize=5,
-            whatToShow='TRADES',
-            useRTH=False,
-            realTimeBarsOptions=[]
-        )
-        ticker.updateEvent += on_realtime_bar
-        print("Real-time bar handler assigned.")
     except Exception as e:
-        logger.error(f"Failed to subscribe to real-time bars: {e}")
-        ib.disconnect()
-        sys.exit(1)
+        logger.error(f"Error in on_realtime_bar handler: {e}")
 
-    # --- Start Trading Bot ---
-    print("Starting mean reversion bot...")
-    try:
-        ib.run()
-    except KeyboardInterrupt:
-        print("Interrupt received, shutting down...")
-    finally:
-        # --- Save Final Day's PnL if needed ---
-        if last_trading_day:
-            save_daily_pnl(last_trading_day)
-        # --- Optional: Plot Equity Curve ---
-        if balance_series:
-            try:
-                import matplotlib.pyplot as plt
+try:
+    print("Requesting real-time 5-second bars (including ETH)...")
+    ticker = ib.reqRealTimeBars(
+        contract=es_contract,
+        barSize=5,
+        whatToShow='TRADES',
+        useRTH=False,
+        realTimeBarsOptions=[]
+    )
+    ticker.updateEvent += on_realtime_bar
+    print("Real-time bar handler assigned.")
+except Exception as e:
+    logger.error(f"Failed to subscribe to real-time bars: {e}")
+    ib.disconnect()
+    sys.exit(1)
 
-                plt.figure(figsize=(14, 7))
-                plt.plot(balance_series, label='Equity Curve')
-                plt.title('Equity Curve')
-                plt.xlabel('Trades')
-                plt.ylabel('Account Balance ($)')
-                plt.legend()
-                plt.grid(True)
-                plt.tight_layout()
-                plt.savefig('equity_curve.png')
-                plt.show()
-            except ImportError:
-                logger.warning("matplotlib not installed. Skipping equity curve plot.")
-
-        # --- Log Final PnL ---
-        print(f"Final Equity: ${cash:.2f}")
-        # Optionally, print trade log
-        if df_trade_log:
-            trade_df = pd.DataFrame(df_trade_log)
-            print(f"Trade Log:\n{trade_df}")
-        else:
-            print("No trades were executed.")
-
-        # --- Save PnL CSV and Disconnect ---
-        if not os.path.exists(PNL_CSV):
-            df_pnl.to_csv(PNL_CSV, index=False)
-        ib.disconnect()
-        print("Disconnected from IBKR.")
+print("Starting mean reversion bot...")
+try:
+    ib.run()
+except KeyboardInterrupt:
+    print("Interrupt received, shutting down...")
+finally:
+    ib.disconnect()
+    print("Disconnected from IBKR.")
