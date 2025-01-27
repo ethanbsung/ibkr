@@ -4,6 +4,7 @@ from ib_insync import *
 import logging
 import sys
 import pytz
+import asyncio
 from datetime import datetime, time, timedelta
 from threading import Lock
 
@@ -159,6 +160,10 @@ class MESFuturesLiveStrategy:
         # Historical Data for 15-minute Indicators
         self.historical_data_15m = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'rsi', 'VWAP'])
 
+        # Event Loop for asyncio scheduling
+        self.loop = asyncio.get_event_loop()
+        self.candle_close_task = None
+
     def fetch_historical_data(self, duration='1 D', bar_size='5 secs'):
         """
         Fetches historical ES data to initialize indicators.
@@ -225,9 +230,53 @@ class MESFuturesLiveStrategy:
             recent_bars_15m = self.historical_data_15m.tail(self.vwap_period_15m)
             self.cumulative_vwap_15m = (recent_bars_15m['VWAP'] * recent_bars_15m['volume']).sum()
             self.cumulative_volume_15m = recent_bars_15m['volume'].sum()
+
+            # Schedule the first candle close
+            self.schedule_next_candle_close()
         except Exception as e:
             logger.error(f"Failure fetching historical data: {e}")
             sys.exit(1)
+
+    def schedule_next_candle_close(self):
+        """
+        Schedules a coroutine to execute trading logic at the next candle close time.
+        """
+        now = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        next_close = self.get_next_candle_close_time(now)
+        delay = (next_close - now).total_seconds()
+        logger.debug(f"Scheduling next candle close at {next_close} UTC, which is in {delay} seconds.")
+        if self.candle_close_task:
+            self.candle_close_task.cancel()
+        self.candle_close_task = self.loop.call_later(delay, lambda: asyncio.ensure_future(self.handle_candle_close(next_close)))
+
+    def get_next_candle_close_time(self, current_time):
+        """
+        Calculates the next 15-minute candle close time based on the current UTC time.
+        """
+        minute = (current_time.minute // 15 + 1) * 15
+        if minute == 60:
+            next_close = current_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        else:
+            next_close = current_time.replace(minute=minute, second=0, microsecond=0)
+        return next_close
+
+    async def handle_candle_close(self, close_time):
+        """
+        Handles the trading logic at the candle close time.
+        """
+        logger.info(f"Candle closed at {close_time}. Evaluating trading signals.")
+        # Fetch the latest 15-minute bar data
+        latest_bar = self.historical_data_15m.iloc[-1]
+        latest_vwap_15m = latest_bar['VWAP']
+        latest_rsi_15m = latest_bar['rsi']
+        latest_close_15m = latest_bar['close']
+
+        # Execute trading logic
+        self.print_status(latest_vwap_15m, latest_rsi_15m)
+        self.apply_trading_logic(latest_vwap_15m, latest_rsi_15m)
+
+        # Schedule the next candle close
+        self.schedule_next_candle_close()
 
     def on_realtime_bar(self, ticker, hasNewBar):
         """
@@ -296,15 +345,8 @@ class MESFuturesLiveStrategy:
                     logger.debug(f"Finalized 15-minute bar starting at {self.current_bar_start_15m}: {finalized_bar_15m}")
                     logger.debug(f"Updated cumulative VWAP (15m): {self.cumulative_vwap_15m:.2f}, Volume: {self.cumulative_volume_15m}")
 
-                    # Calculate and apply indicators for trading logic
-                    if self.cumulative_volume_15m != 0:
-                        # VWAP is already calculated correctly
-                        logger.info(f"15-Minute VWAP: {latest_vwap_15m:.2f}, RSI: {latest_rsi_15m:.2f}")
-                        # Print the indicators and trade conditions
-                        self.print_status(latest_vwap_15m, latest_rsi_15m)
-                        self.apply_trading_logic(latest_vwap_15m, latest_rsi_15m)
-                    else:
-                        logger.warning("Cumulative volume for 15-minute bars is zero. Cannot calculate VWAP.")
+                    # Log Indicators
+                    logger.info(f"15-Minute VWAP: {latest_vwap_15m:.2f}, RSI: {latest_rsi_15m:.2f}")
 
                 # Start a new 15-minute bar
                 self.current_bar_start_15m = candle_start_time_15m
@@ -577,6 +619,28 @@ class MESFuturesLiveStrategy:
             logger.error(f"Failed to start live trading strategy: {e}")
             self.ib.disconnect()
 
+    def plot_equity_curve(self):
+        """
+        Plots the equity curve.
+        """
+        if not self.equity_curve:
+            logger.warning("No equity data to plot.")
+            return
+
+        import matplotlib.pyplot as plt
+
+        df_equity = pd.DataFrame(self.equity_curve)
+        df_equity.set_index('Time', inplace=True)
+
+        plt.figure(figsize=(14, 7))
+        plt.plot(df_equity['Equity'], label='Equity Curve')
+        plt.title('Equity Curve')
+        plt.xlabel('Time')
+        plt.ylabel('Account Balance ($)')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
 
 # --- Main Execution ---
 if __name__ == "__main__":
@@ -595,7 +659,7 @@ if __name__ == "__main__":
     mes_contract = Future(symbol=EXEC_SYMBOL, lastTradeDateOrContractMonth=EXEC_EXPIRY,
                          exchange=EXEC_EXCHANGE, currency=CURRENCY)
 
-    # Qualify Contracts
+    # --- Qualify Contracts ---
     try:
         qualified_contracts = ib.qualifyContracts(es_contract, mes_contract)
         es_contract = qualified_contracts[0]
