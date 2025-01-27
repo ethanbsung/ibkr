@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from ib_insync import *
 import logging
 import sys
@@ -11,7 +10,7 @@ from threading import Lock
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host
 IB_PORT = 7497               # IBKR Gateway/TWS paper trading port
-CLIENT_ID = 1                # Unique client ID
+CLIENT_ID = 2                # Unique client ID
 
 DATA_SYMBOL = 'ES'            # E-mini S&P 500 for data
 DATA_EXPIRY = '202503'        # March 2025 (example)
@@ -29,8 +28,6 @@ CONTRACT_MULTIPLIER = 5      # Contract multiplier for MES
 VWAP_PERIOD_15M = 15         # Number of 15-minute bars to calculate VWAP for trading logic
 RSI_PERIOD_15M = 14          # RSI period for 15-minute bars used in trading logic
 
-VWAP_PERIOD_1M = 1           # Number of 1-minute bars to calculate VWAP for monitoring
-RSI_PERIOD_1M = 14           # RSI period for 1-minute bars used in monitoring
 RSI_OVERBOUGHT = 70          # RSI threshold for overbought
 RSI_OVERSOLD = 30            # RSI threshold for oversold
 
@@ -71,49 +68,35 @@ def rsi(ohlc: pd.DataFrame, period: int = 14) -> pd.Series:
     return rsi
 
 def vwap(ohlc: pd.DataFrame) -> pd.Series:
-    """Calculate the Volume Weighted Average Price (VWAP) since market open."""
+    """Calculate the Volume Weighted Average Price (VWAP) since the most recent market open at 6 PM ET."""
     # Convert index to US/Eastern time
     ohlc = ohlc.copy()
     ohlc['date_et'] = ohlc.index.tz_convert('US/Eastern')
 
-    # Determine the start of the trading day (09:30 ET)
-    ohlc['date_only_et'] = ohlc['date_et'].dt.date
-    ohlc['time_et'] = ohlc['date_et'].dt.time
-
-    # Define market open for each day
+    # Determine the start of the trading day (6 PM ET / 23:00 UTC of the previous day)
     ohlc['market_open_et'] = ohlc['date_et'].apply(
-        lambda x: x.replace(hour=9, minute=30, second=0, microsecond=0)
+        lambda x: x.replace(hour=18, minute=0, second=0, microsecond=0) if x.time() >= time(18, 0) else (x - timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
     )
 
-    # Calculate if each row is after market open
-    ohlc['is_after_open'] = ohlc['date_et'] >= ohlc['market_open_et']
-
-    # Filter data since market open
-    ohlc = ohlc[ohlc['is_after_open']]
+    # Filter data since the most recent market open
+    ohlc = ohlc[ohlc['date_et'] >= ohlc['market_open_et']]
 
     # Calculate Typical Price
     typical_price = (ohlc['high'] + ohlc['low'] + ohlc['close']) / 3
 
-    # Calculate TPV and cumulative sums since market open
-    ohlc['tpv'] = typical_price * ohlc['volume']
-    ohlc['cum_tpv'] = ohlc.groupby('date_only_et')['tpv'].cumsum()
-    ohlc['cum_vol'] = ohlc.groupby('date_only_et')['volume'].cumsum()
-
     # Calculate VWAP
-    ohlc['vwap'] = ohlc['cum_tpv'] / ohlc['cum_vol']
+    cumulative_tpv = (typical_price * ohlc['volume']).cumsum()
+    cumulative_volume = ohlc['volume'].cumsum()
+    ohlc['VWAP'] = cumulative_tpv / cumulative_volume
 
-    # Assign VWAP back to original DataFrame
-    ohlc['vwap_original'] = ohlc['vwap']
-    ohlc = ohlc.tz_convert('UTC')  # Convert back to UTC
-
-    return ohlc['vwap_original']
+    # Return VWAP as a Series indexed by UTC time
+    return ohlc['VWAP'].tz_convert('UTC')
 
 # --- Live Trading Strategy Class ---
 class MESFuturesLiveStrategy:
     def __init__(self, ib, es_contract, mes_contract, initial_cash=5000, position_size=1,
                  contract_multiplier=5, stop_loss_points=4, take_profit_points=18,
                  vwap_period_15m=15, rsi_period_15m=14,
-                 vwap_period_1m=1, rsi_period_1m=14,
                  rsi_overbought=70, rsi_oversold=30):
         """
         Initializes the live trading strategy.
@@ -129,8 +112,6 @@ class MESFuturesLiveStrategy:
             take_profit_points (int): Take profit in points.
             vwap_period_15m (int): Number of 15-minute bars to calculate VWAP for trading logic.
             rsi_period_15m (int): RSI period for 15-minute bars used in trading logic.
-            vwap_period_1m (int): Number of 1-minute bars to calculate VWAP for monitoring.
-            rsi_period_1m (int): RSI period for 1-minute bars used in monitoring.
             rsi_overbought (int): RSI threshold for overbought.
             rsi_oversold (int): RSI threshold for oversold.
         """
@@ -144,18 +125,12 @@ class MESFuturesLiveStrategy:
         self.take_profit_points = take_profit_points
         self.vwap_period_15m = vwap_period_15m
         self.rsi_period_15m = rsi_period_15m
-        self.vwap_period_1m = vwap_period_1m
-        self.rsi_period_1m = rsi_period_1m
         self.rsi_overbought = rsi_overbought
         self.rsi_oversold = rsi_oversold
 
         # Initialize cumulative VWAP and volume for 15-minute bars
         self.cumulative_vwap_15m = 0
         self.cumulative_volume_15m = 0
-
-        # Initialize cumulative VWAP and volume for 1-minute bars
-        self.cumulative_vwap_1m = 0
-        self.cumulative_volume_1m = 0
 
         # Strategy state
         self.cash = initial_cash
@@ -181,34 +156,21 @@ class MESFuturesLiveStrategy:
             'volume': 0
         }
 
-        # Data Buffer for 1-minute bars
-        self.current_bar_start_1m = None
-        self.current_bar_1m = {
-            'open': None,
-            'high': -np.inf,
-            'low': np.inf,
-            'close': None,
-            'volume': 0
-        }
-
         # Historical Data for 15-minute Indicators
-        self.historical_data_15m = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'rsi'])
+        self.historical_data_15m = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'rsi', 'VWAP'])
 
-        # Historical Data for 1-minute Indicators
-        self.historical_data_1m = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'rsi'])
-
-    def fetch_historical_data(self, duration='3 D', bar_size='15 mins'):
+    def fetch_historical_data(self, duration='1 D', bar_size='5 secs'):
         """
         Fetches historical ES data to initialize indicators.
 
         Parameters:
-            duration (str): Duration string (e.g., '3 D' for 3 days).
-            bar_size (str): Bar size (e.g., '15 mins').
+            duration (str): Duration string (e.g., '1 D' for 1 day).
+            bar_size (str): Bar size (e.g., '5 secs').
         """
         logger.info("Fetching historical ES data for indicator initialization...")
         try:
-            # Fetch 15-minute historical data
-            bars_15m = self.ib.reqHistoricalData(
+            # Fetch 5-second historical data
+            bars_5s = self.ib.reqHistoricalData(
                 contract=self.es_contract,
                 endDateTime='',
                 durationStr=duration,
@@ -219,23 +181,23 @@ class MESFuturesLiveStrategy:
                 keepUpToDate=False
             )
 
-            if not bars_15m:
-                logger.error("No historical 15-minute data fetched. Exiting.")
+            if not bars_5s:
+                logger.error("No historical 5-second data fetched. Exiting.")
                 sys.exit(1)
 
-            df_15m = util.df(bars_15m)
-            df_15m.set_index('date', inplace=True)
-            df_15m.sort_index(inplace=True)
+            df_5s = util.df(bars_5s)
+            df_5s.set_index('date', inplace=True)
+            df_5s.sort_index(inplace=True)
             # Ensure the index is timezone-aware (UTC)
-            if df_15m.index.tz is None:
-                df_15m.index = pd.to_datetime(df_15m.index).tz_localize('UTC')
+            if df_5s.index.tz is None:
+                df_5s.index = pd.to_datetime(df_5s.index).tz_localize('UTC')
             else:
-                df_15m.index = pd.to_datetime(df_15m.index).tz_convert('UTC')
+                df_5s.index = pd.to_datetime(df_5s.index).tz_convert('UTC')
 
-            logger.info(f"Fetched {len(df_15m)} historical 15-minute ES bars.")
+            logger.info(f"Fetched {len(df_5s)} historical 5-second ES bars.")
 
-            # Resample to 15-minute bars (if not already)
-            ohlc_15m = df_15m.resample('15T').agg({
+            # Resample to 15-minute bars
+            ohlc_15m = df_5s.resample('15min').agg({
                 'open': 'first',
                 'high': 'max',
                 'low': 'min',
@@ -251,8 +213,8 @@ class MESFuturesLiveStrategy:
             initial_rsi_15m = self.historical_data_15m['rsi'].iloc[-1]
 
             # Calculate initial VWAP for 15-minute bars
-            self.historical_data_15m['vwap'] = vwap(self.historical_data_15m)
-            initial_vwap_15m = self.historical_data_15m['vwap'].iloc[-1]
+            self.historical_data_15m['VWAP'] = vwap(self.historical_data_15m)
+            initial_vwap_15m = self.historical_data_15m['VWAP'].iloc[-1]
 
             logger.info(f"Initialized 15-minute indicators with VWAP: {initial_vwap_15m:.2f}, RSI: {initial_rsi_15m:.2f}")
 
@@ -261,227 +223,106 @@ class MESFuturesLiveStrategy:
 
             # Initialize cumulative VWAP and volume for 15-minute bars
             recent_bars_15m = self.historical_data_15m.tail(self.vwap_period_15m)
-            typical_price_15m = (recent_bars_15m['high'] + recent_bars_15m['low'] + recent_bars_15m['close']) / 3
-            self.cumulative_vwap_15m = (typical_price_15m * recent_bars_15m['volume']).sum()
+            self.cumulative_vwap_15m = (recent_bars_15m['VWAP'] * recent_bars_15m['volume']).sum()
             self.cumulative_volume_15m = recent_bars_15m['volume'].sum()
-
-            # Fetch 1-minute historical data for monitoring
-            bars_1m = self.ib.reqHistoricalData(
-                contract=self.es_contract,
-                endDateTime='',
-                durationStr='1 D',
-                barSizeSetting='1 min',
-                whatToShow='TRADES',
-                useRTH=False,
-                formatDate=1,
-                keepUpToDate=False
-            )
-
-            if not bars_1m:
-                logger.error("No historical 1-minute data fetched. Exiting.")
-                sys.exit(1)
-
-            df_1m = util.df(bars_1m)
-            df_1m.set_index('date', inplace=True)
-            df_1m.sort_index(inplace=True)
-            # Ensure the index is timezone-aware (UTC)
-            if df_1m.index.tz is None:
-                df_1m.index = pd.to_datetime(df_1m.index).tz_localize('UTC')
-            else:
-                df_1m.index = pd.to_datetime(df_1m.index).tz_convert('UTC')
-
-            logger.info(f"Fetched {len(df_1m)} historical 1-minute ES bars.")
-
-            # Initialize historical data for 1-minute bars
-            self.historical_data_1m = df_1m.copy()
-
-            # Calculate initial RSI for 1-minute bars
-            self.historical_data_1m['rsi'] = rsi(self.historical_data_1m, self.rsi_period_1m)
-            initial_rsi_1m = self.historical_data_1m['rsi'].iloc[-1]
-
-            # Calculate initial VWAP for 1-minute bars
-            self.historical_data_1m['vwap'] = vwap(self.historical_data_1m)
-            initial_vwap_1m = self.historical_data_1m['vwap'].iloc[-1]
-
-            logger.info(f"Initialized 1-minute indicators with VWAP: {initial_vwap_1m:.2f}, RSI: {initial_rsi_1m:.2f}")
-
-            # Print Initial 1-minute VWAP and RSI
-            print(f"Initial 1-minute VWAP: {initial_vwap_1m:.2f}, Initial 1-minute RSI: {initial_rsi_1m:.2f}")
-
-            # Initialize cumulative VWAP and volume for 1-minute bars
-            recent_bars_1m = self.historical_data_1m.tail(self.vwap_period_1m)
-            typical_price_1m = (recent_bars_1m['high'] + recent_bars_1m['low'] + recent_bars_1m['close']) / 3
-            self.cumulative_vwap_1m = (typical_price_1m * recent_bars_1m['volume']).sum()
-            self.cumulative_volume_1m = recent_bars_1m['volume'].sum()
-        except:
-            print("Failure fetching historical data...")
+        except Exception as e:
+            logger.error(f"Failure fetching historical data: {e}")
             sys.exit(1)
 
-        def on_realtime_bar(self, ticker, hasNewBar):
-            """
-            Callback function to handle real-time 5-second ES bars.
+    def on_realtime_bar(self, ticker, hasNewBar):
+        """
+        Callback function to handle real-time 5-second ES bars.
 
-            Parameters:
-                ticker (RealTimeBarList): The real-time bar list.
-                hasNewBar (bool): Indicates if a new bar has been received.
-            """
-            with self.lock:
-                if not hasNewBar:
-                    return
+        Parameters:
+            ticker (RealTimeBarList): The real-time bar list.
+            hasNewBar (bool): Indicates if a new bar has been received.
+        """
+        with self.lock:
+            if not hasNewBar:
+                return
 
-                if len(ticker) == 0:
-                    logger.warning("No bars received in RealTimeBarList.")
-                    return
+            if len(ticker) == 0:
+                logger.warning("No bars received in RealTimeBarList.")
+                return
 
-                bar = ticker[-1]
-                # Ensure bar time is timezone-aware (UTC)
-                if bar.time.tzinfo is None:
-                    bar_time = pytz.UTC.localize(bar.time.replace(second=0, microsecond=0))
-                else:
-                    bar_time = bar.time.astimezone(pytz.UTC).replace(second=0, microsecond=0)
+            bar = ticker[-1]
+            # Ensure bar time is timezone-aware (UTC)
+            if bar.time.tzinfo is None:
+                bar_time = pytz.UTC.localize(bar.time.replace(second=0, microsecond=0))
+            else:
+                bar_time = bar.time.astimezone(pytz.UTC).replace(second=0, microsecond=0)
 
-                # ----------------------------
-                # Process 1-minute bars for monitoring
-                # ----------------------------
-                minute = bar_time.minute
-                candle_start_minute = minute  # 1-minute bars
-                candle_start_time_1m = bar_time.replace(second=0, microsecond=0)
+            # ----------------------------
+            # Process 15-minute bars for trading logic
+            # ----------------------------
+            minute_15m = bar_time.minute
+            candle_start_minute_15m = (minute_15m // 15) * 15
+            candle_start_time_15m = bar_time.replace(minute=candle_start_minute_15m, second=0, microsecond=0)
 
-                if self.current_bar_start_1m != candle_start_time_1m:
-                    # Finalize the previous 1-minute bar
-                    if self.current_bar_start_1m is not None and self.current_bar_1m['open'] is not None:
-                        finalized_bar_1m = self.current_bar_1m.copy()
-                        # Calculate Typical Price
-                        typical_price_1m = (finalized_bar_1m['high'] + finalized_bar_1m['low'] + finalized_bar_1m['close']) / 3
-                        # Update cumulative VWAP and volume for 1-minute VWAP
-                        self.cumulative_vwap_1m += (typical_price_1m * finalized_bar_1m['volume'])
-                        self.cumulative_volume_1m += finalized_bar_1m['volume']
-                        # Calculate VWAP
-                        vwap_1m = self.cumulative_vwap_1m / self.cumulative_volume_1m if self.cumulative_volume_1m != 0 else 0
+            if self.current_bar_start_15m != candle_start_time_15m:
+                # Finalize the previous 15-minute bar
+                if self.current_bar_start_15m is not None and self.current_bar_15m['open'] is not None:
+                    finalized_bar_15m = self.current_bar_15m.copy()
+                    # Calculate Typical Price
+                    typical_price_15m = (finalized_bar_15m['high'] + finalized_bar_15m['low'] + finalized_bar_15m['close']) / 3
+                    # Update cumulative VWAP and volume for 15-minute VWAP
+                    self.cumulative_vwap_15m += (typical_price_15m * finalized_bar_15m['volume'])
+                    self.cumulative_volume_15m += finalized_bar_15m['volume']
+                    # Calculate VWAP
+                    vwap_15m = self.cumulative_vwap_15m / self.cumulative_volume_15m if self.cumulative_volume_15m != 0 else 0
 
-                        # Append to historical_data_1m
-                        new_row_1m = pd.Series({
-                            'open': finalized_bar_1m['open'],
-                            'high': finalized_bar_1m['high'],
-                            'low': finalized_bar_1m['low'],
-                            'close': finalized_bar_1m['close'],
-                            'volume': finalized_bar_1m['volume']
-                        }, name=self.current_bar_start_1m)
+                    # Append to historical_data_15m
+                    new_row_15m = pd.Series({
+                        'open': finalized_bar_15m['open'],
+                        'high': finalized_bar_15m['high'],
+                        'low': finalized_bar_15m['low'],
+                        'close': finalized_bar_15m['close'],
+                        'volume': finalized_bar_15m['volume'],
+                        'rsi': None,  # Placeholder, will be recalculated
+                        'VWAP': None  # Placeholder, will be recalculated
+                    }, name=self.current_bar_start_15m)
 
-                        # Append the new row
-                        self.historical_data_1m = pd.concat([self.historical_data_1m, new_row_1m.to_frame().T])
+                    # Append the new row
+                    self.historical_data_15m = pd.concat([self.historical_data_15m, new_row_15m.to_frame().T])
 
-                        # Recalculate RSI for 1-minute bars
-                        self.historical_data_1m['rsi'] = rsi(self.historical_data_1m, self.rsi_period_1m)
+                    # Recalculate RSI for 15-minute bars
+                    self.historical_data_15m['rsi'] = rsi(self.historical_data_15m, self.rsi_period_15m)
 
-                        # Recalculate VWAP using user's logic
-                        vwap_series = vwap(self.historical_data_1m)
-                        latest_vwap_1m = vwap_series.iloc[-1]
-                        self.historical_data_1m['vwap'] = vwap_series
+                    # Recalculate VWAP using updated vwap function
+                    self.historical_data_15m['VWAP'] = vwap(self.historical_data_15m)
+                    latest_vwap_15m = self.historical_data_15m['VWAP'].iloc[-1]
+                    latest_rsi_15m = self.historical_data_15m['rsi'].iloc[-1]
 
-                        # Get the latest RSI value
-                        latest_rsi_1m = self.historical_data_1m['rsi'].iloc[-1]
+                    logger.debug(f"Finalized 15-minute bar starting at {self.current_bar_start_15m}: {finalized_bar_15m}")
+                    logger.debug(f"Updated cumulative VWAP (15m): {self.cumulative_vwap_15m:.2f}, Volume: {self.cumulative_volume_15m}")
 
-                        logger.debug(f"Finalized 1-minute bar starting at {self.current_bar_start_1m}: {finalized_bar_1m}")
-                        logger.debug(f"Updated cumulative VWAP (1m): {self.cumulative_vwap_1m:.2f}, Volume: {self.cumulative_volume_1m}")
+                    # Calculate and apply indicators for trading logic
+                    if self.cumulative_volume_15m != 0:
+                        # VWAP is already calculated correctly
+                        logger.info(f"15-Minute VWAP: {latest_vwap_15m:.2f}, RSI: {latest_rsi_15m:.2f}")
+                        # Print the indicators and trade conditions
+                        self.print_status(latest_vwap_15m, latest_rsi_15m)
+                        self.apply_trading_logic(latest_vwap_15m, latest_rsi_15m)
+                    else:
+                        logger.warning("Cumulative volume for 15-minute bars is zero. Cannot calculate VWAP.")
 
-                        # Calculate and print indicators
-                        if self.cumulative_volume_1m != 0:
-                            vwap_1m = self.cumulative_vwap_1m / self.cumulative_volume_1m
-                            logger.info(f"1-Minute VWAP: {vwap_1m:.2f}, RSI: {latest_rsi_1m:.2f}")
-                        else:
-                            logger.warning("Cumulative volume for 1-minute bars is zero. Cannot calculate VWAP.")
-
-                    # Start a new 1-minute bar
-                    self.current_bar_start_1m = candle_start_time_1m
-                    self.current_bar_1m = {
-                        'open': bar.open_,
-                        'high': bar.high,
-                        'low': bar.low,
-                        'close': bar.close,
-                        'volume': bar.volume
-                    }
-                    logger.debug(f"Started new 1-minute bar at {self.current_bar_start_1m}")
-                else:
-                    # Update the current 1-minute bar
-                    self.current_bar_1m['high'] = max(self.current_bar_1m['high'], bar.high)
-                    self.current_bar_1m['low'] = min(self.current_bar_1m['low'], bar.low)
-                    self.current_bar_1m['close'] = bar.close
-                    self.current_bar_1m['volume'] += bar.volume
-                    logger.debug(f"Updated current 1-minute bar at {self.current_bar_start_1m}: {self.current_bar_1m}")
-
-                # ----------------------------
-                # Process 15-minute bars for trading logic
-                # ----------------------------
-                minute_15m = bar_time.minute
-                candle_start_minute_15m = (minute_15m // 15) * 15
-                candle_start_time_15m = bar_time.replace(minute=candle_start_minute_15m, second=0, microsecond=0)
-
-                if self.current_bar_start_15m != candle_start_time_15m:
-                    # Finalize the previous 15-minute bar
-                    if self.current_bar_start_15m is not None and self.current_bar_15m['open'] is not None:
-                        finalized_bar_15m = self.current_bar_15m.copy()
-                        # Calculate Typical Price
-                        typical_price_15m = (finalized_bar_15m['high'] + finalized_bar_15m['low'] + finalized_bar_15m['close']) / 3
-                        # Update cumulative VWAP and volume for 15-minute VWAP
-                        self.cumulative_vwap_15m += (typical_price_15m * finalized_bar_15m['volume'])
-                        self.cumulative_volume_15m += finalized_bar_15m['volume']
-                        # Calculate VWAP
-                        vwap_15m = self.cumulative_vwap_15m / self.cumulative_volume_15m if self.cumulative_volume_15m != 0 else 0
-
-                        # Append to historical_data_15m
-                        new_row_15m = pd.Series({
-                            'open': finalized_bar_15m['open'],
-                            'high': finalized_bar_15m['high'],
-                            'low': finalized_bar_15m['low'],
-                            'close': finalized_bar_15m['close'],
-                            'volume': finalized_bar_15m['volume']
-                        }, name=self.current_bar_start_15m)
-
-                        # Append the new row
-                        self.historical_data_15m = pd.concat([self.historical_data_15m, new_row_15m.to_frame().T])
-
-                        # Recalculate RSI for 15-minute bars
-                        self.historical_data_15m['rsi'] = rsi(self.historical_data_15m, self.rsi_period_15m)
-
-                        # Recalculate VWAP using user's logic
-                        vwap_series_15m = vwap(self.historical_data_15m)
-                        latest_vwap_15m = vwap_series_15m.iloc[-1]
-                        self.historical_data_15m['vwap'] = vwap_series_15m
-
-                        # Get the latest RSI value
-                        latest_rsi_15m = self.historical_data_15m['rsi'].iloc[-1]
-
-                        logger.debug(f"Finalized 15-minute bar starting at {self.current_bar_start_15m}: {finalized_bar_15m}")
-                        logger.debug(f"Updated cumulative VWAP (15m): {self.cumulative_vwap_15m:.2f}, Volume: {self.cumulative_volume_15m}")
-
-                        # Calculate and apply indicators for trading logic
-                        if self.cumulative_volume_15m != 0:
-                            vwap_15m = self.cumulative_vwap_15m / self.cumulative_volume_15m
-                            logger.info(f"15-Minute VWAP: {vwap_15m:.2f}, RSI: {latest_rsi_15m:.2f}")
-                            # Print the indicators and trade conditions
-                            self.print_status(vwap_15m, latest_rsi_15m)
-                            self.apply_trading_logic(vwap_15m, latest_rsi_15m)
-                        else:
-                            logger.warning("Cumulative volume for 15-minute bars is zero. Cannot calculate VWAP.")
-
-                    # Start a new 15-minute bar
-                    self.current_bar_start_15m = candle_start_time_15m
-                    self.current_bar_15m = {
-                        'open': bar.open_,
-                        'high': bar.high,
-                        'low': bar.low,
-                        'close': bar.close,
-                        'volume': bar.volume
-                    }
-                    logger.debug(f"Started new 15-minute bar at {self.current_bar_start_15m}")
-                else:
-                    # Update the current 15-minute bar
-                    self.current_bar_15m['high'] = max(self.current_bar_15m['high'], bar.high)
-                    self.current_bar_15m['low'] = min(self.current_bar_15m['low'], bar.low)
-                    self.current_bar_15m['close'] = bar.close
-                    self.current_bar_15m['volume'] += bar.volume
-                    logger.debug(f"Updated current 15-minute bar at {self.current_bar_start_15m}: {self.current_bar_15m}")
+                # Start a new 15-minute bar
+                self.current_bar_start_15m = candle_start_time_15m
+                self.current_bar_15m = {
+                    'open': bar.open_,
+                    'high': bar.high,
+                    'low': bar.low,
+                    'close': bar.close,
+                    'volume': bar.volume
+                }
+                logger.debug(f"Started new 15-minute bar at {self.current_bar_start_15m}")
+            else:
+                # Update the current 15-minute bar
+                self.current_bar_15m['high'] = max(self.current_bar_15m['high'], bar.high)
+                self.current_bar_15m['low'] = min(self.current_bar_15m['low'], bar.low)
+                self.current_bar_15m['close'] = bar.close
+                self.current_bar_15m['volume'] += bar.volume
+                logger.debug(f"Updated current 15-minute bar at {self.current_bar_start_15m}: {self.current_bar_15m}")
 
     def print_status(self, vwap, rsi):
         """
@@ -715,7 +556,7 @@ class MESFuturesLiveStrategy:
         """
         try:
             # Fetch historical data to initialize indicators
-            self.fetch_historical_data(duration='3 D', bar_size='15 mins')  # Adjust duration as needed
+            self.fetch_historical_data(duration='1 D', bar_size='5 secs')  # Fetch 5-second data over past day
 
             # Subscribe to real-time ES bars
             logger.info("Requesting real-time 5-second bars for ES...")
@@ -736,26 +577,6 @@ class MESFuturesLiveStrategy:
             logger.error(f"Failed to start live trading strategy: {e}")
             self.ib.disconnect()
 
-    def plot_equity_curve(self):
-        """
-        Plots the equity curve.
-        """
-        if not self.equity_curve:
-            logger.warning("No equity data to plot.")
-            return
-
-        df_equity = pd.DataFrame(self.equity_curve)
-        df_equity.set_index('Time', inplace=True)
-
-        plt.figure(figsize=(14, 7))
-        plt.plot(df_equity['Equity'], label='Equity Curve')
-        plt.title('Equity Curve')
-        plt.xlabel('Time')
-        plt.ylabel('Account Balance ($)')
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.show()
 
 # --- Main Execution ---
 if __name__ == "__main__":
@@ -798,8 +619,6 @@ if __name__ == "__main__":
         take_profit_points=TAKE_PROFIT_POINTS,
         vwap_period_15m=VWAP_PERIOD_15M,
         rsi_period_15m=RSI_PERIOD_15M,
-        vwap_period_1m=VWAP_PERIOD_1M,
-        rsi_period_1m=RSI_PERIOD_1M,
         rsi_overbought=RSI_OVERBOUGHT,
         rsi_oversold=RSI_OVERSOLD
     )
