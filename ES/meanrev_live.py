@@ -455,7 +455,7 @@ def on_realtime_bar(ticker, hasNewBar):
                 logger.debug(f"Updated current candle: {current_30min_start} - O:{open_30}, H:{high_30}, L:{low_30}, C:{close_30}, V:{volume_30}")
     except:
         print("failure...")
-        sys.exit(1)
+        sys.exit
 
     # --- Subscribe to Real-Time Bars ---
     try:

@@ -241,7 +241,7 @@ class MESFuturesLiveStrategy:
         """
         Schedules a coroutine to execute trading logic at the next candle close time.
         """
-        now = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        now = datetime.now(pytz.UTC)
         next_close = self.get_next_candle_close_time(now)
         delay = (next_close - now).total_seconds()
         logger.debug(f"Scheduling next candle close at {next_close} UTC, which is in {delay} seconds.")
