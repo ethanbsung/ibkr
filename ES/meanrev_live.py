@@ -45,8 +45,8 @@ logging.basicConfig(
 logger = logging.getLogger()
 
 # --- Performance Tracking ---
-PERFORMANCE_FILE = 'aggregate_performance.json'
-EQUITY_CURVE_FILE = 'aggregate_equity_curve.csv'
+PERFORMANCE_FILE = 'ES/mr_aggregate_performance.json'
+EQUITY_CURVE_FILE = 'ES/mr_aggregate_equity_curve.csv'
 
 # Initialize or load aggregate performance
 if os.path.exists(PERFORMANCE_FILE):
