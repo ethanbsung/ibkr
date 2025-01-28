@@ -55,7 +55,22 @@ if os.path.exists(PERFORMANCE_FILE):
             aggregate_performance = json.load(f)
         # Convert equity_curve timestamps from strings to datetime objects
         if os.path.exists(EQUITY_CURVE_FILE):
-            aggregate_equity_curve = pd.read_csv(EQUITY_CURVE_FILE, parse_dates=['Timestamp'], index_col='Timestamp')
+            try:
+                aggregate_equity_curve = pd.read_csv(
+                    EQUITY_CURVE_FILE,
+                    parse_dates=['Timestamp'],
+                    index_col='Timestamp'
+                )
+                # Verify that the necessary columns exist
+                if not {'Equity'}.issubset(aggregate_equity_curve.columns):
+                    logger.warning(f"Equity curve file {EQUITY_CURVE_FILE} is missing required columns. Reinitializing.")
+                    aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
+            except pd.errors.EmptyDataError:
+                logger.warning(f"Equity curve file {EQUITY_CURVE_FILE} is empty. Initializing new equity curve.")
+                aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
+            except Exception as e:
+                logger.error(f"Error loading equity curve file: {e}. Initializing new equity curve.")
+                aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
         else:
             aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
         print("Loaded existing aggregate performance data.")
