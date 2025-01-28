@@ -36,8 +36,8 @@ STOP_LOSS_POINTS = 4         # Stop loss in points
 TAKE_PROFIT_POINTS = 18      # Take profit in points
 
 # RTH: 09:30 - 16:00 ET, Monday to Friday
-RTH_START = datetime.strptime("09:30", "%H:%M").time()
-RTH_END = datetime.strptime("16:00", "%H:%M").time()
+RTH_START = datetime.strptime("09:29", "%H:%M").time()
+RTH_END = datetime.strptime("15:59", "%H:%M").time()
 EASTERN = pytz.timezone('US/Eastern')
 
 # --- Setup Logging ---
@@ -222,9 +222,6 @@ class MESFuturesLiveStrategy:
             initial_vwap_15m = self.historical_data_15m['VWAP'].iloc[-1]
 
             logger.info(f"Initialized 15-minute indicators with VWAP: {initial_vwap_15m:.2f}, RSI: {initial_rsi_15m:.2f}")
-
-            # Print Initial 15-minute VWAP and RSI
-            print(f"Initial 15-minute VWAP: {initial_vwap_15m:.2f}, Initial 15-minute RSI: {initial_rsi_15m:.2f}")
 
             # Initialize cumulative VWAP and volume for 15-minute bars
             recent_bars_15m = self.historical_data_15m.tail(self.vwap_period_15m)

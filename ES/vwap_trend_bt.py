@@ -22,12 +22,12 @@ COMMISSION = 0.62                   # Commission per trade (entry or exit)
 SLIPPAGE = 1                      # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2017-03-15'           # Format: 'YYYY-MM-DD'
+START_DATE = '2021-03-15'           # Format: 'YYYY-MM-DD'
 END_DATE = '2024-12-25'             # Format: 'YYYY-MM-DD'
 
 # --- Setup Logging ---
 logging.basicConfig(
-    level=logging.DEBUG,  # Set to DEBUG for more verbosity
+    level=logging.INFO,  # Set to DEBUG for more verbosity
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout)
