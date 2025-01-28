@@ -13,16 +13,16 @@ INITIAL_CAPITAL = 5000             # Starting cash in USD
 POSITION_SIZE = 1                  # Number of contracts per trade
 CONTRACT_MULTIPLIER = 5            # Contract multiplier for MES
 
-TIMEFRAME = '1min'                    # 1-minute timeframe
+TIMEFRAME = '15min'                 # Changed from '1min' to '15min'
 
 STOP_LOSS_POINTS = 4                # Stop loss in points
 TAKE_PROFIT_POINTS = 18             # Take profit in points
 
 COMMISSION = 0.62                   # Commission per trade (entry or exit)
-SLIPPAGE = 1                      # Slippage in points on entry
+SLIPPAGE = 1                        # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2021-03-15'           # Format: 'YYYY-MM-DD'
+START_DATE = '2024-08-15'           # Format: 'YYYY-MM-DD'
 END_DATE = '2024-12-25'             # Format: 'YYYY-MM-DD'
 
 # --- Setup Logging ---
@@ -217,7 +217,7 @@ def calculate_vwap(ohlc: pd.DataFrame) -> pd.Series:
 class MESFuturesBacktest:
     def __init__(self, data_path, start_date, end_date, timeframe, initial_capital,
                  position_size, contract_multiplier, stop_loss_points, take_profit_points,
-                 commission, slippage, rsi_period=210):
+                 commission, slippage, rsi_period=14):
         """
         Initializes the backtest.
 
@@ -233,7 +233,7 @@ class MESFuturesBacktest:
             take_profit_points (int): Take profit in points.
             commission (float): Commission per trade.
             slippage (float): Slippage in points on entry.
-            rsi_period (int): Period for RSI calculation based on 1-minute bars.
+            rsi_period (int): Period for RSI calculation based on the resampled bars.
         """
         self.data_path = data_path
         self.start_date = pd.to_datetime(start_date).tz_localize('UTC')
@@ -246,7 +246,7 @@ class MESFuturesBacktest:
         self.take_profit_points = take_profit_points
         self.commission = commission
         self.slippage = slippage
-        self.rsi_period = rsi_period  # Set RSI period to 210
+        self.rsi_period = rsi_period  # RSI period based on the resampled bars
 
         self.load_data()
         self.prepare_data()
@@ -261,7 +261,7 @@ class MESFuturesBacktest:
         self.stop_loss = 0
         self.take_profit = 0
         self.exposed_bars = 0
-        self.total_bars = len(self.data_1m)
+        self.total_bars = len(self.data_resampled)
         self.equity_peak = initial_capital
         self.drawdowns = []
         self.current_drawdown = 0
@@ -276,7 +276,7 @@ class MESFuturesBacktest:
         logger.info("Data loaded successfully.")
 
     def prepare_data(self):
-        """Prepares data by marking RTH, calculating indicators, and applying date filters."""
+        """Prepares data by marking RTH, resampling, calculating indicators, and applying date filters."""
         logger.info("Preparing data for backtest...")
 
         # Mark Regular Trading Hours without filtering out ETH data
@@ -290,40 +290,40 @@ class MESFuturesBacktest:
         # Ensure data is sorted
         self.data.sort_index(inplace=True)
 
-        # Calculate VWAP continuously with daily reset
-        self.data['vwap'] = calculate_vwap(self.data)
-
-        # Calculate RSI on 15-minute resampled data and map back to 1-minute data
-        logger.info("Calculating RSI on 15-minute resampled data...")
-        # Resample to 15-minute bars for RSI calculation
-        ohlc_15m = self.data.resample('15min').agg({
+        # Resample data to the specified timeframe (15-minute bars)
+        logger.info(f"Resampling data to {self.timeframe} bars...")
+        self.data_resampled = self.data.resample(self.timeframe).agg({
             'open': 'first',
             'high': 'max',
             'low': 'min',
             'close': 'last',
-            'volume': 'sum'
+            'volume': 'sum',
+            'contract': 'first',
+            'pct_chg': 'last',
+            'average': 'mean',
+            'barCount': 'sum'
         }).dropna()
+        logger.info(f"Resampled data has {len(self.data_resampled)} bars.")
 
-        # Calculate 14-period RSI on 15-minute bars
-        ohlc_15m['RSI'] = rsi(ohlc_15m, period=14)
+        # Mark RTH on resampled data
+        self.data_resampled = mark_rth(self.data_resampled)
+        logger.info("Marked RTH on resampled data.")
 
-        # Forward-fill RSI values to map back to 1-minute data
-        ohlc_15m['RSI'] = ohlc_15m['RSI'].ffill()
+        # Calculate VWAP on resampled data
+        self.data_resampled['vwap'] = calculate_vwap(self.data_resampled)
+        logger.info("Calculated VWAP on resampled data.")
 
-        # Merge RSI back to 1-minute data
-        self.data = self.data.join(ohlc_15m['RSI'], how='left')
-        self.data['RSI'] = self.data['RSI'].ffill()
+        # Calculate RSI on resampled data
+        logger.info(f"Calculating RSI with period {self.rsi_period} on resampled data...")
+        self.data_resampled['RSI'] = rsi(self.data_resampled, period=self.rsi_period)
+        logger.info("Calculated RSI on resampled data.")
 
         # Drop initial rows where RSI is NaN
-        initial_rsi_nans = self.data['RSI'].isna().sum()
+        initial_rsi_nans = self.data_resampled['RSI'].isna().sum()
         if initial_rsi_nans > 0:
             logger.info(f"Dropping first {initial_rsi_nans} bars due to NaN RSI.")
-            self.data = self.data.dropna(subset=['RSI'])
-            logger.info(f"Remaining data points after dropping NaN RSI: {len(self.data)}")
-
-        # Assign to data_1m for clarity
-        self.data_1m = self.data.copy()
-        logger.info("Calculated VWAP and RSI.")
+            self.data_resampled = self.data_resampled.dropna(subset=['RSI'])
+            logger.info(f"Remaining data points after dropping NaN RSI: {len(self.data_resampled)}")
 
     def get_unrealized_pnl(self, current_price):
         """Calculates unrealized P&L based on current price and open position."""
@@ -335,9 +335,9 @@ class MESFuturesBacktest:
             return 0
 
     def run_backtest(self):
-        """Executes the backtest by iterating over each 1-minute bar."""
+        """Executes the backtest by iterating over each resampled bar."""
         logger.info("Starting backtest execution...")
-        for idx, row in self.data_1m.iterrows():
+        for idx, row in self.data_resampled.iterrows():
             price = row['close']
             vwap = row['vwap']
             rsi_value = row['RSI']
@@ -350,10 +350,10 @@ class MESFuturesBacktest:
                     # Check for Long Entry
                     if price > vwap and rsi_value > 70:
                         self.position = 'long'
-                        # Apply slippage: buy at price + slippage
+                        # Apply slippage: buy at close price + slippage
                         self.entry_price = price + self.slippage
-                        self.stop_loss = price - self.stop_loss_points
-                        self.take_profit = price + self.take_profit_points
+                        self.stop_loss = self.entry_price - self.stop_loss_points
+                        self.take_profit = self.entry_price + self.take_profit_points
                         self.cash -= self.commission  # Deduct commission for entry
                         self.trade_log.append({
                             'Type': 'Long',
@@ -369,10 +369,10 @@ class MESFuturesBacktest:
                     # Check for Short Entry
                     elif price < vwap and rsi_value < 30:
                         self.position = 'short'
-                        # Apply slippage: sell at price - slippage
+                        # Apply slippage: sell at close price - slippage
                         self.entry_price = price - self.slippage
-                        self.stop_loss = price + self.stop_loss_points
-                        self.take_profit = price - self.take_profit_points
+                        self.stop_loss = self.entry_price + self.stop_loss_points
+                        self.take_profit = self.entry_price - self.take_profit_points
                         self.cash -= self.commission  # Deduct commission for entry
                         self.trade_log.append({
                             'Type': 'Short',
@@ -497,8 +497,8 @@ class MESFuturesBacktest:
         annualized_return_percentage = ((final_account_balance / self.initial_capital) ** (1 / years) - 1) * 100 if years > 0 else 0
 
         # Benchmark Return (Buy and Hold)
-        benchmark_start_price = self.data_1m['close'].iloc[0]
-        benchmark_end_price = self.data_1m['close'].iloc[-1]
+        benchmark_start_price = self.data_resampled['close'].iloc[0]
+        benchmark_end_price = self.data_resampled['close'].iloc[-1]
         benchmark_return = ((benchmark_end_price - benchmark_start_price) / benchmark_start_price) * 100
 
         # Daily Returns for volatility and Sharpe Ratio
@@ -577,8 +577,8 @@ class MESFuturesBacktest:
 
         # --- Plot Equity Curve vs Benchmark ---
         # Create benchmark equity curve (Buy & Hold)
-        initial_close = self.data_1m['close'].iloc[0]
-        benchmark_equity = (self.data_1m['close'] / initial_close) * self.initial_capital
+        initial_close = self.data_resampled['close'].iloc[0]
+        benchmark_equity = (self.data_resampled['close'] / initial_close) * self.initial_capital
 
         # Align the benchmark to the strategy's equity_curve
         benchmark_equity = benchmark_equity.reindex(equity_df.index, method='ffill')
@@ -600,8 +600,8 @@ class MESFuturesBacktest:
 
         # --- Plot Price and VWAP ---
         plt.figure(figsize=(14, 7))
-        plt.plot(self.data_1m.index, self.data_1m['close'], label='Close Price')
-        plt.plot(self.data_1m.index, self.data_1m['vwap'], label='VWAP', linestyle='--')
+        plt.plot(self.data_resampled.index, self.data_resampled['close'], label='Close Price')
+        plt.plot(self.data_resampled.index, self.data_resampled['vwap'], label='VWAP', linestyle='--')
         plt.title('Price vs VWAP')
         plt.xlabel('Time')
         plt.ylabel('Price ($)')
@@ -612,7 +612,7 @@ class MESFuturesBacktest:
 
         # --- Plot RSI ---
         plt.figure(figsize=(14, 4))
-        plt.plot(self.data_1m.index, self.data_1m['RSI'], label='RSI', color='orange')
+        plt.plot(self.data_resampled.index, self.data_resampled['RSI'], label='RSI', color='orange')
         plt.axhline(70, color='red', linestyle='--', label='Overbought (70)')
         plt.axhline(30, color='green', linestyle='--', label='Oversold (30)')
         plt.title('Relative Strength Index (RSI)')
@@ -644,7 +644,7 @@ if __name__ == "__main__":
                 data_path=DATA_PATH,
                 start_date=START_DATE,
                 end_date=END_DATE,
-                timeframe=TIMEFRAME,
+                timeframe=TIMEFRAME,  # Now '15min'
                 initial_capital=INITIAL_CAPITAL,
                 position_size=POSITION_SIZE,
                 contract_multiplier=CONTRACT_MULTIPLIER,
@@ -652,7 +652,7 @@ if __name__ == "__main__":
                 take_profit_points=TAKE_PROFIT_POINTS,
                 commission=COMMISSION,
                 slippage=SLIPPAGE,
-                rsi_period=210  # Set RSI period to 210 to match 14 periods of 15-minute bars
+                rsi_period=14  # RSI period for 15-minute bars
             )
             # Run Backtest
             backtester.run_backtest()
