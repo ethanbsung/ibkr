@@ -38,7 +38,7 @@ EASTERN = pytz.timezone('US/Eastern')
 
 # --- Setup Logging ---
 logging.basicConfig(
-    level=logging.WARNING,
+    level=logging.WARNING,  # Set to WARNING to reduce verbosity; change to DEBUG for more details
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
@@ -50,11 +50,28 @@ EQUITY_CURVE_FILE = 'ES/mr_aggregate_equity_curve.csv'
 
 # Initialize or load aggregate performance
 if os.path.exists(PERFORMANCE_FILE):
-    with open(PERFORMANCE_FILE, 'r') as f:
-        aggregate_performance = json.load(f)
-    # Convert equity_curve timestamps from strings to datetime objects
-    aggregate_equity_curve = pd.read_csv(EQUITY_CURVE_FILE, parse_dates=['Timestamp'], index_col='Timestamp') if os.path.exists(EQUITY_CURVE_FILE) else pd.DataFrame(columns=['Equity'])
-    print("Loaded existing aggregate performance data.")
+    try:
+        with open(PERFORMANCE_FILE, 'r') as f:
+            aggregate_performance = json.load(f)
+        # Convert equity_curve timestamps from strings to datetime objects
+        if os.path.exists(EQUITY_CURVE_FILE):
+            aggregate_equity_curve = pd.read_csv(EQUITY_CURVE_FILE, parse_dates=['Timestamp'], index_col='Timestamp')
+        else:
+            aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
+        print("Loaded existing aggregate performance data.")
+    except json.JSONDecodeError:
+        logger.warning(f"Performance file {PERFORMANCE_FILE} is empty or invalid. Initializing new performance data.")
+        aggregate_performance = {
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "total_pnl": 0.0,
+            "equity_curve": []  # List of dicts with 'Timestamp' and 'Equity'
+        }
+        aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
+    except Exception as e:
+        logger.error(f"Error loading performance file: {e}")
+        sys.exit(1)
 else:
     aggregate_performance = {
         "total_trades": 0,
