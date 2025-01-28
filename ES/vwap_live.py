@@ -514,6 +514,11 @@ class MESFuturesLiveStrategy:
                             'Profit': 0
                         })
                         logger.debug(f"Entered LONG Position at {self.entry_price}")
+
+                        # Print Fill Price and 15-Minute Close Price for Slippage
+                        latest_close = self.historical_data_15m['close'].iloc[-1]
+                        logger.info(f"Order filled at {fill_price:.2f}. 15-Minute Close Price: {latest_close:.2f}")
+
                     elif trade.order.action.upper() == 'SELL' and self.position is None:
                         # Entering Short Position
                         self.position = 'SHORT'
@@ -530,6 +535,10 @@ class MESFuturesLiveStrategy:
                             'Profit': 0
                         })
                         logger.debug(f"Entered SHORT Position at {self.entry_price}")
+
+                        # Print Fill Price and 15-Minute Close Price for Slippage
+                        latest_close = self.historical_data_15m['close'].iloc[-1]
+                        logger.info(f"Order filled at {fill_price:.2f}. 15-Minute Close Price: {latest_close:.2f}")
                 else:
                     # Child order filled, exiting a position
                     if trade.order.orderType in ['LIMIT', 'STOP']:
@@ -547,6 +556,11 @@ class MESFuturesLiveStrategy:
                             })
                             logger.info(f"Exited LONG Position at {fill_price} for P&L: ${pnl:.2f}")
                             self.position = None
+
+                            # Print Fill Price and 15-Minute Close Price for Slippage
+                            latest_close = self.historical_data_15m['close'].iloc[-1]
+                            logger.info(f"Order filled at {fill_price:.2f}. 15-Minute Close Price: {latest_close:.2f}")
+
                         elif self.position == 'SHORT' and trade.order.action.upper() == 'BUY':
                             # Exiting Short Position via Take-Profit or Stop-Loss
                             pnl = (self.entry_price - fill_price) * self.position_size * self.contract_multiplier
@@ -561,6 +575,10 @@ class MESFuturesLiveStrategy:
                             })
                             logger.info(f"Exited SHORT Position at {fill_price} for P&L: ${pnl:.2f}")
                             self.position = None
+
+                            # Print Fill Price and 15-Minute Close Price for Slippage
+                            latest_close = self.historical_data_15m['close'].iloc[-1]
+                            logger.info(f"Order filled at {fill_price:.2f}. 15-Minute Close Price: {latest_close:.2f}")
 
             # Update Equity Curve
             self.equity_curve.append({'Time': fill_time, 'Equity': self.equity})

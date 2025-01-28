@@ -32,8 +32,8 @@ STOP_LOSS_DISTANCE = 5        # Points away from entry
 TAKE_PROFIT_DISTANCE = 10     # Points away from entry
 
 # RTH: 09:30 - 16:00 ET, Monday to Friday
-RTH_START = datetime.time(9, 30)
-RTH_END = datetime.time(16, 0)
+RTH_START = datetime.time(9, 29)
+RTH_END = datetime.time(15, 59)
 EASTERN = pytz.timezone('US/Eastern')
 
 # --- Setup Logging ---
