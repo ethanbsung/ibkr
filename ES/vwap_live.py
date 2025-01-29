@@ -272,7 +272,7 @@ class MESFuturesLiveStrategy:
         current_time_et = current_time.astimezone(EASTERN).time()
         if not (RTH_START <= current_time_et <= RTH_END):
             logger.info(f"Time {current_time_et} outside RTH. No trading action.")
-            return
+            
 
         logger.debug(f"Checking signals @ {current_time}: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
 
@@ -281,10 +281,12 @@ class MESFuturesLiveStrategy:
             # Long Entry Condition
             if (current_price > current_vwap) and (current_rsi > self.rsi_overbought):
                 logger.warning("Signal: Enter LONG")
+                logger.info(f"Current price: {current_price}")
                 self.place_bracket_order('BUY', current_price, current_time)
             # Short Entry Condition
             elif (current_price < current_vwap) and (current_rsi < self.rsi_oversold):
                 logger.debug("Signal: Enter SHORT")
+                logger.info(f"Current price: {current_price}")
                 self.place_bracket_order('SELL', current_price, current_time)
             else:
                 logger.debug("No entry signal detected.")
