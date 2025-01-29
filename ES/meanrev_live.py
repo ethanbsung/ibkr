@@ -405,7 +405,11 @@ def on_realtime_bar(ticker, hasNewBar):
                 return
 
             bar = ticker[-1]
-            bar_time = pd.Timestamp(bar.time).tz_localize('UTC')
+            bar_time = pd.Timestamp(bar.time)
+            if bar_time.tz is None or bar_time.tzinfo is None:
+                bar_time = bar_time.tz_localize('UTC')  # Localize if naive
+            else:
+                bar_time = bar_time.tz_convert('UTC')  # Convert if already timezone-aware
 
             candle_start_time = bar_time.floor('30min')
 
