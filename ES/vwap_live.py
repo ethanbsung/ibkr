@@ -226,7 +226,7 @@ class MESFuturesLiveStrategy:
             df_5s.sort_index(inplace=True)
 
             # Resample to 15-minute bars
-            ohlc_15m = df_5s.resample('15T').agg({
+            ohlc_15m = df_5s.resample('15min').agg({
                 'open': 'first',
                 'high': 'max',
                 'low': 'min',
