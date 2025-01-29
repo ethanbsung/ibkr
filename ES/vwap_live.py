@@ -271,10 +271,10 @@ class MESFuturesLiveStrategy:
         # Convert current_time to ET to check if within RTH
         current_time_et = current_time.astimezone(EASTERN).time()
         if not (RTH_START <= current_time_et <= RTH_END):
-            logger.debug(f"Time {current_time_et} outside RTH. No trading action.")
+            logger.info(f"Time {current_time_et} outside RTH. No trading action.")
             return
 
-        logger.warning(f"Checking signals @ {current_time}: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
+        logger.debug(f"Checking signals @ {current_time}: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
 
         # If no position and no pending order, consider new entries
         if self.position is None and not self.pending_order:
