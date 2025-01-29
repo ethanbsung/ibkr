@@ -4,7 +4,7 @@ from ib_insync import *
 import logging
 import sys
 import pytz
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from threading import Lock
 
 # --- Configuration Parameters ---
@@ -156,8 +156,8 @@ class MESFuturesLiveStrategy:
         # We will store all 5-second bars in this list (and convert to DF on each update)
         self.realtime_5s_data = []
 
-        # Initialize last_log_time to current UTC time
-        self.last_log_time = datetime.utcnow()
+        # Initialize last_log_time to current UTC time (timezone-aware)
+        self.last_log_time = datetime.now(timezone.utc)
 
     def fetch_historical_data(self, duration='3 D', bar_size='15 mins'):
         """
@@ -204,12 +204,12 @@ class MESFuturesLiveStrategy:
 
             # Accumulate the new bars in an in-memory list
             for bar in bars:
-                # Convert bar.time to UTC (ib_insync RealTimeBar has naive or local times)
-                bar_time = bar.time
+                # Convert bar.date to UTC (ib_insync BarData has 'date' attribute with timezone)
+                bar_time = bar.date  # Changed from bar.time to bar.date
                 if bar_time.tzinfo is None:
-                    bar_time = pytz.UTC.localize(bar_time)
+                    bar_time = bar_time.replace(tzinfo=timezone.utc)
                 else:
-                    bar_time = bar_time.astimezone(pytz.UTC)
+                    bar_time = bar_time.astimezone(timezone.utc)
                 # Store fields
                 self.realtime_5s_data.append({
                     'date': bar_time,
@@ -260,7 +260,7 @@ class MESFuturesLiveStrategy:
             self.equity_curve.append({'Time': latest_bar_time, 'Equity': self.equity})
 
             # --- New Code to Log RSI and VWAP Every 5 Minutes ---
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             if current_time >= self.last_log_time + timedelta(minutes=5):
                 logger.info(f"Periodic Update: RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
                 self.last_log_time = current_time
@@ -536,6 +536,7 @@ class MESFuturesLiveStrategy:
             plt.show()
         except ImportError:
             logger.warning("matplotlib not installed. Cannot plot equity curve.")
+
 
 # -----------------------------------------------------------------------------
 # Main Execution
