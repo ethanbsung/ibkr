@@ -156,6 +156,9 @@ class MESFuturesLiveStrategy:
         # We will store all 5-second bars in this list (and convert to DF on each update)
         self.realtime_5s_data = []
 
+        # Initialize last_log_time to current UTC time
+        self.last_log_time = datetime.utcnow()
+
     def fetch_historical_data(self, duration='3 D', bar_size='15 mins'):
         """
         (Optional) Fetch some historical data to initialize indicators if desired.
@@ -205,6 +208,8 @@ class MESFuturesLiveStrategy:
                 bar_time = bar.time
                 if bar_time.tzinfo is None:
                     bar_time = pytz.UTC.localize(bar_time)
+                else:
+                    bar_time = bar_time.astimezone(pytz.UTC)
                 # Store fields
                 self.realtime_5s_data.append({
                     'date': bar_time,
@@ -254,6 +259,13 @@ class MESFuturesLiveStrategy:
             # (includes unrealized PnL, if you want to track that).
             self.equity_curve.append({'Time': latest_bar_time, 'Equity': self.equity})
 
+            # --- New Code to Log RSI and VWAP Every 5 Minutes ---
+            current_time = datetime.utcnow()
+            if current_time >= self.last_log_time + timedelta(minutes=5):
+                logger.info(f"Periodic Update: RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
+                self.last_log_time = current_time
+            # --- End of New Code ---
+
     def apply_trading_logic(self, current_price, current_vwap, current_rsi, current_time):
         """
         Decide whether to place a new trade or not, based on RSI & VWAP.
@@ -271,11 +283,11 @@ class MESFuturesLiveStrategy:
             # Long Entry Condition
             if (current_price > current_vwap) and (current_rsi > self.rsi_overbought):
                 logger.info("Signal: Enter LONG")
-                #self.place_bracket_order('BUY', current_price, current_time)
+                self.place_bracket_order('BUY', current_price, current_time)
             # Short Entry Condition
             elif (current_price < current_vwap) and (current_rsi < self.rsi_oversold):
                 logger.info("Signal: Enter SHORT")
-                #self.place_bracket_order('SELL', current_price, current_time)
+                self.place_bracket_order('SELL', current_price, current_time)
             else:
                 logger.debug("No entry signal detected.")
         else:
@@ -465,6 +477,35 @@ class MESFuturesLiveStrategy:
         ticker_5s.updateEvent += self.on_bar_update
         logger.info("Real-time bar subscription set up.")
 
+        # --- New Code to Log RSI and VWAP at Startup ---
+        # Wait briefly to ensure some data is received
+        import time as time_module
+        time_module.sleep(5)  # Sleep for 5 seconds
+
+        # If there are already 15-minute bars, calculate and log initial RSI and VWAP
+        if self.realtime_5s_data:
+            df_initial = pd.DataFrame(self.realtime_5s_data)
+            df_initial.set_index('date', inplace=True)
+            df_initial.sort_index(inplace=True)
+
+            ohlc_initial = df_initial.resample('15T').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'sum'
+            }).dropna()
+
+            if not ohlc_initial.empty:
+                ohlc_initial['RSI'] = rsi(ohlc_initial, period=self.rsi_period_15m)
+                ohlc_initial['VWAP'] = vwap(ohlc_initial)
+
+                latest_rsi_initial = ohlc_initial['RSI'].iloc[-1]
+                latest_vwap_initial = ohlc_initial['VWAP'].iloc[-1]
+
+                logger.info(f"Initial Indicators: RSI={latest_rsi_initial:.2f}, VWAP={latest_vwap_initial:.2f}")
+        # --- End of New Code ---
+
         logger.info("Starting IB event loop. Press Ctrl+C to exit.")
         try:
             self.ib.run()
@@ -481,6 +522,20 @@ class MESFuturesLiveStrategy:
                 logger.info("No trades were executed.")
             self.ib.disconnect()
 
+    def plot_equity_curve(self):
+        """
+        Optional: Plot the equity curve using matplotlib.
+        """
+        try:
+            import matplotlib.pyplot as plt
+            df_eq = pd.DataFrame(self.equity_curve)
+            df_eq.set_index('Time', inplace=True)
+            df_eq['Equity'].plot(title='Equity Curve')
+            plt.xlabel('Time')
+            plt.ylabel('Equity ($)')
+            plt.show()
+        except ImportError:
+            logger.warning("matplotlib not installed. Cannot plot equity curve.")
 
 # -----------------------------------------------------------------------------
 # Main Execution
