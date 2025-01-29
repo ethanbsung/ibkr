@@ -14,19 +14,19 @@ POSITION_SIZE = 1                  # Number of contracts per trade
 CONTRACT_MULTIPLIER = 5            # Contract multiplier for MES
 
 TIMEFRAME = '1min'                 # Keep original 1-minute timeframe for the main data
-STOP_LOSS_POINTS = 4               # Stop loss in points
-TAKE_PROFIT_POINTS = 18            # Take profit in points
+STOP_LOSS_POINTS = 9               # Stop loss in points
+TAKE_PROFIT_POINTS = 10            # Take profit in points
 
 COMMISSION = 0.62                  # Commission per trade (entry or exit)
 SLIPPAGE = 1                       # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2024-12-01'          # Format: 'YYYY-MM-DD'
+START_DATE = '2019-01-01'          # Format: 'YYYY-MM-DD'
 END_DATE = '2024-12-25'            # Format: 'YYYY-MM-DD'
 
 # --- Setup Logging ---
 logging.basicConfig(
-    level=logging.INFO,  # Set to DEBUG for more verbosity
+    level=logging.INFO,  # Set to INFO to reduce verbosity
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout)
@@ -63,7 +63,6 @@ def mark_rth(df):
     df = df.tz_convert('UTC')
     return df
 
-
 def load_data(csv_file):
     """
     Loads CSV data into a pandas DataFrame with appropriate data types and datetime parsing.
@@ -77,14 +76,14 @@ def load_data(csv_file):
         df = pd.read_csv(
             csv_file,
             dtype={
-                'Symbol': str,
-                'Open': float,
-                'High': float,
-                'Low': float,
-                'Last': float,
-                'Change': float,
-                'Volume': float,
-                'Open Int': float
+                'Symbol': 'category',
+                'Open': 'float32',
+                'High': 'float32',
+                'Low': 'float32',
+                'Last': 'float32',
+                'Change': 'float32',
+                'Volume': 'float32',
+                'Open Int': 'float32'
             },
             parse_dates=['Time'],
             converters=converters
@@ -127,7 +126,6 @@ def load_data(csv_file):
         # Add missing columns
         df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
         df['barCount'] = 1  # Assume each row is a single bar
-        df['contract'] = df['contract'].astype(str)
 
         # Validate required columns
         required_columns = ['open', 'high', 'low', 'close', 'volume', 'contract', 'pct_chg', 'average', 'barCount']
@@ -153,7 +151,6 @@ def load_data(csv_file):
         logger.error(f"An error occurred while reading the CSV '{csv_file}': {e}")
         sys.exit(1)
 
-
 def rsi(ohlc: pd.DataFrame, period: int = 14) -> pd.Series:
     """Calculate the RSI on the given DataFrame (expects 'close')."""
     delta = ohlc['close'].diff()
@@ -169,7 +166,6 @@ def rsi(ohlc: pd.DataFrame, period: int = 14) -> pd.Series:
     rsi_series = 100 - (100 / (1 + RS))
     rsi_series.name = "RSI"
     return rsi_series
-
 
 def calculate_vwap(ohlc: pd.DataFrame) -> pd.Series:
     """
@@ -199,7 +195,6 @@ def calculate_vwap(ohlc: pd.DataFrame) -> pd.Series:
     ohlc['vwap'] = ohlc_eastern['vwap']
     return ohlc['vwap']
 
-
 # --- Backtest Class ---
 class MESFuturesBacktest:
     def __init__(self, data_path, start_date, end_date, timeframe, initial_capital,
@@ -207,9 +202,6 @@ class MESFuturesBacktest:
                  commission, slippage, rsi_period=14):
         """
         Initializes the backtest.
-        
-        We keep the 1-minute data in self.data_prepared for the main loop,
-        but compute a 15-minute RSI on the fly inside run_backtest.
         """
         self.data_path = data_path
         self.start_date = pd.to_datetime(start_date).tz_localize('UTC')
@@ -222,7 +214,7 @@ class MESFuturesBacktest:
         self.take_profit_points = take_profit_points
         self.commission = commission
         self.slippage = slippage
-        self.rsi_period = rsi_period  # We'll compute RSI(14) on 15-min bars.
+        self.rsi_period = rsi_period  # RSI period on the 15-minute bars
 
         self.load_data()
         self.prepare_data()
@@ -253,8 +245,8 @@ class MESFuturesBacktest:
 
     def prepare_data(self):
         """
-        Prepares 1-minute data: mark RTH, filter by date, resample to 1-min (no-op if already 1-min),
-        and calculate VWAP so that we can read it in the loop.
+        Prepares 1-minute data: mark RTH, filter by date, resample to 1-min,
+        calculate VWAP, and precompute 15-minute RSI.
         """
         logger.info("Preparing data for backtest...")
 
@@ -290,8 +282,25 @@ class MESFuturesBacktest:
         self.data_prepared['vwap'] = calculate_vwap(self.data_prepared)
         logger.info("Finished calculating VWAP.")
 
-        # We do NOT compute RSI here, because we want a 15-minute RSI computed on-the-fly.
-        # The user wants an RSI that is effectively on 15-minute bars, updated each 1-minute step.
+        # Precompute 15-minute RSI
+        logger.info("Calculating 15-minute RSI...")
+        bars_15m = self.data_prepared.resample('15min').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+        bars_15m['RSI'] = rsi(bars_15m, period=self.rsi_period)
+        logger.info("Finished calculating 15-minute RSI.")
+
+        # Forward-fill RSI to 1-minute bars
+        logger.info("Aligning 15-minute RSI with 1-minute data...")
+        self.data_prepared['RSI'] = bars_15m['RSI'].reindex(self.data_prepared.index, method='ffill')
+        logger.info("Finished aligning RSI.")
+
+        # Optional: Fill initial NaNs if any
+        self.data_prepared['RSI'].fillna(method='bfill', inplace=True)
 
     def get_unrealized_pnl(self, current_price):
         """Calculates unrealized P&L based on the current price and open position."""
@@ -304,170 +313,163 @@ class MESFuturesBacktest:
 
     def run_backtest(self):
         """
-        Main loop: 
-         - For each 1-minute bar, we resample all data up to that bar to 15 minutes,
-           compute RSI(14) on those 15-min bars, and get the latest RSI value.
-         - Then we trade based on that RSI and our usual logic.
+        Main loop: Iterate over each 1-minute bar using precomputed RSI and perform trading logic.
         """
         logger.info("Starting backtest execution...")
 
-        # We'll iterate over each 1-minute bar in chronological order
-        for current_idx, row in self.data_prepared.iterrows():
-            price = row['close']
-            vwap = row['vwap']
-            is_rth = row['is_rth']
+        # Extract necessary columns as NumPy arrays for faster access
+        times = self.data_prepared.index.to_numpy()
+        closes = self.data_prepared['close'].to_numpy()
+        highs = self.data_prepared['high'].to_numpy()
+        lows = self.data_prepared['low'].to_numpy()
+        vwaps = self.data_prepared['vwap'].to_numpy()
+        is_rths = self.data_prepared['is_rth'].astype(bool).to_numpy()
+        rsis = self.data_prepared['RSI'].to_numpy()
 
-            # 1) Resample up to the current index in 15-minute bars
-            #    This effectively simulates "live" building of 15-min bars.
-            up_to_now = self.data_prepared.loc[:current_idx]
-            bars_15m = up_to_now.resample('15min').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            }).dropna()
+        for i in range(len(self.data_prepared)):
+            current_idx = times[i]
+            price = closes[i]
+            high = highs[i]
+            low = lows[i]
+            vwap = vwaps[i]
+            is_rth = is_rths[i]
+            rsi_value = rsis[i]
 
-            # 2) Compute RSI(14) on those 15-min bars
-            bars_15m['RSI'] = rsi(bars_15m, period=self.rsi_period)
-
-            # 3) Extract the latest 15-minute RSI value
-            if len(bars_15m) < 1 or pd.isna(bars_15m['RSI'].iloc[-1]):
-                # Not enough data to compute RSI, skip entry logic
-                rsi_value = None
-            else:
-                rsi_value = bars_15m['RSI'].iloc[-1]
-
-            # Proceed with trading logic if we have an RSI reading
-            if rsi_value is not None:
-                # Check if we are in a position
+            # Trading logic
+            if not np.isnan(rsi_value):
                 if self.position is None:
-                    # Only consider entering during RTH
                     if is_rth:
-                        # Check for a Long Entry
                         if price > vwap and rsi_value > 70:
-                            self.position = 'long'
-                            self.entry_price = price + self.slippage  # add slippage
-                            self.stop_loss = self.entry_price - self.stop_loss_points
-                            self.take_profit = self.entry_price + self.take_profit_points
-                            self.cash -= self.commission  # entry commission
-                            self.trade_log.append({
-                                'Type': 'Long',
-                                'Entry Time': current_idx,
-                                'Entry Price': self.entry_price,
-                                'Exit Time': None,
-                                'Exit Price': None,
-                                'Result': None,
-                                'Profit': 0
-                            })
-                            self.exposed_bars += 1
-                        # Check for a Short Entry
+                            # Enter Long
+                            self.enter_position('long', price, current_idx)
                         elif price < vwap and rsi_value < 30:
-                            self.position = 'short'
-                            self.entry_price = price - self.slippage  # slippage
-                            self.stop_loss = self.entry_price + self.stop_loss_points
-                            self.take_profit = self.entry_price - self.take_profit_points
-                            self.cash -= self.commission
-                            self.trade_log.append({
-                                'Type': 'Short',
-                                'Entry Time': current_idx,
-                                'Entry Price': self.entry_price,
-                                'Exit Time': None,
-                                'Exit Price': None,
-                                'Result': None,
-                                'Profit': 0
-                            })
-                            self.exposed_bars += 1
+                            # Enter Short
+                            self.enter_position('short', price, current_idx)
                 else:
-                    # Already in a position, check for exits
-                    exit_signal = False
-                    result = None
-                    exit_price = None
+                    # Check for exit signals
+                    exit_info = self.check_exit_conditions(price, high, low, current_idx)
+                    if exit_info:
+                        self.exit_position(exit_info, current_idx)
 
-                    if self.position == 'long':
-                        if price <= self.stop_loss:
-                            exit_signal = True
-                            result = 'Stop Loss'
-                            exit_price = self.stop_loss
-                        elif price >= self.take_profit:
-                            exit_signal = True
-                            result = 'Take Profit'
-                            exit_price = self.take_profit
-                    else:  # self.position == 'short'
-                        if price >= self.stop_loss:
-                            exit_signal = True
-                            result = 'Stop Loss'
-                            exit_price = self.stop_loss
-                        elif price <= self.take_profit:
-                            exit_signal = True
-                            result = 'Take Profit'
-                            exit_price = self.take_profit
-
-                    if exit_signal:
-                        # Calculate realized PnL
-                        if self.position == 'long':
-                            pnl = (exit_price - self.entry_price) * self.position_size * self.contract_multiplier
-                        else:  # short
-                            pnl = (self.entry_price - exit_price) * self.position_size * self.contract_multiplier
-
-                        pnl -= self.commission  # exit commission
-                        self.cash += pnl
-                        self.equity += pnl
-
-                        # Update trade log
-                        self.trade_log[-1].update({
-                            'Exit Time': current_idx,
-                            'Exit Price': exit_price,
-                            'Result': result,
-                            'Profit': pnl
-                        })
-
-                        # Reset position
-                        self.position = None
-                        self.entry_price = 0
-                        self.stop_loss = 0
-                        self.take_profit = 0
-                    else:
-                        self.exposed_bars += 1
-            else:
-                # No RSI -> skip entry logic
-                if self.position is not None:
-                    # If we are in a position, we do not exit (no RSI signal).
-                    # You could optionally do time-based exit here, if desired.
-                    self.exposed_bars += 1
-
-            # Update the equity curve with the unrealized PnL
+            # Update equity curve
+            unrealized_pnl = self.get_unrealized_pnl(price)
+            total_equity = self.equity + unrealized_pnl
             self.equity_curve.append({
                 'Time': current_idx,
-                'Equity': self.equity + self.get_unrealized_pnl(price)
+                'Equity': total_equity
             })
 
-            # Track new peak or update drawdown
-            current_total_equity = self.equity + self.get_unrealized_pnl(price)
-            if current_total_equity > self.equity_peak:
-                self.equity_peak = current_total_equity
-                if self.in_drawdown:
-                    drawdown_duration = (current_idx - self.drawdown_start).total_seconds() / 86400
-                    self.drawdown_durations.append(drawdown_duration)
-                    self.in_drawdown = False
-                    self.current_drawdown = 0
+            # Update drawdown
+            self.update_drawdown(total_equity, current_idx)
 
-            # Current drawdown from peak
+        logger.info("Backtest execution completed.")
+
+    def enter_position(self, position_type, price, current_idx):
+        """Handles entering a position."""
+        self.position = position_type
+        if position_type == 'long':
+            self.entry_price = price + self.slippage
+            self.stop_loss = self.entry_price - self.stop_loss_points
+            self.take_profit = self.entry_price + self.take_profit_points
+        else:  # 'short'
+            self.entry_price = price - self.slippage
+            self.stop_loss = self.entry_price + self.stop_loss_points
+            self.take_profit = self.entry_price - self.take_profit_points
+
+        self.cash -= self.commission
+        self.equity -= self.commission  # Commission impacts equity immediately
+        self.trade_log.append({
+            'Type': position_type.capitalize(),
+            'Entry Time': current_idx,
+            'Entry Price': self.entry_price,
+            'Exit Time': None,
+            'Exit Price': None,
+            'Result': None,
+            'Profit': 0
+        })
+        self.exposed_bars += 1
+        logger.debug(f"{position_type.capitalize()} entered at {self.entry_price} on {current_idx}")
+
+    def check_exit_conditions(self, price, high, low, current_idx):
+        """Checks if exit conditions are met for the current position."""
+        if self.position == 'long':
+            # Check if both stop loss and take profit are hit within the bar
+            if low <= self.stop_loss and high >= self.take_profit:
+                # Determine which was hit first
+                if (self.take_profit - self.entry_price) < (self.entry_price - self.stop_loss):
+                    return {'result': 'Take Profit', 'price': self.take_profit}
+                else:
+                    return {'result': 'Stop Loss', 'price': self.stop_loss}
+            elif high >= self.take_profit:
+                return {'result': 'Take Profit', 'price': self.take_profit}
+            elif low <= self.stop_loss:
+                return {'result': 'Stop Loss', 'price': self.stop_loss}
+        elif self.position == 'short':
+            if high >= self.stop_loss and low <= self.take_profit:
+                if (self.entry_price - self.take_profit) < (self.stop_loss - self.entry_price):
+                    return {'result': 'Take Profit', 'price': self.take_profit}
+                else:
+                    return {'result': 'Stop Loss', 'price': self.stop_loss}
+            elif low <= self.take_profit:
+                return {'result': 'Take Profit', 'price': self.take_profit}
+            elif high >= self.stop_loss:
+                return {'result': 'Stop Loss', 'price': self.stop_loss}
+        return None
+
+    def exit_position(self, exit_info, current_idx):
+        """Handles exiting a position."""
+        result = exit_info['result']
+        exit_price = exit_info['price']
+
+        # Calculate PnL
+        if self.position == 'long':
+            pnl = (exit_price - self.entry_price) * self.position_size * self.contract_multiplier
+        else:  # 'short'
+            pnl = (self.entry_price - exit_price) * self.position_size * self.contract_multiplier
+
+        pnl -= self.commission  # Exit commission
+        self.cash += pnl
+        self.equity += pnl
+
+        # Update trade log
+        self.trade_log[-1].update({
+            'Exit Time': current_idx,
+            'Exit Price': exit_price,
+            'Result': result,
+            'Profit': pnl
+        })
+
+        logger.debug(f"{self.position.capitalize()} exited with {result} at {exit_price} on {current_idx} PROFIT: {pnl}")
+
+        # Reset position
+        self.position = None
+        self.entry_price = 0
+        self.stop_loss = 0
+        self.take_profit = 0
+
+    def update_drawdown(self, current_total_equity, current_idx):
+        """Updates drawdown metrics."""
+        if current_total_equity > self.equity_peak:
+            self.equity_peak = current_total_equity
+            if self.in_drawdown:
+                drawdown_duration = (current_idx - self.drawdown_start).total_seconds() / 86400
+                self.drawdown_durations.append(drawdown_duration)
+                self.in_drawdown = False
+                self.current_drawdown = 0
+        else:
             dd = (self.equity_peak - current_total_equity) / self.equity_peak * 100
             if dd > self.current_drawdown:
                 self.current_drawdown = dd
                 if not self.in_drawdown:
                     self.in_drawdown = True
                     self.drawdown_start = current_idx
-            if self.in_drawdown and dd < self.current_drawdown:
-                # continuing drawdown, do nothing
-                pass
-            elif self.in_drawdown and dd >= self.current_drawdown:
-                # recovering from drawdown
-                self.drawdowns.append(self.current_drawdown)
-                self.current_drawdown = 0
-                drawdown_duration = (current_idx - self.drawdown_start).total_seconds() / 86400
-                self.drawdown_durations.append(drawdown_duration)
+            # Optionally track further drawdown details here
+
+    def get_trade_results(self):
+        """Returns trade results as a DataFrame."""
+        if not self.trade_log:
+            return pd.DataFrame()
+        return pd.DataFrame(self.trade_log)
 
     def analyze_results(self):
         """Analyzes and prints the backtest results."""
@@ -475,7 +477,7 @@ class MESFuturesBacktest:
             print("No trades were executed.")
             return
 
-        trade_results = pd.DataFrame(self.trade_log)
+        trade_results = self.get_trade_results()
         equity_df = pd.DataFrame(self.equity_curve).set_index('Time')
 
         start_date = equity_df.index.min().strftime("%Y-%m-%d")
@@ -617,11 +619,7 @@ class MESFuturesBacktest:
         plt.tight_layout()
         plt.show()
 
-        # Because RSI is computed on 15-min bars (on the fly), we don't have an RSI column in data_prepared.
-        # If you'd like to store those RSI values for plotting, you'd need to do so in the loop.
-        # Or you can re-run a 15-min aggregator for the entire date range *after* backtest and plot RSI.
-        # For demonstration, let's just show how you'd plot it if you re-aggregate afterwards:
-
+        # Plot RSI (15-min) Over Full Date Range
         bars_15m_final = self.data_prepared.resample('15min').agg({
             'open': 'first',
             'high': 'max',
@@ -646,6 +644,12 @@ class MESFuturesBacktest:
         # Optionally save trade results or equity curve:
         # trade_results.to_csv('trade_results.csv', index=False)
         # equity_df.to_csv('equity_curve.csv')
+
+    def get_trade_results(self):
+        """Returns trade results as a DataFrame."""
+        if not self.trade_log:
+            return pd.DataFrame()
+        return pd.DataFrame(self.trade_log)
 
 # --- Main Execution ---
 if __name__ == "__main__":

@@ -406,14 +406,9 @@ def on_realtime_bar(ticker, hasNewBar):
                 return
 
             bar = ticker[-1]
-            if bar.time.tzinfo is None:
-                bar_time = pytz.UTC.localize(bar.time.replace(second=0, microsecond=0))
-            else:
-                bar_time = bar.time.replace(second=0, microsecond=0)
+            bar_time = pd.Timestamp(bar.time).tz_localize('UTC')
 
-            minute = bar_time.minute
-            candle_start_minute = (minute // 30) * 30
-            candle_start_time = bar_time.replace(minute=candle_start_minute, second=0, microsecond=0)
+            candle_start_time = bar_time.floor('30min')
 
             # If we detect a new 30-minute candle
             if current_30min_start != candle_start_time:

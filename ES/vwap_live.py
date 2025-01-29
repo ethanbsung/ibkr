@@ -1,10 +1,10 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from ib_insync import *
 import logging
 import sys
 import pytz
-import asyncio
 from datetime import datetime, time, timedelta
 from threading import Lock
 
@@ -13,47 +13,49 @@ IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host
 IB_PORT = 7497               # IBKR Gateway/TWS paper trading port
 CLIENT_ID = 2                # Unique client ID
 
-DATA_SYMBOL = 'ES'            # E-mini S&P 500 for data
-DATA_EXPIRY = '202503'        # March 2025 (example)
-DATA_EXCHANGE = 'CME'         # Exchange for ES
+DATA_SYMBOL = 'ES'           # E-mini S&P 500 for data
+DATA_EXPIRY = '202503'       # March 2025 (example)
+DATA_EXCHANGE = 'CME'        # Exchange for ES
 CURRENCY = 'USD'
 
-EXEC_SYMBOL = 'MES'            # Micro E-mini S&P 500 for execution
-EXEC_EXPIRY = '202503'        # March 2025 (example)
-EXEC_EXCHANGE = 'CME'         # Exchange for MES
+EXEC_SYMBOL = 'MES'          # Micro E-mini S&P 500 for execution
+EXEC_EXPIRY = '202503'       # March 2025 (example)
+EXEC_EXCHANGE = 'CME'        # Exchange for MES
 
 INITIAL_CASH = 5000          # Starting cash in USD
 POSITION_SIZE = 1            # Number of MES contracts per trade
 CONTRACT_MULTIPLIER = 5      # Contract multiplier for MES
 
-VWAP_PERIOD_15M = 15         # Number of 15-minute bars to calculate VWAP for trading logic
-RSI_PERIOD_15M = 14          # RSI period for 15-minute bars used in trading logic
+# RSI thresholds
+RSI_PERIOD_15M = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
 
-RSI_OVERBOUGHT = 70          # RSI threshold for overbought
-RSI_OVERSOLD = 30            # RSI threshold for oversold
+# Risk Management
+STOP_LOSS_POINTS = 9
+TAKE_PROFIT_POINTS = 10
 
-STOP_LOSS_POINTS = 4         # Stop loss in points
-TAKE_PROFIT_POINTS = 18      # Take profit in points
-
-# RTH: 09:30 - 16:00 ET, Monday to Friday
-RTH_START = datetime.strptime("09:29", "%H:%M").time()
-RTH_END = datetime.strptime("15:59", "%H:%M").time()
-EASTERN = pytz.timezone('US/Eastern')
+# Regular Trading Hours (RTH) for logic gating
+RTH_START = datetime.strptime("09:30", "%H:%M").time()
+RTH_END   = datetime.strptime("15:59", "%H:%M").time()
+EASTERN   = pytz.timezone('US/Eastern')
 
 # --- Setup Logging ---
 logging.basicConfig(
     level=logging.INFO,  # Set to INFO or DEBUG for more verbosity
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger()
 
-# --- Helper Functions ---
+# -----------------------------------------------------------------------------
+# Helper functions for RSI & VWAP (from your snippet)
+# -----------------------------------------------------------------------------
 
 def rsi(ohlc: pd.DataFrame, period: int = 14) -> pd.Series:
-    """Calculate the Relative Strength Index (RSI)."""
+    """
+    Calculate the Relative Strength Index (RSI) on the given DataFrame (expects 'close').
+    """
     delta = ohlc['close'].diff()
 
     up, down = delta.copy(), delta.copy()
@@ -64,57 +66,65 @@ def rsi(ohlc: pd.DataFrame, period: int = 14) -> pd.Series:
     _loss = down.abs().ewm(com=(period - 1), min_periods=period).mean()
 
     RS = _gain / _loss
-    rsi = pd.Series(100 - (100 / (1 + RS)), name="RSI")
-
-    return rsi
+    return pd.Series(100 - (100 / (1 + RS)), name="RSI")
 
 def vwap(ohlc: pd.DataFrame) -> pd.Series:
-    """Calculate the Volume Weighted Average Price (VWAP) since the most recent market open at 6 PM ET."""
-    # Convert index to US/Eastern time
-    ohlc = ohlc.copy()
-    ohlc['date_et'] = ohlc.index.tz_convert('US/Eastern')
+    """
+    Calculate the Volume Weighted Average Price (VWAP) since the *latest* market open
+    (defaulted to 6:00 PM Eastern) within the same session.
+    """
+    # Copy so as not to mutate original
+    df = ohlc.copy()
 
-    # Determine the start of the trading day (6 PM ET / 23:00 UTC of the previous day)
-    ohlc['market_open_et'] = ohlc['date_et'].apply(
-        lambda x: x.replace(hour=18, minute=0, second=0, microsecond=0) if x.time() >= time(18, 0) else (x - timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
-    )
+    # Convert index to US/Eastern
+    df['date_eastern'] = df.index.tz_convert('US/Eastern')
 
-    # Filter data since the most recent market open
-    ohlc = ohlc[ohlc['date_et'] >= ohlc['market_open_et']]
+    # Define "market open" as 18:00 (6 PM ET) on the same or previous day
+    # For each row, find the most recent 18:00:00
+    def session_open(dt_eastern):
+        # If the bar time is >= 18:00 that day, session open is that day 18:00
+        # else session open is the *previous* day at 18:00
+        if dt_eastern.time() >= time(18,0):
+            return dt_eastern.replace(hour=18, minute=0, second=0, microsecond=0)
+        else:
+            # Subtract one day, set to 18:00
+            return (dt_eastern - timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
 
-    # Calculate Typical Price
-    typical_price = (ohlc['high'] + ohlc['low'] + ohlc['close']) / 3
+    df['session_open'] = df['date_eastern'].apply(session_open)
 
-    # Calculate VWAP
-    cumulative_tpv = (typical_price * ohlc['volume']).cumsum()
-    cumulative_volume = ohlc['volume'].cumsum()
-    ohlc['VWAP'] = cumulative_tpv / cumulative_volume
+    # Filter rows only from the current session's open
+    df = df[df['date_eastern'] >= df['session_open']]
 
-    # Return VWAP as a Series indexed by UTC time
-    return ohlc['VWAP'].tz_convert('UTC')
+    # Typical Price
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
 
-# --- Live Trading Strategy Class ---
+    # Cumulative TP * Volume / Cumulative Volume
+    csum_tpvol = (typical_price * df['volume']).cumsum()
+    csum_vol   = df['volume'].cumsum()
+
+    return pd.Series(csum_tpvol / csum_vol, name="VWAP")
+
+
+# -----------------------------------------------------------------------------
+# Live Trading Strategy Class
+# -----------------------------------------------------------------------------
 class MESFuturesLiveStrategy:
-    def __init__(self, ib, es_contract, mes_contract, initial_cash=5000, position_size=1,
-                 contract_multiplier=5, stop_loss_points=4, take_profit_points=18,
-                 vwap_period_15m=15, rsi_period_15m=14,
-                 rsi_overbought=70, rsi_oversold=30):
+    def __init__(
+        self, 
+        ib,
+        es_contract,
+        mes_contract,
+        initial_cash=INITIAL_CASH,
+        position_size=POSITION_SIZE,
+        contract_multiplier=CONTRACT_MULTIPLIER,
+        stop_loss_points=STOP_LOSS_POINTS,
+        take_profit_points=TAKE_PROFIT_POINTS,
+        rsi_period_15m=RSI_PERIOD_15M,
+        rsi_overbought=RSI_OVERBOUGHT,
+        rsi_oversold=RSI_OVERSOLD,
+    ):
         """
         Initializes the live trading strategy.
-
-        Parameters:
-            ib (IB): ib_insync IB instance.
-            es_contract (Future): E-mini S&P 500 contract for data.
-            mes_contract (Future): Micro E-mini S&P 500 contract for execution.
-            initial_cash (float): Starting cash in USD.
-            position_size (int): Number of contracts per trade.
-            contract_multiplier (int): Contract multiplier for MES.
-            stop_loss_points (int): Stop loss in points.
-            take_profit_points (int): Take profit in points.
-            vwap_period_15m (int): Number of 15-minute bars to calculate VWAP for trading logic.
-            rsi_period_15m (int): RSI period for 15-minute bars used in trading logic.
-            rsi_overbought (int): RSI threshold for overbought.
-            rsi_oversold (int): RSI threshold for oversold.
         """
         self.ib = ib
         self.es_contract = es_contract
@@ -124,85 +134,95 @@ class MESFuturesLiveStrategy:
         self.contract_multiplier = contract_multiplier
         self.stop_loss_points = stop_loss_points
         self.take_profit_points = take_profit_points
-        self.vwap_period_15m = vwap_period_15m
         self.rsi_period_15m = rsi_period_15m
         self.rsi_overbought = rsi_overbought
         self.rsi_oversold = rsi_oversold
 
-        # Initialize cumulative VWAP and volume for 15-minute bars
-        self.cumulative_vwap_15m = 0
-        self.cumulative_volume_15m = 0
-
         # Strategy state
         self.cash = initial_cash
         self.equity = initial_cash
-        self.position = None  # None, 'LONG', 'SHORT'
+        self.position = None  # None, 'LONG', or 'SHORT'
         self.entry_price = 0
         self.stop_loss = 0
         self.take_profit = 0
         self.pending_order = False
 
-        # Equity Curve
+        # For tracking equity curve and trade log
         self.equity_curve = []
         self.trade_log = []
 
-        # Data Buffer for 15-minute bars
+        # Lock for thread safety if desired
         self.lock = Lock()
-        self.current_bar_start_15m = None
-        self.current_bar_15m = {
-            'open': None,
-            'high': -np.inf,
-            'low': np.inf,
-            'close': None,
-            'volume': 0
-        }
 
-        # Historical Data for 15-minute Indicators
-        self.historical_data_15m = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume', 'rsi', 'VWAP'])
+        # We will store all 5-second bars in this list (and convert to DF on each update)
+        self.realtime_5s_data = []
 
-        # Event Loop for asyncio scheduling
-        self.loop = asyncio.get_event_loop()
-        self.candle_close_task = None
-
-    def fetch_historical_data(self, duration='1 D', bar_size='5 secs'):
+    def fetch_historical_data(self, duration='3 D', bar_size='15 mins'):
         """
-        Fetches historical ES data to initialize indicators.
-
-        Parameters:
-            duration (str): Duration string (e.g., '1 D' for 1 day).
-            bar_size (str): Bar size (e.g., '5 secs').
+        (Optional) Fetch some historical data to initialize indicators if desired.
+        Adjust the logic if you want a warm-up for RSI, etc.
         """
         logger.info("Fetching historical ES data for indicator initialization...")
         try:
-            # Fetch 5-second historical data
-            bars_5s = self.ib.reqHistoricalData(
+            bars_15m = self.ib.reqHistoricalData(
                 contract=self.es_contract,
                 endDateTime='',
                 durationStr=duration,
                 barSizeSetting=bar_size,
                 whatToShow='TRADES',
-                useRTH=False,  # Include all trading hours
+                useRTH=False,
                 formatDate=1,
                 keepUpToDate=False
             )
+            if not bars_15m:
+                logger.warning("No 15-minute historical data fetched.")
+                return
 
-            if not bars_5s:
-                logger.error("No historical 5-second data fetched. Exiting.")
-                sys.exit(1)
+            df = util.df(bars_15m)
+            df.set_index('date', inplace=True)
+            if df.index.tz is None:
+                df.index = pd.to_datetime(df.index).tz_localize('UTC')
+            else:
+                df.index = pd.to_datetime(df.index).tz_convert('UTC')
 
-            df_5s = util.df(bars_5s)
+            logger.info(f"Fetched {len(df)} historical 15-minute ES bars for warm-up.")
+            # Optionally do a warm-up RSI / VWAP if needed
+            # ...
+        except Exception as e:
+            logger.error(f"Failed to fetch historical data: {e}")
+
+    def on_bar_update(self, bars: RealTimeBarList, hasNewBar: bool):
+        """
+        Callback that receives new 5-second bars. 
+        We accumulate them, then resample to 15-min bars, recalc RSI/VWAP, and apply logic.
+        """
+        with self.lock:
+            if not hasNewBar or len(bars) == 0:
+                return
+
+            # Accumulate the new bars in an in-memory list
+            for bar in bars:
+                # Convert bar.time to UTC (ib_insync RealTimeBar has naive or local times)
+                bar_time = bar.time
+                if bar_time.tzinfo is None:
+                    bar_time = pytz.UTC.localize(bar_time)
+                # Store fields
+                self.realtime_5s_data.append({
+                    'date': bar_time,
+                    'open': bar.open_,
+                    'high': bar.high,
+                    'low': bar.low,
+                    'close': bar.close,
+                    'volume': bar.volume
+                })
+
+            # Convert to DataFrame
+            df_5s = pd.DataFrame(self.realtime_5s_data)
             df_5s.set_index('date', inplace=True)
             df_5s.sort_index(inplace=True)
-            # Ensure the index is timezone-aware (UTC)
-            if df_5s.index.tz is None:
-                df_5s.index = pd.to_datetime(df_5s.index).tz_localize('UTC')
-            else:
-                df_5s.index = pd.to_datetime(df_5s.index).tz_convert('UTC')
-
-            logger.info(f"Fetched {len(df_5s)} historical 5-second ES bars.")
 
             # Resample to 15-minute bars
-            ohlc_15m = df_5s.resample('15min').agg({
+            ohlc_15m = df_5s.resample('15T').agg({
                 'open': 'first',
                 'high': 'max',
                 'low': 'min',
@@ -210,258 +230,97 @@ class MESFuturesLiveStrategy:
                 'volume': 'sum'
             }).dropna()
 
-            # Initialize historical data for 15-minute bars
-            self.historical_data_15m = ohlc_15m.copy()
-
-            # Calculate initial RSI for 15-minute bars
-            self.historical_data_15m['rsi'] = rsi(self.historical_data_15m, self.rsi_period_15m)
-            initial_rsi_15m = self.historical_data_15m['rsi'].iloc[-1]
-
-            # Calculate initial VWAP for 15-minute bars
-            self.historical_data_15m['VWAP'] = vwap(self.historical_data_15m)
-            initial_vwap_15m = self.historical_data_15m['VWAP'].iloc[-1]
-
-            logger.info(f"Initialized 15-minute indicators with VWAP: {initial_vwap_15m:.2f}, RSI: {initial_rsi_15m:.2f}")
-
-            # Initialize cumulative VWAP and volume for 15-minute bars
-            recent_bars_15m = self.historical_data_15m.tail(self.vwap_period_15m)
-            self.cumulative_vwap_15m = (recent_bars_15m['VWAP'] * recent_bars_15m['volume']).sum()
-            self.cumulative_volume_15m = recent_bars_15m['volume'].sum()
-
-            # Schedule the first candle close
-            self.schedule_next_candle_close()
-        except Exception as e:
-            logger.error(f"Failure fetching historical data: {e}")
-            sys.exit(1)
-
-    def schedule_next_candle_close(self):
-        """
-        Schedules a coroutine to execute trading logic at the next candle close time.
-        """
-        now = datetime.now(pytz.UTC)
-        next_close = self.get_next_candle_close_time(now)
-        delay = (next_close - now).total_seconds()
-        logger.debug(f"Scheduling next candle close at {next_close} UTC, which is in {delay} seconds.")
-        if self.candle_close_task:
-            self.candle_close_task.cancel()
-        self.candle_close_task = self.loop.call_later(delay, lambda: asyncio.ensure_future(self.handle_candle_close(next_close)))
-
-    def get_next_candle_close_time(self, current_time):
-        """
-        Calculates the next 15-minute candle close time based on the current UTC time.
-        """
-        minute = (current_time.minute // 15 + 1) * 15
-        if minute == 60:
-            next_close = current_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-        else:
-            next_close = current_time.replace(minute=minute, second=0, microsecond=0)
-        return next_close
-
-    async def handle_candle_close(self, close_time):
-        """
-        Handles the trading logic at the candle close time.
-        """
-        logger.info(f"Candle closed at {close_time}. Evaluating trading signals.")
-        # Fetch the latest 15-minute bar data
-        latest_bar = self.historical_data_15m.iloc[-1]
-        latest_vwap_15m = latest_bar['VWAP']
-        latest_rsi_15m = latest_bar['rsi']
-        latest_close_15m = latest_bar['close']
-
-        # Execute trading logic
-        self.print_status(latest_vwap_15m, latest_rsi_15m)
-        self.apply_trading_logic(latest_vwap_15m, latest_rsi_15m)
-
-        # Schedule the next candle close
-        self.schedule_next_candle_close()
-
-    def on_realtime_bar(self, ticker, hasNewBar):
-        """
-        Callback function to handle real-time 5-second ES bars.
-
-        Parameters:
-            ticker (RealTimeBarList): The real-time bar list.
-            hasNewBar (bool): Indicates if a new bar has been received.
-        """
-        with self.lock:
-            if not hasNewBar:
+            if len(ohlc_15m) < 1:
                 return
 
-            if len(ticker) == 0:
-                logger.warning("No bars received in RealTimeBarList.")
-                return
+            # Calculate RSI on 15-minute data
+            ohlc_15m['RSI'] = rsi(ohlc_15m, period=self.rsi_period_15m)
 
-            bar = ticker[-1]
-            # Ensure bar time is timezone-aware (UTC)
-            if bar.time.tzinfo is None:
-                bar_time = pytz.UTC.localize(bar.time.replace(second=0, microsecond=0))
-            else:
-                bar_time = bar.time.astimezone(pytz.UTC).replace(second=0, microsecond=0)
+            # Calculate VWAP since the "most recent" session open (6 PM ET)
+            ohlc_15m['VWAP'] = vwap(ohlc_15m)
 
-            # ----------------------------
-            # Process 15-minute bars for trading logic
-            # ----------------------------
-            minute_15m = bar_time.minute
-            candle_start_minute_15m = (minute_15m // 15) * 15
-            candle_start_time_15m = bar_time.replace(minute=candle_start_minute_15m, second=0, microsecond=0)
+            # Get the latest row for signals
+            latest_bar_time = ohlc_15m.index[-1]
+            latest_close    = ohlc_15m['close'].iloc[-1]
+            latest_rsi      = ohlc_15m['RSI'].iloc[-1]
+            latest_vwap     = ohlc_15m['VWAP'].iloc[-1]
 
-            if self.current_bar_start_15m != candle_start_time_15m:
-                # Finalize the previous 15-minute bar
-                if self.current_bar_start_15m is not None and self.current_bar_15m['open'] is not None:
-                    finalized_bar_15m = self.current_bar_15m.copy()
-                    # Calculate Typical Price
-                    typical_price_15m = (finalized_bar_15m['high'] + finalized_bar_15m['low'] + finalized_bar_15m['close']) / 3
-                    # Update cumulative VWAP and volume for 15-minute VWAP
-                    self.cumulative_vwap_15m += (typical_price_15m * finalized_bar_15m['volume'])
-                    self.cumulative_volume_15m += finalized_bar_15m['volume']
-                    # Calculate VWAP
-                    vwap_15m = self.cumulative_vwap_15m / self.cumulative_volume_15m if self.cumulative_volume_15m != 0 else 0
+            # Log or print indicators
+            logger.info(f"New 15-min bar updated at {latest_bar_time}, RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
 
-                    # Append to historical_data_15m
-                    new_row_15m = pd.Series({
-                        'open': finalized_bar_15m['open'],
-                        'high': finalized_bar_15m['high'],
-                        'low': finalized_bar_15m['low'],
-                        'close': finalized_bar_15m['close'],
-                        'volume': finalized_bar_15m['volume'],
-                        'rsi': None,  # Placeholder, will be recalculated
-                        'VWAP': None  # Placeholder, will be recalculated
-                    }, name=self.current_bar_start_15m)
+            # Apply trading logic (on each new 15-min bar — but triggered by 5s data arrival)
+            self.apply_trading_logic(latest_close, latest_vwap, latest_rsi, latest_bar_time)
 
-                    # Append the new row
-                    self.historical_data_15m = pd.concat([self.historical_data_15m, new_row_15m.to_frame().T])
+            # Optionally, you can store the equity curve with the *latest close*
+            # (includes unrealized PnL, if you want to track that).
+            self.equity_curve.append({'Time': latest_bar_time, 'Equity': self.equity})
 
-                    # Recalculate RSI for 15-minute bars
-                    self.historical_data_15m['rsi'] = rsi(self.historical_data_15m, self.rsi_period_15m)
-
-                    # Recalculate VWAP using updated vwap function
-                    self.historical_data_15m['VWAP'] = vwap(self.historical_data_15m)
-                    latest_vwap_15m = self.historical_data_15m['VWAP'].iloc[-1]
-                    latest_rsi_15m = self.historical_data_15m['rsi'].iloc[-1]
-
-                    logger.debug(f"Finalized 15-minute bar starting at {self.current_bar_start_15m}: {finalized_bar_15m}")
-                    logger.debug(f"Updated cumulative VWAP (15m): {self.cumulative_vwap_15m:.2f}, Volume: {self.cumulative_volume_15m}")
-
-                    # Log Indicators
-                    logger.info(f"15-Minute VWAP: {latest_vwap_15m:.2f}, RSI: {latest_rsi_15m:.2f}")
-
-                # Start a new 15-minute bar
-                self.current_bar_start_15m = candle_start_time_15m
-                self.current_bar_15m = {
-                    'open': bar.open_,
-                    'high': bar.high,
-                    'low': bar.low,
-                    'close': bar.close,
-                    'volume': bar.volume
-                }
-                logger.debug(f"Started new 15-minute bar at {self.current_bar_start_15m}")
-            else:
-                # Update the current 15-minute bar
-                self.current_bar_15m['high'] = max(self.current_bar_15m['high'], bar.high)
-                self.current_bar_15m['low'] = min(self.current_bar_15m['low'], bar.low)
-                self.current_bar_15m['close'] = bar.close
-                self.current_bar_15m['volume'] += bar.volume
-                logger.debug(f"Updated current 15-minute bar at {self.current_bar_start_15m}: {self.current_bar_15m}")
-
-    def print_status(self, vwap, rsi):
+    def apply_trading_logic(self, current_price, current_vwap, current_rsi, current_time):
         """
-        Prints the current status of the strategy at each 15-minute interval.
-
-        Parameters:
-            vwap (float): The calculated VWAP.
-            rsi (float): The calculated RSI.
+        Decide whether to place a new trade or not, based on RSI & VWAP.
         """
-        position_status = self.position if self.position else "No Position"
-        logger.info(f"--- 15-Minute Interval ---")
-        logger.info(f"Position Status : {position_status}")
-        logger.info(f"Current Price   : {self.historical_data_15m['close'].iloc[-1]:.2f}")
-        logger.info(f"VWAP            : {vwap:.2f}, RSI: {rsi:.2f}")
-        logger.info(f"--------------------------")
-
-    def apply_trading_logic(self, vwap, rsi):
-        """
-        Applies trading logic based on VWAP and RSI.
-
-        Parameters:
-            vwap (float): The calculated VWAP.
-            rsi (float): The calculated RSI.
-        """
-        current_price = self.historical_data_15m['close'].iloc[-1]
-        current_time = self.historical_data_15m.index[-1]
-
         # Convert current_time to ET to check if within RTH
         current_time_et = current_time.astimezone(EASTERN).time()
-
-        # Check if current time is within RTH
         if not (RTH_START <= current_time_et <= RTH_END):
-            logger.debug(f"Current time {current_time_et} is outside RTH. No trading action taken.")
+            logger.debug(f"Time {current_time_et} outside RTH. No trading action.")
             return
 
-        logger.info(f"Evaluating Trading Signals at {current_time}: Price={current_price}, VWAP={vwap}, RSI={rsi}")
+        logger.info(f"Checking signals @ {current_time}: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
 
+        # If no position and no pending order, consider new entries
         if self.position is None and not self.pending_order:
             # Long Entry Condition
-            if current_price > vwap and rsi > self.rsi_overbought:
-                logger.info("Long Entry Signal Detected.")
-                self.place_bracket_order('BUY', current_price, current_time)
+            if (current_price > current_vwap) and (current_rsi > self.rsi_overbought):
+                logger.info("Signal: Enter LONG")
+                #self.place_bracket_order('BUY', current_price, current_time)
             # Short Entry Condition
-            elif current_price < vwap and rsi < self.rsi_oversold:
-                logger.info("Short Entry Signal Detected.")
-                self.place_bracket_order('SELL', current_price, current_time)
+            elif (current_price < current_vwap) and (current_rsi < self.rsi_oversold):
+                logger.info("Signal: Enter SHORT")
+                #self.place_bracket_order('SELL', current_price, current_time)
             else:
-                logger.debug("No Entry Signal Detected.")
+                logger.debug("No entry signal detected.")
         else:
-            logger.debug(f"Already in position: {self.position} or Pending Order: {self.pending_order}")
+            logger.debug(f"Position={self.position}, PendingOrder={self.pending_order}. No new entry.")
 
     def place_bracket_order(self, action, current_price, current_time):
         """
-        Places a bracket order based on the action.
-
-        Parameters:
-            action (str): 'BUY' or 'SELL'.
-            current_price (float): The current price for placing the parent order.
-            current_time (Timestamp): The timestamp of the current bar.
+        Places a bracket (parent + stop-loss + take-profit) order.
         """
         try:
-            # Define take-profit and stop-loss prices
             if action.upper() == 'BUY':
                 take_profit_price = current_price + self.take_profit_points
-                stop_loss_price = current_price - self.stop_loss_points
-                order_action = 'BUY'
-                take_profit_order_action = 'SELL'
-                stop_loss_order_action = 'SELL'
+                stop_loss_price   = current_price - self.stop_loss_points
+                order_action      = 'BUY'
+                tp_action         = 'SELL'
+                sl_action         = 'SELL'
             elif action.upper() == 'SELL':
                 take_profit_price = current_price - self.take_profit_points
-                stop_loss_price = current_price + self.stop_loss_points
-                order_action = 'SELL'
-                take_profit_order_action = 'BUY'
-                stop_loss_order_action = 'BUY'
+                stop_loss_price   = current_price + self.stop_loss_points
+                order_action      = 'SELL'
+                tp_action         = 'BUY'
+                sl_action         = 'BUY'
             else:
                 logger.error(f"Invalid action: {action}. Must be 'BUY' or 'SELL'.")
                 return
 
-            # Create a market parent order
+            # Parent = Market order
             parent_order = MarketOrder(action=order_action, totalQuantity=self.position_size)
-            # Create take-profit and stop-loss orders
-            take_profit_order = LimitOrder(action=take_profit_order_action,
-                                           totalQuantity=self.position_size,
-                                           lmtPrice=take_profit_price)
-            stop_loss_order = StopOrder(action=stop_loss_order_action,
-                                        totalQuantity=self.position_size,
-                                        stopPrice=stop_loss_price)
+            # Take-profit = Limit order
+            tp_order = LimitOrder(action=tp_action, totalQuantity=self.position_size, lmtPrice=take_profit_price)
+            # Stop-loss = Stop order
+            sl_order = StopOrder(action=sl_action, totalQuantity=self.position_size, stopPrice=stop_loss_price)
 
-            # Place the bracket order
-            logger.info(f"Placing bracket order: Parent ({order_action} {self.position_size} @ Market), "
-                        f"Take-Profit ({take_profit_order_action} {self.position_size} @ {take_profit_price}), "
-                        f"Stop-Loss ({stop_loss_order_action} {self.position_size} @ {stop_loss_price})")
-            trades = self.ib.bracketOrder(parent_order, take_profit_order, stop_loss_order)
+            logger.info(
+                f"Placing bracket: Parent {order_action} x{self.position_size}, "
+                f"TP={take_profit_price:.2f}, SL={stop_loss_price:.2f}"
+            )
+            trades = self.ib.bracketOrder(parent_order, tp_order, sl_order)
 
-            # Attach event handlers to the parent Trade object
+            # Attach event handlers
             parent_trade = trades[0]
             parent_trade.filledEvent += self.on_trade_filled
             parent_trade.statusEvent += self.on_order_status
 
-            # Attach event handlers to child trades
             tp_trade = trades[1]
             tp_trade.filledEvent += self.on_trade_filled
             tp_trade.statusEvent += self.on_order_status
@@ -471,7 +330,9 @@ class MESFuturesLiveStrategy:
             sl_trade.statusEvent += self.on_order_status
 
             self.pending_order = True
-            logger.info("Bracket order placed successfully and event handlers attached.")
+            # Place orders
+            for t in trades:
+                self.ib.placeOrder(self.mes_contract, t.order)
 
         except Exception as e:
             logger.error(f"Failed to place bracket order: {e}")
@@ -479,187 +340,153 @@ class MESFuturesLiveStrategy:
 
     def on_trade_filled(self, trade):
         """
-        Callback function when a trade is filled.
-
-        Parameters:
-            trade (Trade): The trade that was filled.
+        Callback for trade fill event.
         """
         try:
             fill = trade.fills[-1]
             fill_price = fill.execution.price
-            fill_qty = fill.execution.shares
-            fill_time = fill.execution.time
+            fill_qty   = fill.execution.shares
+            fill_time  = fill.execution.time
+            order_action = trade.order.action.upper()
 
-            logger.info(f"Trade Filled: {trade.order.action} {fill_qty} @ {fill_price} on {fill_time}")
+            logger.info(f"Trade Filled: {order_action} {fill_qty} @ {fill_price} on {fill_time}")
 
-            if trade.order.action.upper() in ['BUY', 'SELL']:
-                if trade.order.orderType == 'MARKET':
-                    # Parent order filled, entering a position
-                    if trade.order.action.upper() == 'BUY' and self.position is None:
-                        # Entering Long Position
-                        self.position = 'LONG'
-                        self.entry_price = fill_price
-                        self.stop_loss = self.entry_price - self.stop_loss_points
-                        self.take_profit = self.entry_price + self.take_profit_points
-                        self.trade_log.append({
-                            'Type': 'LONG',
-                            'Entry Time': fill_time,
-                            'Entry Price': self.entry_price,
-                            'Exit Time': None,
-                            'Exit Price': None,
-                            'Result': None,
-                            'Profit': 0
-                        })
-                        logger.debug(f"Entered LONG Position at {self.entry_price}")
+            # Parent order fill => position entry
+            if trade.order.orderType == 'MARKET':
+                if order_action == 'BUY' and self.position is None:
+                    self.position = 'LONG'
+                    self.entry_price = fill_price
+                    self.stop_loss   = self.entry_price - self.stop_loss_points
+                    self.take_profit = self.entry_price + self.take_profit_points
+                    self.trade_log.append({
+                        'Type': 'LONG',
+                        'Entry Time': fill_time,
+                        'Entry Price': self.entry_price,
+                        'Exit Time': None,
+                        'Exit Price': None,
+                        'Result': None,
+                        'Profit': 0
+                    })
+                    logger.info(f"Entered LONG @ {self.entry_price}")
+                elif order_action == 'SELL' and self.position is None:
+                    self.position = 'SHORT'
+                    self.entry_price = fill_price
+                    self.stop_loss   = self.entry_price + self.stop_loss_points
+                    self.take_profit = self.entry_price - self.take_profit_points
+                    self.trade_log.append({
+                        'Type': 'SHORT',
+                        'Entry Time': fill_time,
+                        'Entry Price': self.entry_price,
+                        'Exit Time': None,
+                        'Exit Price': None,
+                        'Result': None,
+                        'Profit': 0
+                    })
+                    logger.info(f"Entered SHORT @ {self.entry_price}")
 
-                        # Print Fill Price and 15-Minute Close Price for Slippage
-                        latest_close = self.historical_data_15m['close'].iloc[-1]
-                        logger.info(f"Order filled at {fill_price:.2f}. 15-Minute Close Price: {latest_close:.2f}")
+            # Child order fill => position exit
+            elif trade.order.orderType in ['LIMIT', 'STOP']:
+                if self.position == 'LONG' and order_action == 'SELL':
+                    # Exiting a long
+                    pnl = (fill_price - self.entry_price) * self.position_size * self.contract_multiplier
+                    self.cash += pnl
+                    self.equity += pnl
+                    result = 'Take Profit' if fill_price >= self.take_profit else 'Stop Loss'
+                    self.trade_log[-1].update({
+                        'Exit Time': fill_time,
+                        'Exit Price': fill_price,
+                        'Result': result,
+                        'Profit': pnl
+                    })
+                    logger.info(f"Exited LONG @ {fill_price} PnL=${pnl:.2f} ({result})")
+                    self.position = None
 
-                    elif trade.order.action.upper() == 'SELL' and self.position is None:
-                        # Entering Short Position
-                        self.position = 'SHORT'
-                        self.entry_price = fill_price
-                        self.stop_loss = self.entry_price + self.stop_loss_points
-                        self.take_profit = self.entry_price - self.take_profit_points
-                        self.trade_log.append({
-                            'Type': 'SHORT',
-                            'Entry Time': fill_time,
-                            'Entry Price': self.entry_price,
-                            'Exit Time': None,
-                            'Exit Price': None,
-                            'Result': None,
-                            'Profit': 0
-                        })
-                        logger.debug(f"Entered SHORT Position at {self.entry_price}")
+                elif self.position == 'SHORT' and order_action == 'BUY':
+                    # Exiting a short
+                    pnl = (self.entry_price - fill_price) * self.position_size * self.contract_multiplier
+                    self.cash += pnl
+                    self.equity += pnl
+                    result = 'Take Profit' if fill_price <= self.take_profit else 'Stop Loss'
+                    self.trade_log[-1].update({
+                        'Exit Time': fill_time,
+                        'Exit Price': fill_price,
+                        'Result': result,
+                        'Profit': pnl
+                    })
+                    logger.info(f"Exited SHORT @ {fill_price} PnL=${pnl:.2f} ({result})")
+                    self.position = None
 
-                        # Print Fill Price and 15-Minute Close Price for Slippage
-                        latest_close = self.historical_data_15m['close'].iloc[-1]
-                        logger.info(f"Order filled at {fill_price:.2f}. 15-Minute Close Price: {latest_close:.2f}")
-                else:
-                    # Child order filled, exiting a position
-                    if trade.order.orderType in ['LIMIT', 'STOP']:
-                        if self.position == 'LONG' and trade.order.action.upper() == 'SELL':
-                            # Exiting Long Position via Take-Profit or Stop-Loss
-                            pnl = (fill_price - self.entry_price) * self.position_size * self.contract_multiplier
-                            self.cash += pnl
-                            self.equity += pnl
-                            result = 'Take Profit' if fill_price >= self.take_profit else 'Stop Loss'
-                            self.trade_log[-1].update({
-                                'Exit Time': fill_time,
-                                'Exit Price': fill_price,
-                                'Result': result,
-                                'Profit': pnl
-                            })
-                            logger.info(f"Exited LONG Position at {fill_price} for P&L: ${pnl:.2f}")
-                            self.position = None
-
-                            # Print Fill Price and 15-Minute Close Price for Slippage
-                            latest_close = self.historical_data_15m['close'].iloc[-1]
-                            logger.info(f"Order filled at {fill_price:.2f}. 15-Minute Close Price: {latest_close:.2f}")
-
-                        elif self.position == 'SHORT' and trade.order.action.upper() == 'BUY':
-                            # Exiting Short Position via Take-Profit or Stop-Loss
-                            pnl = (self.entry_price - fill_price) * self.position_size * self.contract_multiplier
-                            self.cash += pnl
-                            self.equity += pnl
-                            result = 'Take Profit' if fill_price <= self.take_profit else 'Stop Loss'
-                            self.trade_log[-1].update({
-                                'Exit Time': fill_time,
-                                'Exit Price': fill_price,
-                                'Result': result,
-                                'Profit': pnl
-                            })
-                            logger.info(f"Exited SHORT Position at {fill_price} for P&L: ${pnl:.2f}")
-                            self.position = None
-
-                            # Print Fill Price and 15-Minute Close Price for Slippage
-                            latest_close = self.historical_data_15m['close'].iloc[-1]
-                            logger.info(f"Order filled at {fill_price:.2f}. 15-Minute Close Price: {latest_close:.2f}")
-
-            # Update Equity Curve
-            self.equity_curve.append({'Time': fill_time, 'Equity': self.equity})
-
-            # Reset pending order flag if all orders are filled
+            # If position is flattened, we can reset pending_order
             if self.position is None:
                 self.pending_order = False
 
+            # Track equity curve
+            self.equity_curve.append({'Time': fill_time, 'Equity': self.equity})
+
         except Exception as e:
-            logger.error(f"Error in on_trade_filled handler: {e}")
+            logger.error(f"Error in on_trade_filled: {e}")
 
     def on_order_status(self, trade):
         """
-        Callback function when an order status changes.
-
-        Parameters:
-            trade (Trade): The trade with updated status.
+        Callback when an order status changes.
         """
         try:
-            logger.info(f"Order Status Update: Order ID {trade.order.orderId} - {trade.orderStatus.status}")
-            if trade.order.orderId and trade.orderStatus.status in ['Cancelled', 'Inactive', 'Filled']:
-                # If order is cancelled or inactive, reset pending_order flag
-                if trade.order.orderType == 'MARKET':
-                    # If parent order is cancelled, reset position
-                    if self.position is not None:
-                        logger.warning(f"Parent order {trade.order.orderId} cancelled. Resetting position.")
-                        self.position = None
-                self.pending_order = False
+            logger.info(f"Order Status: ID={trade.order.orderId}, Status={trade.orderStatus.status}")
+            if trade.orderStatus.status in ['Cancelled', 'Inactive', 'Filled']:
+                # If parent order is cancelled, reset
+                if trade.order.orderType == 'MARKET' and self.position is None:
+                    logger.warning(f"Parent order {trade.order.orderId} cancelled or inactive, no position entered.")
+                # We can reset pending_order if there's no position
+                if self.position is None:
+                    self.pending_order = False
         except Exception as e:
-            logger.error(f"Error in on_order_status handler: {e}")
+            logger.error(f"Error in on_order_status: {e}")
 
     def run(self):
         """
-        Runs the live trading strategy by fetching historical data and subscribing to real-time ES bars.
+        Runs the strategy:
+          1) Optionally fetch some historical data for warmup
+          2) Subscribe to 5-second real-time bars
+          3) Start the IB event loop
         """
+        # Optional: warm up indicators
+        self.fetch_historical_data(duration='3 D', bar_size='15 mins')
+
+        # Request live 5-second bars
+        logger.info("Requesting real-time 5-second bars for ES...")
+        ticker_5s = self.ib.reqHistoricalData(
+            contract=self.es_contract,
+            endDateTime='',
+            durationStr='1 D',
+            barSizeSetting='5 secs',
+            whatToShow='TRADES',
+            useRTH=False,
+            keepUpToDate=True
+        )
+        ticker_5s.updateEvent += self.on_bar_update
+        logger.info("Real-time bar subscription set up.")
+
+        logger.info("Starting IB event loop. Press Ctrl+C to exit.")
         try:
-            # Fetch historical data to initialize indicators
-            self.fetch_historical_data(duration='1 D', bar_size='5 secs')  # Fetch 5-second data over past day
-
-            # Subscribe to real-time ES bars
-            logger.info("Requesting real-time 5-second bars for ES...")
-            ticker = self.ib.reqRealTimeBars(
-                contract=self.es_contract,
-                barSize=5,
-                whatToShow='TRADES',
-                useRTH=False,  # Include all trading hours
-                realTimeBarsOptions=[]
-            )
-            ticker.updateEvent += self.on_realtime_bar
-            logger.info("Real-time bar handler assigned.")
-
-            # Start the event loop
-            logger.info("Starting live trading strategy...")
             self.ib.run()
-        except Exception as e:
-            logger.error(f"Failed to start live trading strategy: {e}")
+        except KeyboardInterrupt:
+            logger.info("KeyboardInterrupt received, shutting down...")
+        finally:
+            if self.equity_curve:
+                self.plot_equity_curve()
+            logger.info(f"Final Equity: ${self.equity:.2f}")
+            if self.trade_log:
+                trade_df = pd.DataFrame(self.trade_log)
+                logger.info(f"Trade Log:\n{trade_df}")
+            else:
+                logger.info("No trades were executed.")
             self.ib.disconnect()
 
-    def plot_equity_curve(self):
-        """
-        Plots the equity curve.
-        """
-        if not self.equity_curve:
-            logger.warning("No equity data to plot.")
-            return
 
-        import matplotlib.pyplot as plt
-
-        df_equity = pd.DataFrame(self.equity_curve)
-        df_equity.set_index('Time', inplace=True)
-
-        plt.figure(figsize=(14, 7))
-        plt.plot(df_equity['Equity'], label='Equity Curve')
-        plt.title('Equity Curve')
-        plt.xlabel('Time')
-        plt.ylabel('Account Balance ($)')
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.show()
-
-# --- Main Execution ---
+# -----------------------------------------------------------------------------
+# Main Execution
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # --- Connect to IBKR ---
     ib = IB()
     try:
         ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
@@ -668,16 +495,24 @@ if __name__ == "__main__":
         logger.error(f"Failed to connect to IBKR: {e}")
         sys.exit(1)
 
-    # --- Define Contracts ---
-    es_contract = Future(symbol=DATA_SYMBOL, lastTradeDateOrContractMonth=DATA_EXPIRY,
-                        exchange=DATA_EXCHANGE, currency=CURRENCY)
-    mes_contract = Future(symbol=EXEC_SYMBOL, lastTradeDateOrContractMonth=EXEC_EXPIRY,
-                         exchange=EXEC_EXCHANGE, currency=CURRENCY)
+    # Define Contracts
+    es_contract = Future(
+        symbol=DATA_SYMBOL, 
+        lastTradeDateOrContractMonth=DATA_EXPIRY,
+        exchange=DATA_EXCHANGE, 
+        currency=CURRENCY
+    )
+    mes_contract = Future(
+        symbol=EXEC_SYMBOL, 
+        lastTradeDateOrContractMonth=EXEC_EXPIRY,
+        exchange=EXEC_EXCHANGE, 
+        currency=CURRENCY
+    )
 
-    # --- Qualify Contracts ---
+    # Qualify the contracts
     try:
         qualified_contracts = ib.qualifyContracts(es_contract, mes_contract)
-        es_contract = qualified_contracts[0]
+        es_contract  = qualified_contracts[0]
         mes_contract = qualified_contracts[1]
         logger.info(f"Qualified ES Contract: {es_contract}")
         logger.info(f"Qualified MES Contract: {mes_contract}")
@@ -686,7 +521,7 @@ if __name__ == "__main__":
         ib.disconnect()
         sys.exit(1)
 
-    # --- Initialize Strategy ---
+    # Initialize and run the strategy
     strategy = MESFuturesLiveStrategy(
         ib=ib,
         es_contract=es_contract,
@@ -696,30 +531,9 @@ if __name__ == "__main__":
         contract_multiplier=CONTRACT_MULTIPLIER,
         stop_loss_points=STOP_LOSS_POINTS,
         take_profit_points=TAKE_PROFIT_POINTS,
-        vwap_period_15m=VWAP_PERIOD_15M,
         rsi_period_15m=RSI_PERIOD_15M,
         rsi_overbought=RSI_OVERBOUGHT,
         rsi_oversold=RSI_OVERSOLD
     )
 
-    # --- Run Strategy ---
-    try:
-        strategy.run()
-    except KeyboardInterrupt:
-        logger.info("Interrupt received, shutting down...")
-    finally:
-        # Optional: Plot Equity Curve
-        if strategy.equity_curve:
-            strategy.plot_equity_curve()
-
-        # Log final equity
-        logger.info(f"Final Equity: ${strategy.equity:.2f}")
-        # Optionally, print trade log
-        if strategy.trade_log:
-            trade_df = pd.DataFrame(strategy.trade_log)
-            logger.info(f"Trade Log:\n{trade_df}")
-        else:
-            logger.info("No trades were executed.")
-
-        ib.disconnect()
-        logger.info("Disconnected from IBKR.")
+    strategy.run()
