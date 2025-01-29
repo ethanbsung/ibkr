@@ -41,7 +41,7 @@ EASTERN   = pytz.timezone('US/Eastern')
 
 # --- Setup Logging ---
 logging.basicConfig(
-    level=logging.INFO,  # Set to INFO or DEBUG for more verbosity
+    level=logging.WARNING,  # Set to INFO or DEBUG for more verbosity
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
@@ -164,7 +164,7 @@ class MESFuturesLiveStrategy:
         (Optional) Fetch some historical data to initialize indicators if desired.
         Adjust the logic if you want a warm-up for RSI, etc.
         """
-        logger.info("Fetching historical ES data for indicator initialization...")
+        logger.warning("Fetching historical ES data for indicator initialization...")
         try:
             bars_15m = self.ib.reqHistoricalData(
                 contract=self.es_contract,
@@ -187,7 +187,7 @@ class MESFuturesLiveStrategy:
             else:
                 df.index = pd.to_datetime(df.index).tz_convert('UTC')
 
-            logger.info(f"Fetched {len(df)} historical 15-minute ES bars for warm-up.")
+            logger.warning(f"Fetched {len(df)} historical 15-minute ES bars for warm-up.")
             # Optionally do a warm-up RSI / VWAP if needed
             # ...
         except Exception as e:
@@ -213,10 +213,10 @@ class MESFuturesLiveStrategy:
                 # Store fields
                 self.realtime_5s_data.append({
                     'date': bar_time,
-                    'open': bar.open_,
-                    'high': bar.high,
-                    'low': bar.low,
-                    'close': bar.close,
+                    'open': bar.open,       # Fixed attribute access
+                    'high': bar.high,       # Fixed attribute access
+                    'low': bar.low,         # Fixed attribute access
+                    'close': bar.close,     # Fixed attribute access
                     'volume': bar.volume
                 })
 
@@ -250,7 +250,7 @@ class MESFuturesLiveStrategy:
             latest_vwap     = ohlc_15m['VWAP'].iloc[-1]
 
             # Log or print indicators
-            logger.info(f"New 15-min bar updated at {latest_bar_time}, RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
+            logger.warning(f"New 15-min bar updated at {latest_bar_time}, RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
 
             # Apply trading logic (on each new 15-min bar — but triggered by 5s data arrival)
             self.apply_trading_logic(latest_close, latest_vwap, latest_rsi, latest_bar_time)
@@ -262,7 +262,7 @@ class MESFuturesLiveStrategy:
             # --- New Code to Log RSI and VWAP Every 5 Minutes ---
             current_time = datetime.now(timezone.utc)
             if current_time >= self.last_log_time + timedelta(minutes=5):
-                logger.info(f"Periodic Update: RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
+                logger.warning(f"Periodic Update: RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
                 self.last_log_time = current_time
             # --- End of New Code ---
 
@@ -276,17 +276,17 @@ class MESFuturesLiveStrategy:
             logger.debug(f"Time {current_time_et} outside RTH. No trading action.")
             return
 
-        logger.info(f"Checking signals @ {current_time}: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
+        logger.warning(f"Checking signals @ {current_time}: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
 
         # If no position and no pending order, consider new entries
         if self.position is None and not self.pending_order:
             # Long Entry Condition
             if (current_price > current_vwap) and (current_rsi > self.rsi_overbought):
-                logger.info("Signal: Enter LONG")
+                logger.warning("Signal: Enter LONG")
                 self.place_bracket_order('BUY', current_price, current_time)
             # Short Entry Condition
             elif (current_price < current_vwap) and (current_rsi < self.rsi_oversold):
-                logger.info("Signal: Enter SHORT")
+                logger.debug("Signal: Enter SHORT")
                 self.place_bracket_order('SELL', current_price, current_time)
             else:
                 logger.debug("No entry signal detected.")
@@ -321,7 +321,7 @@ class MESFuturesLiveStrategy:
             # Stop-loss = Stop order
             sl_order = StopOrder(action=sl_action, totalQuantity=self.position_size, stopPrice=stop_loss_price)
 
-            logger.info(
+            logger.debug(
                 f"Placing bracket: Parent {order_action} x{self.position_size}, "
                 f"TP={take_profit_price:.2f}, SL={stop_loss_price:.2f}"
             )
@@ -360,7 +360,7 @@ class MESFuturesLiveStrategy:
             fill_time  = fill.execution.time
             order_action = trade.order.action.upper()
 
-            logger.info(f"Trade Filled: {order_action} {fill_qty} @ {fill_price} on {fill_time}")
+            logger.debug(f"Trade Filled: {order_action} {fill_qty} @ {fill_price} on {fill_time}")
 
             # Parent order fill => position entry
             if trade.order.orderType == 'MARKET':
@@ -378,7 +378,7 @@ class MESFuturesLiveStrategy:
                         'Result': None,
                         'Profit': 0
                     })
-                    logger.info(f"Entered LONG @ {self.entry_price}")
+                    logger.debug(f"Entered LONG @ {self.entry_price}")
                 elif order_action == 'SELL' and self.position is None:
                     self.position = 'SHORT'
                     self.entry_price = fill_price
@@ -393,7 +393,7 @@ class MESFuturesLiveStrategy:
                         'Result': None,
                         'Profit': 0
                     })
-                    logger.info(f"Entered SHORT @ {self.entry_price}")
+                    logger.debug(f"Entered SHORT @ {self.entry_price}")
 
             # Child order fill => position exit
             elif trade.order.orderType in ['LIMIT', 'STOP']:
@@ -409,7 +409,7 @@ class MESFuturesLiveStrategy:
                         'Result': result,
                         'Profit': pnl
                     })
-                    logger.info(f"Exited LONG @ {fill_price} PnL=${pnl:.2f} ({result})")
+                    logger.debug(f"Exited LONG @ {fill_price} PnL=${pnl:.2f} ({result})")
                     self.position = None
 
                 elif self.position == 'SHORT' and order_action == 'BUY':
@@ -424,7 +424,7 @@ class MESFuturesLiveStrategy:
                         'Result': result,
                         'Profit': pnl
                     })
-                    logger.info(f"Exited SHORT @ {fill_price} PnL=${pnl:.2f} ({result})")
+                    logger.debug(f"Exited SHORT @ {fill_price} PnL=${pnl:.2f} ({result})")
                     self.position = None
 
             # If position is flattened, we can reset pending_order
@@ -442,7 +442,7 @@ class MESFuturesLiveStrategy:
         Callback when an order status changes.
         """
         try:
-            logger.info(f"Order Status: ID={trade.order.orderId}, Status={trade.orderStatus.status}")
+            logger.debug(f"Order Status: ID={trade.order.orderId}, Status={trade.orderStatus.status}")
             if trade.orderStatus.status in ['Cancelled', 'Inactive', 'Filled']:
                 # If parent order is cancelled, reset
                 if trade.order.orderType == 'MARKET' and self.position is None:
@@ -464,7 +464,7 @@ class MESFuturesLiveStrategy:
         self.fetch_historical_data(duration='3 D', bar_size='15 mins')
 
         # Request live 5-second bars
-        logger.info("Requesting real-time 5-second bars for ES...")
+        logger.debug("Requesting real-time 5-second bars for ES...")
         ticker_5s = self.ib.reqHistoricalData(
             contract=self.es_contract,
             endDateTime='',
@@ -475,7 +475,7 @@ class MESFuturesLiveStrategy:
             keepUpToDate=True
         )
         ticker_5s.updateEvent += self.on_bar_update
-        logger.info("Real-time bar subscription set up.")
+        logger.debug("Real-time bar subscription set up.")
 
         # --- New Code to Log RSI and VWAP at Startup ---
         # Wait briefly to ensure some data is received
@@ -503,23 +503,23 @@ class MESFuturesLiveStrategy:
                 latest_rsi_initial = ohlc_initial['RSI'].iloc[-1]
                 latest_vwap_initial = ohlc_initial['VWAP'].iloc[-1]
 
-                logger.info(f"Initial Indicators: RSI={latest_rsi_initial:.2f}, VWAP={latest_vwap_initial:.2f}")
+                logger.debug(f"Initial Indicators: RSI={latest_rsi_initial:.2f}, VWAP={latest_vwap_initial:.2f}")
         # --- End of New Code ---
 
-        logger.info("Starting IB event loop. Press Ctrl+C to exit.")
+        logger.debug("Starting IB event loop. Press Ctrl+C to exit.")
         try:
             self.ib.run()
         except KeyboardInterrupt:
-            logger.info("KeyboardInterrupt received, shutting down...")
+            logger.debug("KeyboardInterrupt received, shutting down...")
         finally:
             if self.equity_curve:
                 self.plot_equity_curve()
-            logger.info(f"Final Equity: ${self.equity:.2f}")
+            logger.debug(f"Final Equity: ${self.equity:.2f}")
             if self.trade_log:
                 trade_df = pd.DataFrame(self.trade_log)
-                logger.info(f"Trade Log:\n{trade_df}")
+                logger.debug(f"Trade Log:\n{trade_df}")
             else:
-                logger.info("No trades were executed.")
+                logger.debug("No trades were executed.")
             self.ib.disconnect()
 
     def plot_equity_curve(self):
@@ -545,7 +545,7 @@ if __name__ == "__main__":
     ib = IB()
     try:
         ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
-        logger.info("Connected to IBKR.")
+        logger.debug("Connected to IBKR.")
     except Exception as e:
         logger.error(f"Failed to connect to IBKR: {e}")
         sys.exit(1)
@@ -569,8 +569,8 @@ if __name__ == "__main__":
         qualified_contracts = ib.qualifyContracts(es_contract, mes_contract)
         es_contract  = qualified_contracts[0]
         mes_contract = qualified_contracts[1]
-        logger.info(f"Qualified ES Contract: {es_contract}")
-        logger.info(f"Qualified MES Contract: {mes_contract}")
+        logger.debug(f"Qualified ES Contract: {es_contract}")
+        logger.debug(f"Qualified MES Contract: {mes_contract}")
     except Exception as e:
         logger.error(f"Error qualifying contracts: {e}")
         ib.disconnect()
