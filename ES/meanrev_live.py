@@ -259,11 +259,10 @@ def on_trade_filled(trade):
                     exit_type = "EXIT"
                 print(f"Exited position via {exit_type} at {exit_price}")
 
-                # Calculate P&L
                 if position == 'LONG':
-                    pnl = (exit_price - current_entry_price) * current_position_size
+                    pnl = (exit_price - current_entry_price) * 5 * current_position_size - 1.24
                 elif position == 'SHORT':
-                    pnl = (current_entry_price - exit_price) * current_position_size
+                    pnl = (current_entry_price - exit_price) * 5 * current_position_size - 1.24
                 else:
                     pnl = 0.0  # Should not happen
 
@@ -276,7 +275,7 @@ def on_trade_filled(trade):
                 balance_series.append(cash)
 
                 # Update equity curve
-                timestamp = datetime.datetime.utcnow().isoformat()
+                timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 aggregate_performance["equity_curve"].append({"Timestamp": timestamp, "Equity": cash})
                 new_entry = pd.DataFrame({'Equity': [cash]}, index=[pd.to_datetime(timestamp)])
                 aggregate_equity_curve = pd.concat([aggregate_equity_curve, new_entry])

@@ -249,8 +249,6 @@ class MESFuturesLiveStrategy:
             latest_rsi      = ohlc_15m['RSI'].iloc[-1]
             latest_vwap     = ohlc_15m['VWAP'].iloc[-1]
 
-            # Log or print indicators
-            logger.warning(f"New 15-min bar updated at {latest_bar_time}, RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
 
             # Apply trading logic (on each new 15-min bar — but triggered by 5s data arrival)
             self.apply_trading_logic(latest_close, latest_vwap, latest_rsi, latest_bar_time)
@@ -295,55 +293,41 @@ class MESFuturesLiveStrategy:
 
     def place_bracket_order(self, action, current_price, current_time):
         """
-        Places a bracket (parent + stop-loss + take-profit) order.
+        Places a bracket (parent + take-profit + stop-loss) order using ib_insync's bracketOrder method correctly.
         """
         try:
-            if action.upper() == 'BUY':
+            action = action.upper()
+            if action == 'BUY':
                 take_profit_price = current_price + self.take_profit_points
                 stop_loss_price   = current_price - self.stop_loss_points
                 order_action      = 'BUY'
-                tp_action         = 'SELL'
-                sl_action         = 'SELL'
-            elif action.upper() == 'SELL':
+            elif action == 'SELL':
                 take_profit_price = current_price - self.take_profit_points
                 stop_loss_price   = current_price + self.stop_loss_points
                 order_action      = 'SELL'
-                tp_action         = 'BUY'
-                sl_action         = 'BUY'
             else:
                 logger.error(f"Invalid action: {action}. Must be 'BUY' or 'SELL'.")
                 return
 
-            # Parent = Market order
-            parent_order = MarketOrder(action=order_action, totalQuantity=self.position_size)
-            # Take-profit = Limit order
-            tp_order = LimitOrder(action=tp_action, totalQuantity=self.position_size, lmtPrice=take_profit_price)
-            # Stop-loss = Stop order
-            sl_order = StopOrder(action=sl_action, totalQuantity=self.position_size, stopPrice=stop_loss_price)
-
-            logger.debug(
-                f"Placing bracket: Parent {order_action} x{self.position_size}, "
+            logger.warning(
+                f"Placing bracket: Action {order_action} x{self.position_size}, "
                 f"TP={take_profit_price:.2f}, SL={stop_loss_price:.2f}"
             )
-            trades = self.ib.bracketOrder(parent_order, tp_order, sl_order)
 
-            # Attach event handlers
-            parent_trade = trades[0]
-            parent_trade.filledEvent += self.on_trade_filled
-            parent_trade.statusEvent += self.on_order_status
+            # Correct usage of bracketOrder
+            trades = self.ib.bracketOrder(
+                action=order_action,
+                quantity=self.position_size,
+                takeProfitPrice=take_profit_price,
+                stopLossPrice=stop_loss_price
+            )
 
-            tp_trade = trades[1]
-            tp_trade.filledEvent += self.on_trade_filled
-            tp_trade.statusEvent += self.on_order_status
-
-            sl_trade = trades[2]
-            sl_trade.filledEvent += self.on_trade_filled
-            sl_trade.statusEvent += self.on_order_status
+            # Attach event handlers to all orders in the bracket
+            for trade in trades:
+                trade.filledEvent += self.on_trade_filled
+                trade.statusEvent += self.on_order_status
 
             self.pending_order = True
-            # Place orders
-            for t in trades:
-                self.ib.placeOrder(self.mes_contract, t.order)
 
         except Exception as e:
             logger.error(f"Failed to place bracket order: {e}")
@@ -488,7 +472,7 @@ class MESFuturesLiveStrategy:
             df_initial.set_index('date', inplace=True)
             df_initial.sort_index(inplace=True)
 
-            ohlc_initial = df_initial.resample('15T').agg({
+            ohlc_initial = df_initial.resample('15min').agg({
                 'open': 'first',
                 'high': 'max',
                 'low': 'min',
