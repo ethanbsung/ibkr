@@ -271,7 +271,7 @@ class MESFuturesLiveStrategy:
         # Convert current_time to ET to check if within RTH
         current_time_et = current_time.astimezone(EASTERN).time()
         if not (RTH_START <= current_time_et <= RTH_END):
-            logger.debug(f"Time {current_time_et} outside RTH. No trading action.")
+            logger.warning(f"Time {current_time_et} outside RTH. No trading action.")
             return
 
         logger.warning(f"Checking signals @ {current_time}: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
@@ -284,12 +284,12 @@ class MESFuturesLiveStrategy:
                 self.place_bracket_order('BUY', current_price, current_time)
             # Short Entry Condition
             elif (current_price < current_vwap) and (current_rsi < self.rsi_oversold):
-                logger.debug("Signal: Enter SHORT")
+                logger.warning("Signal: Enter SHORT")
                 self.place_bracket_order('SELL', current_price, current_time)
             else:
                 logger.debug("No entry signal detected.")
         else:
-            logger.debug(f"Position={self.position}, PendingOrder={self.pending_order}. No new entry.")
+            logger.warning(f"Position={self.position}, PendingOrder={self.pending_order}. No new entry.")
 
     def place_bracket_order(self, action, current_price, current_time):
         """
@@ -344,7 +344,7 @@ class MESFuturesLiveStrategy:
             fill_time  = fill.execution.time
             order_action = trade.order.action.upper()
 
-            logger.debug(f"Trade Filled: {order_action} {fill_qty} @ {fill_price} on {fill_time}")
+            logger.warning(f"Trade Filled: {order_action} {fill_qty} @ {fill_price} on {fill_time}")
 
             # Parent order fill => position entry
             if trade.order.orderType == 'MARKET':
@@ -362,7 +362,7 @@ class MESFuturesLiveStrategy:
                         'Result': None,
                         'Profit': 0
                     })
-                    logger.debug(f"Entered LONG @ {self.entry_price}")
+                    logger.warning(f"Entered LONG @ {self.entry_price}")
                 elif order_action == 'SELL' and self.position is None:
                     self.position = 'SHORT'
                     self.entry_price = fill_price
@@ -377,7 +377,7 @@ class MESFuturesLiveStrategy:
                         'Result': None,
                         'Profit': 0
                     })
-                    logger.debug(f"Entered SHORT @ {self.entry_price}")
+                    logger.warning(f"Entered SHORT @ {self.entry_price}")
 
             # Child order fill => position exit
             elif trade.order.orderType in ['LIMIT', 'STOP']:
@@ -393,7 +393,7 @@ class MESFuturesLiveStrategy:
                         'Result': result,
                         'Profit': pnl
                     })
-                    logger.debug(f"Exited LONG @ {fill_price} PnL=${pnl:.2f} ({result})")
+                    logger.warning(f"Exited LONG @ {fill_price} PnL=${pnl:.2f} ({result})")
                     self.position = None
 
                 elif self.position == 'SHORT' and order_action == 'BUY':
@@ -408,7 +408,7 @@ class MESFuturesLiveStrategy:
                         'Result': result,
                         'Profit': pnl
                     })
-                    logger.debug(f"Exited SHORT @ {fill_price} PnL=${pnl:.2f} ({result})")
+                    logger.warning(f"Exited SHORT @ {fill_price} PnL=${pnl:.2f} ({result})")
                     self.position = None
 
             # If position is flattened, we can reset pending_order
@@ -426,7 +426,7 @@ class MESFuturesLiveStrategy:
         Callback when an order status changes.
         """
         try:
-            logger.debug(f"Order Status: ID={trade.order.orderId}, Status={trade.orderStatus.status}")
+            logger.warning(f"Order Status: ID={trade.order.orderId}, Status={trade.orderStatus.status}")
             if trade.orderStatus.status in ['Cancelled', 'Inactive', 'Filled']:
                 # If parent order is cancelled, reset
                 if trade.order.orderType == 'MARKET' and self.position is None:
@@ -448,7 +448,7 @@ class MESFuturesLiveStrategy:
         self.fetch_historical_data(duration='3 D', bar_size='15 mins')
 
         # Request live 5-second bars
-        logger.debug("Requesting real-time 5-second bars for ES...")
+        logger.warning("Requesting real-time 5-second bars for ES...")
         ticker_5s = self.ib.reqHistoricalData(
             contract=self.es_contract,
             endDateTime='',
@@ -459,7 +459,7 @@ class MESFuturesLiveStrategy:
             keepUpToDate=True
         )
         ticker_5s.updateEvent += self.on_bar_update
-        logger.debug("Real-time bar subscription set up.")
+        logger.warning("Real-time bar subscription set up.")
 
         # --- New Code to Log RSI and VWAP at Startup ---
         # Wait briefly to ensure some data is received
@@ -487,39 +487,24 @@ class MESFuturesLiveStrategy:
                 latest_rsi_initial = ohlc_initial['RSI'].iloc[-1]
                 latest_vwap_initial = ohlc_initial['VWAP'].iloc[-1]
 
-                logger.debug(f"Initial Indicators: RSI={latest_rsi_initial:.2f}, VWAP={latest_vwap_initial:.2f}")
+                logger.warning(f"Initial Indicators: RSI={latest_rsi_initial:.2f}, VWAP={latest_vwap_initial:.2f}")
         # --- End of New Code ---
 
-        logger.debug("Starting IB event loop. Press Ctrl+C to exit.")
+        logger.warning("Starting IB event loop. Press Ctrl+C to exit.")
         try:
             self.ib.run()
         except KeyboardInterrupt:
-            logger.debug("KeyboardInterrupt received, shutting down...")
+            logger.warning("KeyboardInterrupt received, shutting down...")
         finally:
             if self.equity_curve:
                 self.plot_equity_curve()
-            logger.debug(f"Final Equity: ${self.equity:.2f}")
+            logger.warning(f"Final Equity: ${self.equity:.2f}")
             if self.trade_log:
                 trade_df = pd.DataFrame(self.trade_log)
-                logger.debug(f"Trade Log:\n{trade_df}")
+                logger.warning(f"Trade Log:\n{trade_df}")
             else:
-                logger.debug("No trades were executed.")
+                logger.warning("No trades were executed.")
             self.ib.disconnect()
-
-    def plot_equity_curve(self):
-        """
-        Optional: Plot the equity curve using matplotlib.
-        """
-        try:
-            import matplotlib.pyplot as plt
-            df_eq = pd.DataFrame(self.equity_curve)
-            df_eq.set_index('Time', inplace=True)
-            df_eq['Equity'].plot(title='Equity Curve')
-            plt.xlabel('Time')
-            plt.ylabel('Equity ($)')
-            plt.show()
-        except ImportError:
-            logger.warning("matplotlib not installed. Cannot plot equity curve.")
 
 
 # -----------------------------------------------------------------------------
@@ -529,7 +514,7 @@ if __name__ == "__main__":
     ib = IB()
     try:
         ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
-        logger.debug("Connected to IBKR.")
+        logger.warning("Connected to IBKR.")
     except Exception as e:
         logger.error(f"Failed to connect to IBKR: {e}")
         sys.exit(1)
@@ -553,8 +538,8 @@ if __name__ == "__main__":
         qualified_contracts = ib.qualifyContracts(es_contract, mes_contract)
         es_contract  = qualified_contracts[0]
         mes_contract = qualified_contracts[1]
-        logger.debug(f"Qualified ES Contract: {es_contract}")
-        logger.debug(f"Qualified MES Contract: {mes_contract}")
+        logger.warning(f"Qualified ES Contract: {es_contract}")
+        logger.warning(f"Qualified MES Contract: {mes_contract}")
     except Exception as e:
         logger.error(f"Error qualifying contracts: {e}")
         ib.disconnect()
