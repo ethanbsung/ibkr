@@ -126,6 +126,8 @@ class MESFuturesLiveStrategy:
         Initializes the live trading strategy.
         """
         self.ib = ib
+        self.ib.autoReconnect = False  # We'll handle reconnection manually
+
         self.es_contract = es_contract
         self.mes_contract = mes_contract
         self.initial_cash = initial_cash
@@ -161,9 +163,11 @@ class MESFuturesLiveStrategy:
 
         self.latest_5s_close = None
 
-        # --- Corrected Event Handler ---
-        # Bind the 'disconnectedEvent' instead of 'connectionClosedEvent'
+        # Bind the 'disconnectedEvent' to the non-blocking handler
         self.ib.disconnectedEvent += self.on_disconnect
+
+        # Optionally, bind 'connectedEvent' to confirm reconnection
+        self.ib.connectedEvent += self.on_reconnected
 
     def fetch_historical_data(self, duration='3 D', bar_size='15 mins'):
         """
@@ -198,53 +202,77 @@ class MESFuturesLiveStrategy:
             # ...
         except Exception as e:
             logger.error(f"Failed to fetch historical data: {e}")
-    
+
     def subscribe_to_realtime_bars(self):
         """
         Subscribes to real-time 5-second bars for ES.
+        Ensures that the updateEvent handler is attached only once.
         """
         logger.info("Requesting real-time 5-second bars for ES...")
-        self.ticker_5s = self.ib.reqHistoricalData(
-            contract=self.es_contract,
-            endDateTime='',
-            durationStr='1 D',
-            barSizeSetting='5 secs',
-            whatToShow='TRADES',
-            useRTH=False,
-            keepUpToDate=True
-        )
-        self.ticker_5s.updateEvent += self.on_bar_update
-        logger.info("Real-time bar subscription set up.")
+        try:
+            # If there's an existing ticker, unsubscribe first
+            if hasattr(self, 'ticker_5s') and self.ticker_5s is not None:
+                self.ticker_5s.updateEvent -= self.on_bar_update
+                self.ib.cancelHistoricalData(self.ticker_5s)
+
+            self.ticker_5s = self.ib.reqHistoricalData(
+                contract=self.es_contract,
+                endDateTime='',
+                durationStr='1 D',
+                barSizeSetting='5 secs',
+                whatToShow='TRADES',
+                useRTH=False,
+                keepUpToDate=True,
+                formatDate=1
+            )
+            self.ticker_5s.updateEvent += self.on_bar_update
+            logger.info("Real-time bar subscription set up.")
+        except Exception as e:
+            logger.error(f"Failed to subscribe to real-time bars: {e}")
 
     def on_disconnect(self):
         """
-        Handler for connection closed event. Attempts to reconnect.
+        Handler for connection closed event. Schedules a reconnection attempt.
         """
-        logger.warning("Disconnected from IBKR. Attempting to reconnect...")
-        while not self.ib.isConnected():
+        logger.warning("Disconnected from IBKR. Will try to reconnect in 5 seconds...")
+        # Schedule the reconnection attempt after 5 seconds (non-blocking)
+        self.ib.schedule(5, self.try_reconnect)
+
+    def try_reconnect(self):
+        """
+        Attempts to reconnect to IBKR. If successful, re-qualifies contracts and resubscribes to real-time bars.
+        If it fails, schedules another attempt after 5 seconds.
+        """
+        if not self.ib.isConnected():
+            logger.info("Attempting to reconnect to IBKR...")
             try:
                 self.ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
                 logger.info("Reconnected to IBKR.")
-                
+
                 # Re-qualify contracts
                 qualified_contracts = self.ib.qualifyContracts(self.es_contract, self.mes_contract)
-                self.es_contract  = qualified_contracts[0]
-                self.mes_contract = qualified_contracts[1]
+                if not qualified_contracts:
+                    raise ValueError("Failed to qualify contracts after reconnection.")
+                self.es_contract, self.mes_contract = qualified_contracts
                 logger.info(f"Re-qualified ES Contract: {self.es_contract}")
                 logger.info(f"Re-qualified MES Contract: {self.mes_contract}")
 
                 # Resubscribe to real-time bars
                 self.subscribe_to_realtime_bars()
 
-                # Optionally, fetch historical data again if needed
-                # self.fetch_historical_data(duration='3 D', bar_size='15 mins')
-
                 logger.info("Reconnection and resubscription successful.")
+
             except Exception as e:
-                logger.error(f"Reconnection attempt failed: {e}. Retrying in 5 seconds.")
-                import time as time_module
-                time_module.sleep(5)
-        logger.info("Reconnected and resubscribed successfully.")
+                logger.error(f"Reconnection attempt failed: {e}. Scheduling another attempt in 5 seconds.")
+                # Schedule another reconnection attempt after 5 seconds
+                self.ib.schedule(5, self.try_reconnect)
+
+    def on_reconnected(self):
+        """
+        Handler for successful reconnection. Can be used for logging or additional setup.
+        """
+        logger.info("Successfully reconnected to IBKR.")
+        # Additional actions can be placed here if needed
 
     def on_bar_update(self, bars: RealTimeBarList, hasNewBar: bool):
         with self.lock:
@@ -258,7 +286,7 @@ class MESFuturesLiveStrategy:
                     bar_time = bar_time.replace(tzinfo=timezone.utc)
                 else:
                     bar_time = bar_time.astimezone(timezone.utc)
-                
+
                 # Update the latest 5-second close price
                 self.latest_5s_close = bar.close
 
@@ -311,7 +339,7 @@ class MESFuturesLiveStrategy:
             # Log RSI and VWAP periodically
             current_time = datetime.now(timezone.utc)
             if current_time >= self.last_log_time + timedelta(minutes=5):
-                logger.info(f"Periodic Update: RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
+                logger.info(f"Periodic Update: Price: {current_price}, RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
                 self.last_log_time = current_time
 
     def apply_trading_logic(self, current_price, current_vwap, current_rsi, current_time):
@@ -596,8 +624,9 @@ if __name__ == "__main__":
     # Qualify the contracts
     try:
         qualified_contracts = ib.qualifyContracts(es_contract, mes_contract)
-        es_contract  = qualified_contracts[0]
-        mes_contract = qualified_contracts[1]
+        if not qualified_contracts or len(qualified_contracts) < 2:
+            raise ValueError("Failed to qualify contracts.")
+        es_contract, mes_contract = qualified_contracts
         logger.info(f"Qualified ES Contract: {es_contract}")
         logger.info(f"Qualified MES Contract: {mes_contract}")
     except Exception as e:
