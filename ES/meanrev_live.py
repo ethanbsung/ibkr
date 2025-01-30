@@ -273,11 +273,13 @@ def on_trade_filled(trade):
                 cash += pnl
                 balance_series.append(cash)
 
-                # Update equity curve
                 timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 aggregate_performance["equity_curve"].append({"Timestamp": timestamp, "Equity": cash})
                 new_entry = pd.DataFrame({'Equity': [cash]}, index=[pd.to_datetime(timestamp)])
-                aggregate_equity_curve = pd.concat([aggregate_equity_curve, new_entry])
+                
+                # Only concatenate if new_entry is not empty
+                if not new_entry.empty:
+                    aggregate_equity_curve = pd.concat([aggregate_equity_curve, new_entry])
 
                 if pnl > 0:
                     aggregate_performance["winning_trades"] += 1
