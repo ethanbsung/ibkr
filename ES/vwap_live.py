@@ -159,6 +159,8 @@ class MESFuturesLiveStrategy:
         # Initialize last_log_time to current UTC time (timezone-aware)
         self.last_log_time = datetime.now(timezone.utc)
 
+        self.latest_5s_close = None
+
     def fetch_historical_data(self, duration='3 D', bar_size='15 mins'):
         """
         (Optional) Fetch some historical data to initialize indicators if desired.
@@ -192,31 +194,32 @@ class MESFuturesLiveStrategy:
             # ...
         except Exception as e:
             logger.error(f"Failed to fetch historical data: {e}")
+    
+        
 
     def on_bar_update(self, bars: RealTimeBarList, hasNewBar: bool):
-        """
-        Callback that receives new 5-second bars. 
-        We accumulate them, then resample to 15-min bars, recalc RSI/VWAP, and apply logic.
-        """
         with self.lock:
             if not hasNewBar or len(bars) == 0:
                 return
 
-            # Accumulate the new bars in an in-memory list
             for bar in bars:
-                # Convert bar.date to UTC (ib_insync BarData has 'date' attribute with timezone)
-                bar_time = bar.date  # Changed from bar.time to bar.date
+                # Convert bar.date to UTC
+                bar_time = bar.date
                 if bar_time.tzinfo is None:
                     bar_time = bar_time.replace(tzinfo=timezone.utc)
                 else:
                     bar_time = bar_time.astimezone(timezone.utc)
-                # Store fields
+                
+                # Update the latest 5-second close price
+                self.latest_5s_close = bar.close
+
+                # Store the bar data
                 self.realtime_5s_data.append({
                     'date': bar_time,
-                    'open': bar.open,       # Fixed attribute access
-                    'high': bar.high,       # Fixed attribute access
-                    'low': bar.low,         # Fixed attribute access
-                    'close': bar.close,     # Fixed attribute access
+                    'open': bar.open,
+                    'high': bar.high,
+                    'low': bar.low,
+                    'close': bar.close,
                     'volume': bar.volume
                 })
 
@@ -225,7 +228,7 @@ class MESFuturesLiveStrategy:
             df_5s.set_index('date', inplace=True)
             df_5s.sort_index(inplace=True)
 
-            # Resample to 15-minute bars
+            # Resample to 15-minute bars for indicators
             ohlc_15m = df_5s.resample('15min').agg({
                 'open': 'first',
                 'high': 'max',
@@ -237,31 +240,31 @@ class MESFuturesLiveStrategy:
             if len(ohlc_15m) < 1:
                 return
 
-            # Calculate RSI on 15-minute data
+            # Calculate RSI and VWAP
             ohlc_15m['RSI'] = rsi(ohlc_15m, period=self.rsi_period_15m)
-
-            # Calculate VWAP since the "most recent" session open (6 PM ET)
             ohlc_15m['VWAP'] = vwap(ohlc_15m)
 
-            # Get the latest row for signals
+            # Get the latest 15-minute indicators
             latest_bar_time = ohlc_15m.index[-1]
-            latest_close    = ohlc_15m['close'].iloc[-1]
             latest_rsi      = ohlc_15m['RSI'].iloc[-1]
             latest_vwap     = ohlc_15m['VWAP'].iloc[-1]
 
+            # Use the latest 5-second close as current_price
+            if self.latest_5s_close is not None:
+                current_price = self.latest_5s_close
+                self.apply_trading_logic(current_price, latest_vwap, latest_rsi, latest_bar_time)
+            else:
+                logger.debug("Latest 5-second close price not available yet.")
 
-            # Apply trading logic (on each new 15-min bar — but triggered by 5s data arrival)
-            self.apply_trading_logic(latest_close, latest_vwap, latest_rsi, latest_bar_time)
-
-            # Optionally, you can store the equity curve with the *latest close*
-            # (includes unrealized PnL, if you want to track that).
+            # Update equity curve
             self.equity_curve.append({'Time': latest_bar_time, 'Equity': self.equity})
 
-            # --- New Code to Log RSI and VWAP Every 5 Minutes ---
+            # Log RSI and VWAP periodically
             current_time = datetime.now(timezone.utc)
             if current_time >= self.last_log_time + timedelta(minutes=5):
                 logger.warning(f"Periodic Update: RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
                 self.last_log_time = current_time
+
             # --- End of New Code ---
 
     def apply_trading_logic(self, current_price, current_vwap, current_rsi, current_time):

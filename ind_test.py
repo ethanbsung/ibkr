@@ -82,8 +82,10 @@ def on_bar_update(bars, has_new_bar):
     # Calculate VWAP since market open
     ohlc['VWAP'] = vwap(ohlc)
 
+    latest_price = ohlc['close'].iloc[-1]
+
     # Display the latest RSI and VWAP values
-    print(f"Latest RSI: {ohlc['RSI'].iloc[-1]:.2f}, Latest VWAP: {ohlc['VWAP'].iloc[-1]:.2f}")
+    print(f"Price: {latest_price}, Latest RSI: {ohlc['RSI'].iloc[-1]:.2f}, Latest VWAP: {ohlc['VWAP'].iloc[-1]:.2f}")
 
 # Subscribe to live market data
 bars = ib.reqHistoricalData(
