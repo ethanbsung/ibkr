@@ -262,7 +262,7 @@ class MESFuturesLiveStrategy:
             # Log RSI and VWAP periodically
             current_time = datetime.now(timezone.utc)
             if current_time >= self.last_log_time + timedelta(minutes=5):
-                logger.warning(f"Periodic Update: RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
+                logger.info(f"Periodic Update: RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
                 self.last_log_time = current_time
 
             # --- End of New Code ---
@@ -277,7 +277,7 @@ class MESFuturesLiveStrategy:
             logger.info(f"Time {current_time_et} outside RTH. No trading action.")
             return
 
-        logger.debug(f"Checking signals @ {current_time}: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
+        logger.info(f"Checking signals @ {current_time}: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
 
         # If no position and no pending order, consider new entries
         if self.position is None and not self.pending_order:
