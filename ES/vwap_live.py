@@ -324,7 +324,7 @@ class MESFuturesLiveStrategy:
             logger.info(f"Time {current_time_et} outside RTH. No trading action.")
             return
 
-        logger.info(f"Checking signals @ {current_time}: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
+        logger.debug(f"Checking signals: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
 
         # If no position and no pending order, consider new entries
         if self.position is None and not self.pending_order:
