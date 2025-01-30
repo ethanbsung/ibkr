@@ -31,10 +31,8 @@ BOLLINGER_STDDEV = 2
 STOP_LOSS_DISTANCE = 5        # Points away from entry
 TAKE_PROFIT_DISTANCE = 10     # Points away from entry
 
-# RTH: 09:30 - 16:00 ET, Monday to Friday
-RTH_START = datetime.time(9, 29)
-RTH_END = datetime.time(15, 59)
-EASTERN = pytz.timezone('US/Eastern')
+RTH_START_UTC = datetime.time(14, 30)  # 09:30 ET in UTC
+RTH_END_UTC = datetime.time(21, 0)     # 16:00 ET in UTC
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -166,17 +164,18 @@ def calculate_bollinger_bands(df, period=15, stddev=2):
     return df
 
 def filter_rth(df):
+    # Ensure the DataFrame index is in UTC
     if df.index.tz is None:
         df = df.tz_localize('UTC')
     else:
         df = df.tz_convert('UTC')
 
-    df_eastern = df.copy()
-    df_eastern.index = df_eastern.index.tz_convert(EASTERN)
+    # Filter for weekdays (Monday=0, Sunday=6)
+    df = df[df.index.weekday < 5]
 
-    df_eastern = df_eastern[df_eastern.index.weekday < 5]
-    df_rth = df_eastern.between_time(RTH_START, RTH_END)
-    df_rth.index = df_rth.index.tz_convert('UTC')
+    # Filter between RTH_START_UTC and RTH_END_UTC
+    df_rth = df.between_time(RTH_START_UTC, RTH_END_UTC)
+
     return df_rth
 
 # Calculate Bollinger Bands on Full Data
@@ -361,8 +360,9 @@ def place_bracket_order(action, current_price):
 def is_rth(timestamp):
     if timestamp is None:
         return False
-    ts_eastern = timestamp.astimezone(EASTERN)
-    return ts_eastern.weekday() < 5 and RTH_START <= ts_eastern.time() < RTH_END
+    # Assume timestamp is in UTC
+    current_time = timestamp.time()
+    return RTH_START_UTC <= current_time < RTH_END_UTC and timestamp.weekday() < 5  # Monday=0, Sunday=6
 
 def execute_trade(action, current_price, current_time):
     global pending_order  # Declare global to modify the variable
