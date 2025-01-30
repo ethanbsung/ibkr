@@ -6,6 +6,7 @@ import sys
 import pytz
 from datetime import datetime, time, timedelta, timezone
 from threading import Lock
+import time as time_module  # To avoid conflict with datetime.time
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host
@@ -105,7 +106,7 @@ def vwap(ohlc: pd.DataFrame) -> pd.Series:
 
 
 # -----------------------------------------------------------------------------
-# Live Trading Strategy Class
+# Live Trading Strategy Class with Reconnection Logic
 # -----------------------------------------------------------------------------
 class MESFuturesLiveStrategy:
     def __init__(
@@ -121,6 +122,8 @@ class MESFuturesLiveStrategy:
         rsi_period_15m=RSI_PERIOD_15M,
         rsi_overbought=RSI_OVERBOUGHT,
         rsi_oversold=RSI_OVERSOLD,
+        max_retries=5,
+        retry_delay=5  # seconds
     ):
         """
         Initializes the live trading strategy.
@@ -136,6 +139,9 @@ class MESFuturesLiveStrategy:
         self.rsi_period_15m = rsi_period_15m
         self.rsi_overbought = rsi_overbought
         self.rsi_oversold = rsi_oversold
+
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
 
         # Strategy state
         self.cash = initial_cash
@@ -194,8 +200,8 @@ class MESFuturesLiveStrategy:
             # ...
         except Exception as e:
             logger.error(f"Failed to fetch historical data: {e}")
-    
         
+            
 
     def on_bar_update(self, bars: RealTimeBarList, hasNewBar: bool):
         with self.lock:
@@ -264,8 +270,6 @@ class MESFuturesLiveStrategy:
             if current_time >= self.last_log_time + timedelta(minutes=5):
                 logger.info(f"Periodic Update: RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
                 self.last_log_time = current_time
-
-            # --- End of New Code ---
 
     def apply_trading_logic(self, current_price, current_vwap, current_rsi, current_time):
         """
@@ -448,121 +452,67 @@ class MESFuturesLiveStrategy:
           1) Optionally fetch some historical data for warmup
           2) Subscribe to 5-second real-time bars
           3) Start the IB event loop
+          4) Implement reconnection logic
         """
-        # Optional: warm up indicators
-        self.fetch_historical_data(duration='3 D', bar_size='15 mins')
+        retry_count = 0
 
-        # Request live 5-second bars
-        logger.info("Requesting real-time 5-second bars for ES...")
-        ticker_5s = self.ib.reqHistoricalData(
-            contract=self.es_contract,
-            endDateTime='',
-            durationStr='1 D',
-            barSizeSetting='5 secs',
-            whatToShow='TRADES',
-            useRTH=False,
-            keepUpToDate=True
-        )
-        ticker_5s.updateEvent += self.on_bar_update
-        logger.info("Real-time bar subscription set up.")
+        while True:
+            try:
+                # Connect to IB if not connected
+                if not self.ib.isConnected():
+                    logger.info("Connecting to IBKR...")
+                    self.ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
+                    logger.info("Connected to IBKR.")
 
-        # --- New Code to Log RSI and VWAP at Startup ---
-        # Wait briefly to ensure some data is received
-        import time as time_module
-        time_module.sleep(5)  # Sleep for 5 seconds
+                    # Define Contracts again after reconnection
+                    self.ib.qualifyContracts(self.es_contract, self.mes_contract)
+                    logger.info(f"Qualified ES Contract: {self.es_contract}")
+                    logger.info(f"Qualified MES Contract: {self.mes_contract}")
 
-        # If there are already 15-minute bars, calculate and log initial RSI and VWAP
-        if self.realtime_5s_data:
-            df_initial = pd.DataFrame(self.realtime_5s_data)
-            df_initial.set_index('date', inplace=True)
-            df_initial.sort_index(inplace=True)
+                    # Request live 5-second bars
+                    logger.info("Requesting real-time 5-second bars for ES...")
+                    ticker_5s = self.ib.reqHistoricalData(
+                        contract=self.es_contract,
+                        endDateTime='',
+                        durationStr='1 D',
+                        barSizeSetting='5 secs',
+                        whatToShow='TRADES',
+                        useRTH=False,
+                        keepUpToDate=True
+                    )
+                    ticker_5s.updateEvent += self.on_bar_update
+                    logger.info("Real-time bar subscription set up.")
 
-            ohlc_initial = df_initial.resample('15min').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            }).dropna()
+                # Run the IB event loop
+                logger.info("Starting IB event loop. Press Ctrl+C to exit.")
+                self.ib.run()
+            except (KeyboardInterrupt, SystemExit):
+                logger.info("KeyboardInterrupt received, shutting down...")
+                break
+            except Exception as e:
+                logger.error(f"Exception occurred: {e}")
+                retry_count += 1
+                if retry_count > self.max_retries:
+                    logger.error("Max retries exceeded. Exiting.")
+                    break
+                logger.info(f"Attempting to reconnect in {self.retry_delay} seconds... (Retry {retry_count}/{self.max_retries})")
+                time_module.sleep(self.retry_delay)
+                # Attempt to disconnect and clean up before reconnecting
+                try:
+                    if self.ib.isConnected():
+                        self.ib.disconnect()
+                        logger.info("Disconnected from IBKR.")
+                except Exception as disconnect_exc:
+                    logger.error(f"Error during disconnect: {disconnect_exc}")
 
-            if not ohlc_initial.empty:
-                ohlc_initial['RSI'] = rsi(ohlc_initial, period=self.rsi_period_15m)
-                ohlc_initial['VWAP'] = vwap(ohlc_initial)
-
-                latest_rsi_initial = ohlc_initial['RSI'].iloc[-1]
-                latest_vwap_initial = ohlc_initial['VWAP'].iloc[-1]
-
-                logger.info(f"Initial Indicators: RSI={latest_rsi_initial:.2f}, VWAP={latest_vwap_initial:.2f}")
-        # --- End of New Code ---
-
-        logger.info("Starting IB event loop. Press Ctrl+C to exit.")
-        try:
-            self.ib.run()
-        except KeyboardInterrupt:
-            logger.info("KeyboardInterrupt received, shutting down...")
-        finally:
-            if self.equity_curve:
-                self.plot_equity_curve()
-            logger.debug(f"Final Equity: ${self.equity:.2f}")
-            if self.trade_log:
-                trade_df = pd.DataFrame(self.trade_log)
-                logger.debug(f"Trade Log:\n{trade_df}")
-            else:
-                logger.debug("No trades were executed.")
-            self.ib.disconnect()
-
-
-# -----------------------------------------------------------------------------
-# Main Execution
-# -----------------------------------------------------------------------------
-if __name__ == "__main__":
-    ib = IB()
-    try:
-        ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
-        logger.info("Connected to IBKR.")
-    except Exception as e:
-        logger.error(f"Failed to connect to IBKR: {e}")
-        sys.exit(1)
-
-    # Define Contracts
-    es_contract = Future(
-        symbol=DATA_SYMBOL, 
-        lastTradeDateOrContractMonth=DATA_EXPIRY,
-        exchange=DATA_EXCHANGE, 
-        currency=CURRENCY
-    )
-    mes_contract = Future(
-        symbol=EXEC_SYMBOL, 
-        lastTradeDateOrContractMonth=EXEC_EXPIRY,
-        exchange=EXEC_EXCHANGE, 
-        currency=CURRENCY
-    )
-
-    # Qualify the contracts
-    try:
-        qualified_contracts = ib.qualifyContracts(es_contract, mes_contract)
-        es_contract  = qualified_contracts[0]
-        mes_contract = qualified_contracts[1]
-        logger.info(f"Qualified ES Contract: {es_contract}")
-        logger.info(f"Qualified MES Contract: {mes_contract}")
-    except Exception as e:
-        logger.error(f"Error qualifying contracts: {e}")
-        ib.disconnect()
-        sys.exit(1)
-
-    # Initialize and run the strategy
-    strategy = MESFuturesLiveStrategy(
-        ib=ib,
-        es_contract=es_contract,
-        mes_contract=mes_contract,
-        initial_cash=INITIAL_CASH,
-        position_size=POSITION_SIZE,
-        contract_multiplier=CONTRACT_MULTIPLIER,
-        stop_loss_points=STOP_LOSS_POINTS,
-        take_profit_points=TAKE_PROFIT_POINTS,
-        rsi_period_15m=RSI_PERIOD_15M,
-        rsi_overbought=RSI_OVERBOUGHT,
-        rsi_oversold=RSI_OVERSOLD
-    )
-
-    strategy.run()
+        # --- After exiting the loop ---
+        # Plot Equity Curve and Log Trade Summary
+        if self.equity_curve:
+            self.plot_equity_curve()
+        logger.debug(f"Final Equity: ${self.equity:.2f}")
+        if self.trade_log:
+            trade_df = pd.DataFrame(self.trade_log)
+            logger.debug(f"Trade Log:\n{trade_df}")
+        else:
+            logger.debug("No trades were executed.")
+        self.ib.disconnect()
