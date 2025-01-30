@@ -161,8 +161,9 @@ class MESFuturesLiveStrategy:
 
         self.latest_5s_close = None
 
-        # Setup disconnection handler
-        self.ib.connectionClosedEvent += self.on_disconnect
+        # --- Corrected Event Handler ---
+        # Bind the 'disconnectedEvent' instead of 'connectionClosedEvent'
+        self.ib.disconnectedEvent += self.on_disconnect
 
     def fetch_historical_data(self, duration='3 D', bar_size='15 mins'):
         """
