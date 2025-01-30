@@ -41,7 +41,7 @@ EASTERN   = pytz.timezone('US/Eastern')
 
 # --- Setup Logging ---
 logging.basicConfig(
-    level=logging.DEBUG,  # Set to INFO or DEBUG for more verbosity
+    level=logging.INFO,  # Set to INFO or DEBUG for more verbosity
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
