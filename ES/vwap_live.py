@@ -453,7 +453,7 @@ class MESFuturesLiveStrategy:
         self.fetch_historical_data(duration='3 D', bar_size='15 mins')
 
         # Request live 5-second bars
-        logger.debug("Requesting real-time 5-second bars for ES...")
+        logger.info("Requesting real-time 5-second bars for ES...")
         ticker_5s = self.ib.reqHistoricalData(
             contract=self.es_contract,
             endDateTime='',
@@ -464,7 +464,7 @@ class MESFuturesLiveStrategy:
             keepUpToDate=True
         )
         ticker_5s.updateEvent += self.on_bar_update
-        logger.debug("Real-time bar subscription set up.")
+        logger.info("Real-time bar subscription set up.")
 
         # --- New Code to Log RSI and VWAP at Startup ---
         # Wait briefly to ensure some data is received
@@ -492,14 +492,14 @@ class MESFuturesLiveStrategy:
                 latest_rsi_initial = ohlc_initial['RSI'].iloc[-1]
                 latest_vwap_initial = ohlc_initial['VWAP'].iloc[-1]
 
-                logger.debug(f"Initial Indicators: RSI={latest_rsi_initial:.2f}, VWAP={latest_vwap_initial:.2f}")
+                logger.info(f"Initial Indicators: RSI={latest_rsi_initial:.2f}, VWAP={latest_vwap_initial:.2f}")
         # --- End of New Code ---
 
-        logger.debug("Starting IB event loop. Press Ctrl+C to exit.")
+        logger.info("Starting IB event loop. Press Ctrl+C to exit.")
         try:
             self.ib.run()
         except KeyboardInterrupt:
-            logger.debug("KeyboardInterrupt received, shutting down...")
+            logger.info("KeyboardInterrupt received, shutting down...")
         finally:
             if self.equity_curve:
                 self.plot_equity_curve()
@@ -519,7 +519,7 @@ if __name__ == "__main__":
     ib = IB()
     try:
         ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
-        logger.debug("Connected to IBKR.")
+        logger.info("Connected to IBKR.")
     except Exception as e:
         logger.error(f"Failed to connect to IBKR: {e}")
         sys.exit(1)
@@ -543,8 +543,8 @@ if __name__ == "__main__":
         qualified_contracts = ib.qualifyContracts(es_contract, mes_contract)
         es_contract  = qualified_contracts[0]
         mes_contract = qualified_contracts[1]
-        logger.debug(f"Qualified ES Contract: {es_contract}")
-        logger.debug(f"Qualified MES Contract: {mes_contract}")
+        logger.info(f"Qualified ES Contract: {es_contract}")
+        logger.info(f"Qualified MES Contract: {mes_contract}")
     except Exception as e:
         logger.error(f"Error qualifying contracts: {e}")
         ib.disconnect()
