@@ -6,7 +6,7 @@ import logging
 import sys
 import pytz
 import json
-from datetime import timedelta
+from datetime import timedelta, time
 import os
 
 # --- Configuration Parameters ---
@@ -31,8 +31,8 @@ BOLLINGER_STDDEV = 2
 STOP_LOSS_DISTANCE = 5        # Points away from entry
 TAKE_PROFIT_DISTANCE = 10     # Points away from entry
 
-RTH_START_UTC = datetime.time(14, 30)  # 09:30 ET in UTC
-RTH_END_UTC = datetime.time(21, 0)     # 16:00 ET in UTC
+RTH_START_UTC = time(14, 30)  # 09:30 ET in UTC
+RTH_END_UTC = time(21, 0)     # 16:00 ET in UTC
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -194,6 +194,7 @@ current_30min_bars = []
 
 def save_performance():
     """Save aggregate performance to a JSON file and equity curve to a CSV."""
+    global aggregate_performance, aggregate_equity_curve
     try:
         # Update equity_curve in aggregate_performance
         aggregate_performance['equity_curve'] = aggregate_performance.get('equity_curve', [])
@@ -201,15 +202,15 @@ def save_performance():
             latest_equity = aggregate_equity_curve['Equity'].iloc[-1]
             timestamp = aggregate_equity_curve.index[-1].isoformat()
             aggregate_performance['equity_curve'].append({"Timestamp": timestamp, "Equity": latest_equity})
-        
+
         # Save to JSON
         with open(PERFORMANCE_FILE, 'w') as f:
             json.dump(aggregate_performance, f, indent=4)
-        
+
         # Save equity curve to CSV
         if not aggregate_equity_curve.empty:
             aggregate_equity_curve.to_csv(EQUITY_CURVE_FILE)
-        
+
         print("Aggregate performance data saved successfully.")
     except Exception as e:
         logger.error(f"Failed to save performance data: {e}")
@@ -276,7 +277,7 @@ def on_trade_filled(trade):
                 timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 aggregate_performance["equity_curve"].append({"Timestamp": timestamp, "Equity": cash})
                 new_entry = pd.DataFrame({'Equity': [cash]}, index=[pd.to_datetime(timestamp)])
-                
+
                 # Only concatenate if new_entry is not empty
                 if not new_entry.empty:
                     aggregate_equity_curve = pd.concat([aggregate_equity_curve, new_entry])
@@ -298,7 +299,7 @@ def on_trade_filled(trade):
         logger.error(f"Error in on_trade_filled handler: {e}")
 
 def on_order_status(trade):
-    global position, pending_order
+    global pending_order
     try:
         print(f"Trade Status Update - Order ID {trade.order.orderId}: {trade.orderStatus.status}")
         if trade.orderStatus.status in ('Cancelled', 'Inactive', 'Filled'):
@@ -308,7 +309,7 @@ def on_order_status(trade):
         logger.error(f"Error in on_order_status handler: {e}")
 
 def place_bracket_order(action, current_price):
-    global pending_order
+    global pending_order, aggregate_equity_curve
     print(f"Placing bracket order: Action={action}, Current Price={current_price}")
     if action.upper() not in ['BUY', 'SELL']:
         logger.error(f"Invalid action: {action}. Must be 'BUY' or 'SELL'.")
