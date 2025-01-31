@@ -6,6 +6,8 @@ import sys
 import pytz
 from datetime import datetime, time, timedelta, timezone
 from threading import Lock
+import json
+import os
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host
@@ -38,6 +40,10 @@ TAKE_PROFIT_POINTS = 10
 RTH_START = datetime.strptime("09:30", "%H:%M").time()
 RTH_END   = datetime.strptime("15:59", "%H:%M").time()
 EASTERN   = pytz.timezone('US/Eastern')
+
+# --- Performance Tracking Files ---
+PERFORMANCE_FILE = 'ES/vwap_performance_data.json'      # JSON file to store aggregate performance
+EQUITY_CURVE_FILE = 'ES/vwap_equity_curve.csv'          # CSV file to store equity curve
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -105,7 +111,7 @@ def vwap(ohlc: pd.DataFrame) -> pd.Series:
 
 
 # -----------------------------------------------------------------------------
-# Live Trading Strategy Class
+# Live Trading Strategy Class with Performance Tracking
 # -----------------------------------------------------------------------------
 class MESFuturesLiveStrategy:
     def __init__(
@@ -123,7 +129,7 @@ class MESFuturesLiveStrategy:
         rsi_oversold=RSI_OVERSOLD,
     ):
         """
-        Initializes the live trading strategy.
+        Initializes the live trading strategy with performance tracking.
         """
         self.ib = ib
         self.ib.autoReconnect = False  # We'll handle reconnection manually
@@ -163,11 +169,89 @@ class MESFuturesLiveStrategy:
 
         self.latest_5s_close = None
 
+        # Performance Tracking Initialization
+        self.performance_file = PERFORMANCE_FILE
+        self.equity_curve_file = EQUITY_CURVE_FILE
+        self.load_performance()
+
         # Bind the 'disconnectedEvent' to the non-blocking handler
         self.ib.disconnectedEvent += self.on_disconnect
 
         # Optionally, bind 'connectedEvent' to confirm reconnection
         self.ib.connectedEvent += self.on_reconnected
+
+    def load_performance(self):
+        """Load existing performance data from files or initialize new."""
+        if os.path.exists(self.performance_file):
+            try:
+                with open(self.performance_file, 'r') as f:
+                    self.aggregate_performance = json.load(f)
+                # Initialize equity_curve as a list
+                if 'equity_curve' not in self.aggregate_performance:
+                    self.aggregate_performance['equity_curve'] = []
+                logger.info("Loaded existing aggregate performance data.")
+            except json.JSONDecodeError:
+                logger.warning(f"Performance file {self.performance_file} is empty or invalid. Initializing new performance data.")
+                self.initialize_performance()
+            except Exception as e:
+                logger.error(f"Error loading performance file: {e}. Initializing new performance data.")
+                self.initialize_performance()
+        else:
+            self.initialize_performance()
+
+        # Load equity curve from CSV if exists
+        if os.path.exists(self.equity_curve_file):
+            try:
+                self.aggregate_equity_curve = pd.read_csv(
+                    self.equity_curve_file,
+                    parse_dates=['Timestamp'],
+                    index_col='Timestamp'
+                )
+                # Verify that the necessary columns exist
+                if not {'Equity'}.issubset(self.aggregate_equity_curve.columns):
+                    logger.warning(f"Equity curve file {self.equity_curve_file} is missing required columns. Reinitializing.")
+                    self.aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
+            except pd.errors.EmptyDataError:
+                logger.warning(f"Equity curve file {self.equity_curve_file} is empty. Initializing new equity curve.")
+                self.aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
+            except Exception as e:
+                logger.error(f"Error loading equity curve file: {e}. Initializing new equity curve.")
+                self.aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
+        else:
+            self.aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
+
+    def initialize_performance(self):
+        """Initialize performance metrics."""
+        self.aggregate_performance = {
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "total_pnl": 0.0,
+            "equity_curve": []  # List of dicts with 'Timestamp' and 'Equity'
+        }
+        logger.info("Initialized new aggregate performance data.")
+        self.aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
+
+    def save_performance(self):
+        """Save aggregate performance to a JSON file and equity curve to a CSV."""
+        try:
+            # Update equity_curve in aggregate_performance
+            if not self.aggregate_equity_curve.empty:
+                latest_equity = self.aggregate_equity_curve['Equity'].iloc[-1]
+                timestamp = self.aggregate_equity_curve.index[-1].isoformat()
+                self.aggregate_performance['equity_curve'].append({"Timestamp": timestamp, "Equity": latest_equity})
+
+            # Save to JSON
+            with open(self.performance_file, 'w') as f:
+                json.dump(self.aggregate_performance, f, indent=4)
+
+            # Save equity curve to CSV
+            if not self.aggregate_equity_curve.empty:
+                self.aggregate_equity_curve.to_csv(self.equity_curve_file)
+
+            logger.info("Aggregate performance data saved successfully.")
+        except Exception as e:
+            logger.error(f"Failed to save performance data: {e}")
 
     def fetch_historical_data(self, duration='3 D', bar_size='15 mins'):
         """
@@ -334,7 +418,7 @@ class MESFuturesLiveStrategy:
                 logger.debug("Latest 5-second close price not available yet.")
 
             # Update equity curve
-            self.equity_curve.append({'Time': latest_bar_time, 'Equity': self.equity})
+            self.equity_curve.append({'Time': latest_bar_time.isoformat(), 'Equity': self.equity})
 
             # Log RSI and VWAP periodically
             current_time = datetime.now(timezone.utc)
@@ -396,17 +480,34 @@ class MESFuturesLiveStrategy:
             trades = self.ib.bracketOrder(
                 action=order_action,
                 quantity=self.position_size,
-                limitPrice=current_price,  # Added limitPrice to fix the error
+                limitPrice=current_price,      # Parent is a limit order at current_price
                 takeProfitPrice=take_profit_price,
                 stopLossPrice=stop_loss_price
             )
 
-            # Attach event handlers to all orders in the bracket
-            for trade in trades:
-                trade.filledEvent += self.on_trade_filled
-                trade.statusEvent += self.on_order_status
+            # Place the parent order and get the Trade object
+            parent_trade = self.ib.placeOrder(self.mes_contract, trades[0])
+            logger.info(f"Placed Parent {trades[0].orderType} Order ID {trades[0].orderId} for {trades[0].action} at {trades[0].lmtPrice}")
+
+            # Attach event handlers to the parent Trade object
+            parent_trade.filledEvent += self.on_trade_filled
+            parent_trade.statusEvent += self.on_order_status
+
+            # Place Take-Profit and Stop-Loss Orders and attach event handlers
+            take_profit_trade = self.ib.placeOrder(self.mes_contract, trades[1])
+            logger.info(f"Placed Take-Profit {trades[1].orderType} Order ID {trades[1].orderId} for {trades[1].action} at {trades[1].lmtPrice}")
+
+            take_profit_trade.filledEvent += self.on_trade_filled
+            take_profit_trade.statusEvent += self.on_order_status
+
+            stop_loss_trade = self.ib.placeOrder(self.mes_contract, trades[2])
+            logger.info(f"Placed Stop-Loss {trades[2].orderType} Order ID {trades[2].orderId} for {trades[2].action} at {trades[2].auxPrice}")
+
+            stop_loss_trade.filledEvent += self.on_trade_filled
+            stop_loss_trade.statusEvent += self.on_order_status
 
             self.pending_order = True
+            logger.info("Bracket order placed successfully and event handlers attached.")
 
         except Exception as e:
             logger.error(f"Failed to place bracket order: {e}")
@@ -426,7 +527,7 @@ class MESFuturesLiveStrategy:
             logger.debug(f"Trade Filled: {order_action} {fill_qty} @ {fill_price} on {fill_time}")
 
             # Parent order fill => position entry
-            if trade.order.orderType == 'MARKET':
+            if trade.order.orderType == 'LIMIT' and not trade.order.parentId:
                 if order_action == 'BUY' and self.position is None:
                     self.position = 'LONG'
                     self.entry_price = fill_price
@@ -434,14 +535,14 @@ class MESFuturesLiveStrategy:
                     self.take_profit = self.entry_price + self.take_profit_points
                     self.trade_log.append({
                         'Type': 'LONG',
-                        'Entry Time': fill_time,
+                        'Entry Time': fill_time.isoformat(),
                         'Entry Price': self.entry_price,
                         'Exit Time': None,
                         'Exit Price': None,
                         'Result': None,
                         'Profit': 0
                     })
-                    logger.debug(f"Entered LONG @ {self.entry_price}")
+                    logger.info(f"Entered LONG @ {self.entry_price}")
                 elif order_action == 'SELL' and self.position is None:
                     self.position = 'SHORT'
                     self.entry_price = fill_price
@@ -449,45 +550,45 @@ class MESFuturesLiveStrategy:
                     self.take_profit = self.entry_price - self.take_profit_points
                     self.trade_log.append({
                         'Type': 'SHORT',
-                        'Entry Time': fill_time,
+                        'Entry Time': fill_time.isoformat(),
                         'Entry Price': self.entry_price,
                         'Exit Time': None,
                         'Exit Price': None,
                         'Result': None,
                         'Profit': 0
                     })
-                    logger.debug(f"Entered SHORT @ {self.entry_price}")
+                    logger.info(f"Entered SHORT @ {self.entry_price}")
 
             # Child order fill => position exit
-            elif trade.order.orderType in ['LIMIT', 'STOP']:
+            elif trade.order.orderType in ['TAKE_PROFIT_LIMIT', 'STOP']:
                 if self.position == 'LONG' and order_action == 'SELL':
                     # Exiting a long
-                    pnl = (fill_price - self.entry_price) * self.position_size * self.contract_multiplier
+                    pnl = (fill_price - self.entry_price) * self.position_size * self.contract_multiplier - 1.24  # Subtract commission if any
                     self.cash += pnl
                     self.equity += pnl
                     result = 'Take Profit' if fill_price >= self.take_profit else 'Stop Loss'
                     self.trade_log[-1].update({
-                        'Exit Time': fill_time,
+                        'Exit Time': fill_time.isoformat(),
                         'Exit Price': fill_price,
                         'Result': result,
                         'Profit': pnl
                     })
-                    logger.debug(f"Exited LONG @ {fill_price} PnL=${pnl:.2f} ({result})")
+                    logger.info(f"Exited LONG @ {fill_price} PnL=${pnl:.2f} ({result})")
                     self.position = None
 
                 elif self.position == 'SHORT' and order_action == 'BUY':
                     # Exiting a short
-                    pnl = (self.entry_price - fill_price) * self.position_size * self.contract_multiplier
+                    pnl = (self.entry_price - fill_price) * self.position_size * self.contract_multiplier - 1.24  # Subtract commission if any
                     self.cash += pnl
                     self.equity += pnl
                     result = 'Take Profit' if fill_price <= self.take_profit else 'Stop Loss'
                     self.trade_log[-1].update({
-                        'Exit Time': fill_time,
+                        'Exit Time': fill_time.isoformat(),
                         'Exit Price': fill_price,
                         'Result': result,
                         'Profit': pnl
                     })
-                    logger.debug(f"Exited SHORT @ {fill_price} PnL=${pnl:.2f} ({result})")
+                    logger.info(f"Exited SHORT @ {fill_price} PnL=${pnl:.2f} ({result})")
                     self.position = None
 
             # If position is flattened, we can reset pending_order
@@ -495,10 +596,31 @@ class MESFuturesLiveStrategy:
                 self.pending_order = False
 
             # Track equity curve
-            self.equity_curve.append({'Time': fill_time, 'Equity': self.equity})
+            self.equity_curve.append({'Time': fill_time.isoformat(), 'Equity': self.equity})
+
+            # Update aggregate performance metrics
+            if trade.order.orderType == 'LIMIT' and not trade.order.parentId:
+                # Entry doesn't affect performance yet
+                pass
+            elif trade.order.orderType in ['TAKE_PROFIT_LIMIT', 'STOP']:
+                # Update performance
+                self.aggregate_performance["total_trades"] += 1
+                self.aggregate_performance["total_pnl"] += pnl
+                if pnl > 0:
+                    self.aggregate_performance["winning_trades"] += 1
+                else:
+                    self.aggregate_performance["losing_trades"] += 1
+
+                # Update equity curve DataFrame
+                new_entry = pd.DataFrame({'Equity': [self.equity]}, index=[pd.to_datetime(fill_time.isoformat())])
+                if not new_entry.empty:
+                    self.aggregate_equity_curve = pd.concat([self.aggregate_equity_curve, new_entry])
+
+                # Save performance after each trade
+                self.save_performance()
 
         except Exception as e:
-            logger.error(f"Error in on_trade_filled: {e}")
+            logger.error(f"Error in on_trade_filled handler: {e}")
 
     def on_order_status(self, trade):
         """
@@ -508,13 +630,13 @@ class MESFuturesLiveStrategy:
             logger.debug(f"Order Status: ID={trade.order.orderId}, Status={trade.orderStatus.status}")
             if trade.orderStatus.status in ['Cancelled', 'Inactive', 'Filled']:
                 # If parent order is cancelled, reset
-                if trade.order.orderType == 'MARKET' and self.position is None:
+                if trade.order.orderType == 'LIMIT' and not trade.order.parentId and self.position is None:
                     logger.warning(f"Parent order {trade.order.orderId} cancelled or inactive, no position entered.")
                 # We can reset pending_order if there's no position
                 if self.position is None:
                     self.pending_order = False
         except Exception as e:
-            logger.error(f"Error in on_order_status: {e}")
+            logger.error(f"Error in on_order_status handler: {e}")
 
     def run(self):
         """
@@ -575,6 +697,7 @@ class MESFuturesLiveStrategy:
             else:
                 logger.debug("No trades were executed.")
             self.ib.disconnect()
+            logger.info("Disconnected from IBKR.")
 
     def plot_equity_curve(self):
         """
@@ -582,7 +705,12 @@ class MESFuturesLiveStrategy:
         """
         import matplotlib.pyplot as plt
 
+        if not self.equity_curve:
+            logger.warning("No equity data to plot.")
+            return
+
         df_equity = pd.DataFrame(self.equity_curve)
+        df_equity['Time'] = pd.to_datetime(df_equity['Time'])
         df_equity.set_index('Time', inplace=True)
         plt.figure(figsize=(10, 6))
         plt.plot(df_equity.index, df_equity['Equity'], label='Equity Curve')
