@@ -43,11 +43,11 @@ EASTERN   = pytz.timezone('US/Eastern')
 
 # --- Performance Tracking Files ---
 PERFORMANCE_FILE = 'ES/vwap_performance_data.json'      # JSON file to store aggregate performance
-EQUITY_CURVE_FILE = 'ES/vwap_equity_curve.csv'          # CSV file to store equity curve
+EQUITY_CURVE_FILE = 'ES/vwap_equity_curve.csv'           # CSV file to store equity curve
 
 # --- Setup Logging ---
 logging.basicConfig(
-    level=logging.INFO,  # Set to INFO or DEBUG for more verbosity
+    level=logging.WARNING,  # Set to INFO or DEBUG for more verbosity
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
@@ -78,32 +78,23 @@ def vwap(ohlc: pd.DataFrame) -> pd.Series:
     Calculate the Volume Weighted Average Price (VWAP) since the *latest* market open
     (defaulted to 6:00 PM Eastern) within the same session.
     """
-    # Copy so as not to mutate original
     df = ohlc.copy()
 
     # Convert index to US/Eastern
     df['date_eastern'] = df.index.tz_convert('US/Eastern')
 
-    # Define "market open" as 18:00 (6 PM ET) on the same or previous day
-    # For each row, find the most recent 18:00:00
+    # For each row, define the "session open" as 18:00 ET of the same day if the bar time is >= 18:00,
+    # otherwise use the previous day's 18:00.
     def session_open(dt_eastern):
-        # If the bar time is >= 18:00 that day, session open is that day 18:00
-        # else session open is the *previous* day at 18:00
-        if dt_eastern.time() >= time(18,0):
+        if dt_eastern.time() >= time(18, 0):
             return dt_eastern.replace(hour=18, minute=0, second=0, microsecond=0)
         else:
-            # Subtract one day, set to 18:00
             return (dt_eastern - timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
 
     df['session_open'] = df['date_eastern'].apply(session_open)
-
-    # Filter rows only from the current session's open
     df = df[df['date_eastern'] >= df['session_open']]
 
-    # Typical Price
     typical_price = (df['high'] + df['low'] + df['close']) / 3
-
-    # Cumulative TP * Volume / Cumulative Volume
     csum_tpvol = (typical_price * df['volume']).cumsum()
     csum_vol   = df['volume'].cumsum()
 
@@ -174,10 +165,8 @@ class MESFuturesLiveStrategy:
         self.equity_curve_file = EQUITY_CURVE_FILE
         self.load_performance()
 
-        # Bind the 'disconnectedEvent' to the non-blocking handler
+        # Bind the events to handlers (note the on_disconnect now accepts extra args)
         self.ib.disconnectedEvent += self.on_disconnect
-
-        # Optionally, bind 'connectedEvent' to confirm reconnection
         self.ib.connectedEvent += self.on_reconnected
 
     def load_performance(self):
@@ -186,10 +175,9 @@ class MESFuturesLiveStrategy:
             try:
                 with open(self.performance_file, 'r') as f:
                     self.aggregate_performance = json.load(f)
-                # Initialize equity_curve as a list
                 if 'equity_curve' not in self.aggregate_performance:
                     self.aggregate_performance['equity_curve'] = []
-                logger.info("Loaded existing aggregate performance data.")
+                logger.warning("Loaded existing aggregate performance data.")
             except json.JSONDecodeError:
                 logger.warning(f"Performance file {self.performance_file} is empty or invalid. Initializing new performance data.")
                 self.initialize_performance()
@@ -199,7 +187,6 @@ class MESFuturesLiveStrategy:
         else:
             self.initialize_performance()
 
-        # Load equity curve from CSV if exists
         if os.path.exists(self.equity_curve_file):
             try:
                 self.aggregate_equity_curve = pd.read_csv(
@@ -207,7 +194,6 @@ class MESFuturesLiveStrategy:
                     parse_dates=['Timestamp'],
                     index_col='Timestamp'
                 )
-                # Verify that the necessary columns exist
                 if not {'Equity'}.issubset(self.aggregate_equity_curve.columns):
                     logger.warning(f"Equity curve file {self.equity_curve_file} is missing required columns. Reinitializing.")
                     self.aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
@@ -227,36 +213,32 @@ class MESFuturesLiveStrategy:
             "winning_trades": 0,
             "losing_trades": 0,
             "total_pnl": 0.0,
-            "equity_curve": []  # List of dicts with 'Timestamp' and 'Equity'
+            "equity_curve": []
         }
-        logger.info("Initialized new aggregate performance data.")
+        logger.warning("Initialized new aggregate performance data.")
         self.aggregate_equity_curve = pd.DataFrame(columns=['Equity'])
 
     def save_performance(self):
         """Save aggregate performance to a JSON file and equity curve to a CSV."""
         try:
-            # Update equity_curve in aggregate_performance
             if not self.aggregate_equity_curve.empty:
                 latest_equity = self.aggregate_equity_curve['Equity'].iloc[-1]
                 timestamp = self.aggregate_equity_curve.index[-1].isoformat()
                 self.aggregate_performance['equity_curve'].append({"Timestamp": timestamp, "Equity": latest_equity})
 
-            # Save to JSON
             with open(self.performance_file, 'w') as f:
                 json.dump(self.aggregate_performance, f, indent=4)
 
-            # Save equity curve to CSV
             if not self.aggregate_equity_curve.empty:
                 self.aggregate_equity_curve.to_csv(self.equity_curve_file)
 
-            logger.info("Aggregate performance data saved successfully.")
+            logger.warning("Aggregate performance data saved successfully.")
         except Exception as e:
             logger.error(f"Failed to save performance data: {e}")
 
     def fetch_historical_data(self, duration='3 D', bar_size='15 mins'):
         """
-        (Optional) Fetch some historical data to initialize indicators if desired.
-        Adjust the logic if you want a warm-up for RSI, etc.
+        (Optional) Fetch historical data to initialize indicators if desired.
         """
         logger.warning("Fetching historical ES data for indicator initialization...")
         try:
@@ -282,19 +264,16 @@ class MESFuturesLiveStrategy:
                 df.index = pd.to_datetime(df.index).tz_convert('UTC')
 
             logger.warning(f"Fetched {len(df)} historical 15-minute ES bars for warm-up.")
-            # Optionally do a warm-up RSI / VWAP if needed
-            # ...
         except Exception as e:
             logger.error(f"Failed to fetch historical data: {e}")
 
     def subscribe_to_realtime_bars(self):
         """
         Subscribes to real-time 5-second bars for ES.
-        Ensures that the updateEvent handler is attached only once.
         """
-        logger.info("Requesting real-time 5-second bars for ES...")
+        logger.warning("Requesting real-time 5-second bars for ES...")
         try:
-            # If there's an existing ticker, unsubscribe first
+            # Unsubscribe previous subscription if exists
             if hasattr(self, 'ticker_5s') and self.ticker_5s is not None:
                 self.ticker_5s.updateEvent -= self.on_bar_update
                 self.ib.cancelHistoricalData(self.ticker_5s)
@@ -310,53 +289,47 @@ class MESFuturesLiveStrategy:
                 formatDate=1
             )
             self.ticker_5s.updateEvent += self.on_bar_update
-            logger.info("Real-time bar subscription set up.")
+            logger.warning("Real-time bar subscription set up.")
         except Exception as e:
             logger.error(f"Failed to subscribe to real-time bars: {e}")
 
-    def on_disconnect(self):
-        """
-        Handler for connection closed event. Schedules a reconnection attempt.
-        """
+    # -------------------------------------------------------------------------
+    # Callback to handle disconnections. Accept extra args to avoid errors.
+    def on_disconnect(self, *args):
         logger.warning("Disconnected from IBKR. Will try to reconnect in 5 seconds...")
-        # Schedule the reconnection attempt after 5 seconds (non-blocking)
         self.ib.schedule(5, self.try_reconnect)
 
     def try_reconnect(self):
         """
-        Attempts to reconnect to IBKR. If successful, re-qualifies contracts and resubscribes to real-time bars.
-        If it fails, schedules another attempt after 5 seconds.
+        Attempts to reconnect to IBKR, re-qualify contracts, and re-subscribe to real-time bars.
         """
         if not self.ib.isConnected():
-            logger.info("Attempting to reconnect to IBKR...")
+            logger.warning("Attempting to reconnect to IBKR...")
             try:
                 self.ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
-                logger.info("Reconnected to IBKR.")
+                logger.warning("Reconnected to IBKR.")
 
                 # Re-qualify contracts
                 qualified_contracts = self.ib.qualifyContracts(self.es_contract, self.mes_contract)
                 if not qualified_contracts:
                     raise ValueError("Failed to qualify contracts after reconnection.")
                 self.es_contract, self.mes_contract = qualified_contracts
-                logger.info(f"Re-qualified ES Contract: {self.es_contract}")
-                logger.info(f"Re-qualified MES Contract: {self.mes_contract}")
+                logger.warning(f"Re-qualified ES Contract: {self.es_contract}")
+                logger.warning(f"Re-qualified MES Contract: {self.mes_contract}")
+
+                # Optionally clear the old data buffer if needed
+                self.realtime_5s_data = []
 
                 # Resubscribe to real-time bars
                 self.subscribe_to_realtime_bars()
 
-                logger.info("Reconnection and resubscription successful.")
-
+                logger.warning("Reconnection and resubscription successful.")
             except Exception as e:
                 logger.error(f"Reconnection attempt failed: {e}. Scheduling another attempt in 5 seconds.")
-                # Schedule another reconnection attempt after 5 seconds
                 self.ib.schedule(5, self.try_reconnect)
 
     def on_reconnected(self):
-        """
-        Handler for successful reconnection. Can be used for logging or additional setup.
-        """
-        logger.info("Successfully reconnected to IBKR.")
-        # Additional actions can be placed here if needed
+        logger.warning("Successfully reconnected to IBKR.")
 
     def on_bar_update(self, bars: RealTimeBarList, hasNewBar: bool):
         with self.lock:
@@ -364,17 +337,15 @@ class MESFuturesLiveStrategy:
                 return
 
             for bar in bars:
-                # Convert bar.date to UTC
+                # Ensure bar.date is timezone-aware (UTC)
                 bar_time = bar.date
                 if bar_time.tzinfo is None:
                     bar_time = bar_time.replace(tzinfo=timezone.utc)
                 else:
                     bar_time = bar_time.astimezone(timezone.utc)
 
-                # Update the latest 5-second close price
                 self.latest_5s_close = bar.close
 
-                # Store the bar data
                 self.realtime_5s_data.append({
                     'date': bar_time,
                     'open': bar.open,
@@ -384,12 +355,11 @@ class MESFuturesLiveStrategy:
                     'volume': bar.volume
                 })
 
-            # Convert to DataFrame
+            # Convert to DataFrame and process for 15-minute bars
             df_5s = pd.DataFrame(self.realtime_5s_data)
             df_5s.set_index('date', inplace=True)
             df_5s.sort_index(inplace=True)
 
-            # Resample to 15-minute bars for indicators
             ohlc_15m = df_5s.resample('15min').agg({
                 'open': 'first',
                 'high': 'max',
@@ -401,44 +371,38 @@ class MESFuturesLiveStrategy:
             if len(ohlc_15m) < 1:
                 return
 
-            # Calculate RSI and VWAP
             ohlc_15m['RSI'] = rsi(ohlc_15m, period=self.rsi_period_15m)
             ohlc_15m['VWAP'] = vwap(ohlc_15m)
 
-            # Get the latest 15-minute indicators
             latest_bar_time = ohlc_15m.index[-1]
             latest_rsi      = ohlc_15m['RSI'].iloc[-1]
             latest_vwap     = ohlc_15m['VWAP'].iloc[-1]
 
-            # Use the latest 5-second close as current_price
             if self.latest_5s_close is not None:
                 current_price = self.latest_5s_close
                 self.apply_trading_logic(current_price, latest_vwap, latest_rsi, latest_bar_time)
             else:
                 logger.debug("Latest 5-second close price not available yet.")
 
-            # Update equity curve
             self.equity_curve.append({'Time': latest_bar_time.isoformat(), 'Equity': self.equity})
 
-            # Log RSI and VWAP periodically
             current_time = datetime.now(timezone.utc)
             if current_time >= self.last_log_time + timedelta(minutes=5):
-                logger.info(f"Periodic Update: Price: {current_price}, RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
+                logger.warning(f"Periodic Update: Price: {current_price}, RSI={latest_rsi:.2f}, VWAP={latest_vwap:.2f}")
                 self.last_log_time = current_time
 
     def apply_trading_logic(self, current_price, current_vwap, current_rsi, current_time):
         """
         Decide whether to place a new trade or not, based on RSI & VWAP.
         """
-        # Convert current_time to ET to check if within RTH
+        # Convert current_time to Eastern Time for RTH check
         current_time_et = current_time.astimezone(EASTERN).time()
         if not (RTH_START <= current_time_et <= RTH_END):
-            logger.info(f"Time {current_time_et} outside RTH. No trading action.")
+            logger.warning(f"Time {current_time_et} outside RTH. No trading action.")
             return
 
         logger.debug(f"Checking signals: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
 
-        # If no position and no pending order, consider new entries
         if self.position is None and not self.pending_order:
             # Long Entry Condition
             if (current_price > current_vwap) and (current_rsi > self.rsi_overbought):
@@ -455,7 +419,7 @@ class MESFuturesLiveStrategy:
 
     def place_bracket_order(self, action, current_price, current_time):
         """
-        Places a bracket (parent + take-profit + stop-loss) order using ib_insync's bracketOrder method correctly.
+        Places a bracket (parent + take-profit + stop-loss) order using ib_insync's bracketOrder method.
         """
         try:
             action = action.upper()
@@ -476,38 +440,31 @@ class MESFuturesLiveStrategy:
                 f"TP={take_profit_price:.2f}, SL={stop_loss_price:.2f}"
             )
 
-            # Correct usage of bracketOrder with limitPrice
             trades = self.ib.bracketOrder(
                 action=order_action,
                 quantity=self.position_size,
-                limitPrice=current_price,      # Parent is a limit order at current_price
+                limitPrice=current_price,
                 takeProfitPrice=take_profit_price,
                 stopLossPrice=stop_loss_price
             )
 
-            # Place the parent order and get the Trade object
             parent_trade = self.ib.placeOrder(self.mes_contract, trades[0])
-            logger.info(f"Placed Parent {trades[0].orderType} Order ID {trades[0].orderId} for {trades[0].action} at {trades[0].lmtPrice}")
-
-            # Attach event handlers to the parent Trade object
+            logger.warning(f"Placed Parent {trades[0].orderType} Order ID {trades[0].orderId} for {trades[0].action} at {trades[0].lmtPrice}")
             parent_trade.filledEvent += self.on_trade_filled
             parent_trade.statusEvent += self.on_order_status
 
-            # Place Take-Profit and Stop-Loss Orders and attach event handlers
             take_profit_trade = self.ib.placeOrder(self.mes_contract, trades[1])
-            logger.info(f"Placed Take-Profit {trades[1].orderType} Order ID {trades[1].orderId} for {trades[1].action} at {trades[1].lmtPrice}")
-
+            logger.warning(f"Placed Take-Profit {trades[1].orderType} Order ID {trades[1].orderId} for {trades[1].action} at {trades[1].lmtPrice}")
             take_profit_trade.filledEvent += self.on_trade_filled
             take_profit_trade.statusEvent += self.on_order_status
 
             stop_loss_trade = self.ib.placeOrder(self.mes_contract, trades[2])
-            logger.info(f"Placed Stop-Loss {trades[2].orderType} Order ID {trades[2].orderId} for {trades[2].action} at {trades[2].auxPrice}")
-
+            logger.warning(f"Placed Stop-Loss {trades[2].orderType} Order ID {trades[2].orderId} for {trades[2].action} at {trades[2].auxPrice}")
             stop_loss_trade.filledEvent += self.on_trade_filled
             stop_loss_trade.statusEvent += self.on_order_status
 
             self.pending_order = True
-            logger.info("Bracket order placed successfully and event handlers attached.")
+            logger.warning("Bracket order placed successfully and event handlers attached.")
 
         except Exception as e:
             logger.error(f"Failed to place bracket order: {e}")
@@ -515,7 +472,7 @@ class MESFuturesLiveStrategy:
 
     def on_trade_filled(self, trade):
         """
-        Callback for trade fill event.
+        Callback for trade fill events.
         """
         try:
             fill = trade.fills[-1]
@@ -526,7 +483,7 @@ class MESFuturesLiveStrategy:
 
             logger.debug(f"Trade Filled: {order_action} {fill_qty} @ {fill_price} on {fill_time}")
 
-            # Parent order fill => position entry
+            # Parent order fill -> position entry
             if trade.order.orderType == 'LIMIT' and not trade.order.parentId:
                 if order_action == 'BUY' and self.position is None:
                     self.position = 'LONG'
@@ -542,7 +499,7 @@ class MESFuturesLiveStrategy:
                         'Result': None,
                         'Profit': 0
                     })
-                    logger.info(f"Entered LONG @ {self.entry_price}")
+                    logger.warning(f"Entered LONG @ {self.entry_price}")
                 elif order_action == 'SELL' and self.position is None:
                     self.position = 'SHORT'
                     self.entry_price = fill_price
@@ -557,13 +514,12 @@ class MESFuturesLiveStrategy:
                         'Result': None,
                         'Profit': 0
                     })
-                    logger.info(f"Entered SHORT @ {self.entry_price}")
+                    logger.warning(f"Entered SHORT @ {self.entry_price}")
 
-            # Child order fill => position exit
+            # Child order fill -> position exit
             elif trade.order.orderType in ['TAKE_PROFIT_LIMIT', 'STOP']:
                 if self.position == 'LONG' and order_action == 'SELL':
-                    # Exiting a long
-                    pnl = (fill_price - self.entry_price) * self.position_size * self.contract_multiplier - 1.24  # Subtract commission if any
+                    pnl = (fill_price - self.entry_price) * self.position_size * self.contract_multiplier - 1.24
                     self.cash += pnl
                     self.equity += pnl
                     result = 'Take Profit' if fill_price >= self.take_profit else 'Stop Loss'
@@ -573,12 +529,11 @@ class MESFuturesLiveStrategy:
                         'Result': result,
                         'Profit': pnl
                     })
-                    logger.info(f"Exited LONG @ {fill_price} PnL=${pnl:.2f} ({result})")
+                    logger.warning(f"Exited LONG @ {fill_price} PnL=${pnl:.2f} ({result})")
                     self.position = None
 
                 elif self.position == 'SHORT' and order_action == 'BUY':
-                    # Exiting a short
-                    pnl = (self.entry_price - fill_price) * self.position_size * self.contract_multiplier - 1.24  # Subtract commission if any
+                    pnl = (self.entry_price - fill_price) * self.position_size * self.contract_multiplier - 1.24
                     self.cash += pnl
                     self.equity += pnl
                     result = 'Take Profit' if fill_price <= self.take_profit else 'Stop Loss'
@@ -588,22 +543,17 @@ class MESFuturesLiveStrategy:
                         'Result': result,
                         'Profit': pnl
                     })
-                    logger.info(f"Exited SHORT @ {fill_price} PnL=${pnl:.2f} ({result})")
+                    logger.warning(f"Exited SHORT @ {fill_price} PnL=${pnl:.2f} ({result})")
                     self.position = None
 
-            # If position is flattened, we can reset pending_order
             if self.position is None:
                 self.pending_order = False
 
-            # Track equity curve
             self.equity_curve.append({'Time': fill_time.isoformat(), 'Equity': self.equity})
 
-            # Update aggregate performance metrics
             if trade.order.orderType == 'LIMIT' and not trade.order.parentId:
-                # Entry doesn't affect performance yet
                 pass
             elif trade.order.orderType in ['TAKE_PROFIT_LIMIT', 'STOP']:
-                # Update performance
                 self.aggregate_performance["total_trades"] += 1
                 self.aggregate_performance["total_pnl"] += pnl
                 if pnl > 0:
@@ -611,12 +561,10 @@ class MESFuturesLiveStrategy:
                 else:
                     self.aggregate_performance["losing_trades"] += 1
 
-                # Update equity curve DataFrame
                 new_entry = pd.DataFrame({'Equity': [self.equity]}, index=[pd.to_datetime(fill_time.isoformat())])
                 if not new_entry.empty:
                     self.aggregate_equity_curve = pd.concat([self.aggregate_equity_curve, new_entry])
 
-                # Save performance after each trade
                 self.save_performance()
 
         except Exception as e:
@@ -629,10 +577,8 @@ class MESFuturesLiveStrategy:
         try:
             logger.debug(f"Order Status: ID={trade.order.orderId}, Status={trade.orderStatus.status}")
             if trade.orderStatus.status in ['Cancelled', 'Inactive', 'Filled']:
-                # If parent order is cancelled, reset
                 if trade.order.orderType == 'LIMIT' and not trade.order.parentId and self.position is None:
                     logger.warning(f"Parent order {trade.order.orderId} cancelled or inactive, no position entered.")
-                # We can reset pending_order if there's no position
                 if self.position is None:
                     self.pending_order = False
         except Exception as e:
@@ -641,22 +587,17 @@ class MESFuturesLiveStrategy:
     def run(self):
         """
         Runs the strategy:
-          1) Optionally fetch some historical data for warmup
-          2) Subscribe to 5-second real-time bars
-          3) Start the IB event loop
+          1) Optionally fetch historical data for warmup.
+          2) Subscribe to 5-second real-time bars.
+          3) Start the IB event loop.
         """
-        # Optional: warm up indicators
         self.fetch_historical_data(duration='3 D', bar_size='15 mins')
-
-        # Request live 5-second bars
         self.subscribe_to_realtime_bars()
 
-        # --- New Code to Log RSI and VWAP at Startup ---
-        # Wait briefly to ensure some data is received
+        # Log initial RSI and VWAP after waiting briefly for data
         import time as time_module
-        time_module.sleep(5)  # Sleep for 5 seconds
+        time_module.sleep(5)
 
-        # If there are already 15-minute bars, calculate and log initial RSI and VWAP
         if self.realtime_5s_data:
             df_initial = pd.DataFrame(self.realtime_5s_data)
             df_initial.set_index('date', inplace=True)
@@ -677,19 +618,16 @@ class MESFuturesLiveStrategy:
                 latest_rsi_initial = ohlc_initial['RSI'].iloc[-1]
                 latest_vwap_initial = ohlc_initial['VWAP'].iloc[-1]
 
-                logger.info(f"Initial Indicators: RSI={latest_rsi_initial:.2f}, VWAP={latest_vwap_initial:.2f}")
-        # --- End of New Code ---
+                logger.warning(f"Initial Indicators: RSI={latest_rsi_initial:.2f}, VWAP={latest_vwap_initial:.2f}")
 
-        logger.info("Starting IB event loop. Press Ctrl+C to exit.")
+        logger.warning("Starting IB event loop. Press Ctrl+C to exit.")
         try:
             self.ib.run()
         except KeyboardInterrupt:
-            logger.info("KeyboardInterrupt received, shutting down...")
+            logger.warning("KeyboardInterrupt received, shutting down...")
         except Exception as e:
             logger.error(f"Exception in IB event loop: {e}")
         finally:
-            if self.equity_curve:
-                self.plot_equity_curve()
             logger.debug(f"Final Equity: ${self.equity:.2f}")
             if self.trade_log:
                 trade_df = pd.DataFrame(self.trade_log)
@@ -697,29 +635,7 @@ class MESFuturesLiveStrategy:
             else:
                 logger.debug("No trades were executed.")
             self.ib.disconnect()
-            logger.info("Disconnected from IBKR.")
-
-    def plot_equity_curve(self):
-        """
-        Plots the equity curve using matplotlib.
-        """
-        import matplotlib.pyplot as plt
-
-        if not self.equity_curve:
-            logger.warning("No equity data to plot.")
-            return
-
-        df_equity = pd.DataFrame(self.equity_curve)
-        df_equity['Time'] = pd.to_datetime(df_equity['Time'])
-        df_equity.set_index('Time', inplace=True)
-        plt.figure(figsize=(10, 6))
-        plt.plot(df_equity.index, df_equity['Equity'], label='Equity Curve')
-        plt.xlabel('Time')
-        plt.ylabel('Equity ($)')
-        plt.title('Equity Curve')
-        plt.legend()
-        plt.grid(True)
-        plt.show()
+            logger.warning("Disconnected from IBKR.")
 
 
 # -----------------------------------------------------------------------------
@@ -729,7 +645,7 @@ if __name__ == "__main__":
     ib = IB()
     try:
         ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
-        logger.info("Connected to IBKR.")
+        logger.warning("Connected to IBKR.")
     except Exception as e:
         logger.error(f"Failed to connect to IBKR: {e}")
         sys.exit(1)
@@ -754,8 +670,8 @@ if __name__ == "__main__":
         if not qualified_contracts or len(qualified_contracts) < 2:
             raise ValueError("Failed to qualify contracts.")
         es_contract, mes_contract = qualified_contracts
-        logger.info(f"Qualified ES Contract: {es_contract}")
-        logger.info(f"Qualified MES Contract: {mes_contract}")
+        logger.warning(f"Qualified ES Contract: {es_contract}")
+        logger.warning(f"Qualified MES Contract: {mes_contract}")
     except Exception as e:
         logger.error(f"Error qualifying contracts: {e}")
         ib.disconnect()
