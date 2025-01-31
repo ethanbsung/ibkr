@@ -358,13 +358,11 @@ class MESFuturesLiveStrategy:
         if self.position is None and not self.pending_order:
             # Long Entry Condition
             if (current_price > current_vwap) and (current_rsi > self.rsi_overbought):
-                logger.warning("Signal: Enter LONG")
-                logger.info(f"Current price: {current_price}")
+                logger.warning(f"Signal: Enter LONG at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
                 self.place_bracket_order('BUY', current_price, current_time)
             # Short Entry Condition
             elif (current_price < current_vwap) and (current_rsi < self.rsi_oversold):
-                logger.debug("Signal: Enter SHORT")
-                logger.info(f"Current price: {current_price}")
+                logger.warning(f"Signal: Enter SHORT at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
                 self.place_bracket_order('SELL', current_price, current_time)
             else:
                 logger.debug("No entry signal detected.")
@@ -394,10 +392,11 @@ class MESFuturesLiveStrategy:
                 f"TP={take_profit_price:.2f}, SL={stop_loss_price:.2f}"
             )
 
-            # Correct usage of bracketOrder
+            # Correct usage of bracketOrder with limitPrice
             trades = self.ib.bracketOrder(
                 action=order_action,
                 quantity=self.position_size,
+                limitPrice=current_price,  # Added limitPrice to fix the error
                 takeProfitPrice=take_profit_price,
                 stopLossPrice=stop_loss_price
             )
