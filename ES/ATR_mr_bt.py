@@ -20,10 +20,9 @@ INITIAL_CASH = 5000          # Starting cash
 POSITION_SIZE = 1            # Number of MES contracts per trade
 CONTRACT_MULTIPLIER = 5      # Contract multiplier for MES
 
-BOLLINGER_PERIOD = 15
-BOLLINGER_STDDEV = 2
-STOP_LOSS_DISTANCE = 5       # Points away from entry
-TAKE_PROFIT_DISTANCE = 10    # Points away from entry
+# Parameters for ATR and Mean Reversion
+ATR_PERIOD = 14              # ATR period (in bars)
+ATR_THRESHOLD_MULTIPLIER = 2 # Trade when price is 1 ATR away from VWAP
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -37,12 +36,6 @@ logger = logging.getLogger()
 def filter_rth(df):
     """
     Filters the DataFrame to include only Regular Trading Hours (09:30 - 16:00 ET) on weekdays.
-
-    Parameters:
-        df (pd.DataFrame): The input DataFrame with a timezone-aware datetime index.
-
-    Returns:
-        pd.DataFrame: The filtered DataFrame containing only RTH data.
     """
     eastern = pytz.timezone('US/Eastern')
 
@@ -62,12 +55,6 @@ def filter_rth(df):
 def load_data(csv_file):
     """
     Loads CSV data into a pandas DataFrame with appropriate data types and datetime parsing.
-
-    Parameters:
-        csv_file (str): Path to the CSV file.
-
-    Returns:
-        pd.DataFrame: Loaded and indexed DataFrame.
     """
     try:
         converters = {
@@ -144,47 +131,6 @@ def load_data(csv_file):
         logger.error(f"An error occurred while reading the CSV '{csv_file}': {e}")
         sys.exit(1)
 
-# --- Vectorized Exit Evaluation Function ---
-def evaluate_exit_vectorized(position_type, entry_price, stop_loss, take_profit, df_high_freq, entry_time):
-    """
-    Determines the exit price and time using vectorized operations.
-
-    Parameters:
-        position_type (str): 'long'
-        entry_price (float): Entry price
-        stop_loss (float): Stop-loss price
-        take_profit (float): Take-profit price
-        df_high_freq (pd.DataFrame): 1-minute high-frequency data
-        entry_time (pd.Timestamp): Timestamp of entry
-
-    Returns:
-        tuple: (exit_price, exit_time, hit_take_profit) or (None, None, None)
-    """
-    df_period = df_high_freq.loc[entry_time:]
-    if df_period.empty:
-        return None, None, None
-
-    max_valid_timestamp = pd.Timestamp('2262-04-11 23:47:16.854775807', tz='UTC')
-
-    if position_type == 'long':
-        hit_sl = df_period[df_period['low'] <= stop_loss]
-        hit_tp = df_period[df_period['high'] >= take_profit]
-        first_sl = hit_sl.index.min() if not hit_sl.empty else max_valid_timestamp
-        first_tp = hit_tp.index.min() if not hit_tp.empty else max_valid_timestamp
-
-        if first_sl < first_tp:
-            return stop_loss, first_sl, False
-        elif first_tp < first_sl:
-            return take_profit, first_tp, True
-        elif first_sl == first_tp and first_sl != max_valid_timestamp:
-            row = df_period.loc[first_sl]
-            if row['open'] <= stop_loss:
-                return stop_loss, first_sl, False
-            else:
-                return take_profit, first_sl, True
-
-    return None, None, None
-
 # --- Load Datasets ---
 csv_file_1m = 'Data/es_1m_data.csv'
 csv_file_30m = 'Data/es_30m_data.csv'
@@ -205,7 +151,6 @@ else:
     logger.debug("Converted 1-Minute data to UTC.")
 
 # --- Shift 1-Minute Data Timestamps Forward by 30 Minutes ---
-# This aligns the 1-minute candle timestamps with the 30-minute bar timestamps
 df_1m.index = df_1m.index - pd.Timedelta(minutes=30)
 logger.info("Shifted 1-Minute data timestamps forward by 30 minutes for alignment.")
 
@@ -258,76 +203,56 @@ if df_30m_full.empty:
     logger.error("No 30-minute data available for the specified backtest period. Exiting.")
     sys.exit(1)
 
-# --- Calculate Bollinger Bands on Full 30m Data (Including Extended Hours) ---
-logger.info("Calculating Bollinger Bands on full 30-minute data (including extended hours)...")
-df_30m_full['ma'] = df_30m_full['close'].rolling(window=BOLLINGER_PERIOD, min_periods=BOLLINGER_PERIOD).mean()
-df_30m_full['std'] = df_30m_full['close'].rolling(window=BOLLINGER_PERIOD, min_periods=BOLLINGER_PERIOD).std()
-df_30m_full['upper_band'] = df_30m_full['ma'] + (BOLLINGER_STDDEV * df_30m_full['std'])
-df_30m_full['lower_band'] = df_30m_full['ma'] - (BOLLINGER_STDDEV * df_30m_full['std'])
-
-num_ma_nans = df_30m_full['ma'].isna().sum()
-num_std_nans = df_30m_full['std'].isna().sum()
-logger.info(f"'ma' column has {num_ma_nans} NaN values after rolling calculation.")
-logger.info(f"'std' column has {num_std_nans} NaN values after rolling calculation.")
-
-df_30m_full.dropna(subset=['ma', 'std', 'upper_band', 'lower_band'], inplace=True)
-logger.info(f"After Bollinger Bands calculation, 30-Minute Full Data Points: {len(df_30m_full)}")
-
-if df_30m_full.empty:
-    logger.error("All 30-minute data points were removed after Bollinger Bands calculation. Exiting.")
-    sys.exit(1)
-
-# --- Load Daily Data for 50 SMA Calculation ---
-logger.info("Loading daily dataset for SMA calculation...")
-df_daily = load_data(csv_file_daily)
-logger.info("Daily dataset loaded successfully.")
-
-# --- Localize Daily Data ---
-if df_daily.index.tz is None:
-    df_daily = df_daily.tz_localize(eastern).tz_convert('UTC')
-    logger.debug("Localized daily data to US/Eastern and converted to UTC.")
-else:
-    df_daily = df_daily.tz_convert('UTC')
-    logger.debug("Converted daily data to UTC.")
-
-# --- Slice Daily Data to Backtest Period ---
-df_daily = df_daily.loc[start_time:end_time]
-
-# --- Convert Daily Data Index to Date and Calculate 50 SMA ---
-df_daily.index = df_daily.index.date
-df_daily['50SMA'] = df_daily['close'].rolling(window=50, min_periods=50).mean()
-daily_sma_mapping = df_daily['50SMA'].to_dict()
-
-# --- Filter RTH Data Separately for Trade Execution ---
+# --- Calculate ATR and VWAP on 30m RTH Data ---
 logger.info("Applying RTH filter to 30-minute data for trade execution...")
 df_30m_rth = filter_rth(df_30m_full)
 logger.info(f"30-Minute RTH Data Points after Filtering: {len(df_30m_rth)}")
 
-# Map daily 50 SMA values onto the 30-minute RTH data using the date component of the timestamp
+# Create a 'date' column for grouping (if not already present)
 df_30m_rth = df_30m_rth.copy()
 df_30m_rth['date'] = df_30m_rth.index.date
-df_30m_rth['daily_50SMA'] = df_30m_rth['date'].map(daily_sma_mapping)
 
-if df_30m_rth.empty:
-    logger.warning("No 30-minute RTH data points after filtering. Exiting backtest.")
-    sys.exit(1)
+# -- Compute ATR on 30m RTH Data --
+df_30m_rth['prev_close'] = df_30m_rth['close'].shift(1)
+df_30m_rth['tr'] = df_30m_rth.apply(
+    lambda row: max(
+        row['high'] - row['low'],
+        abs(row['high'] - row['prev_close']) if pd.notnull(row['prev_close']) else 0,
+        abs(row['low'] - row['prev_close']) if pd.notnull(row['prev_close']) else 0
+    ),
+    axis=1
+)
+df_30m_rth['atr'] = df_30m_rth['tr'].rolling(window=ATR_PERIOD, min_periods=ATR_PERIOD).mean()
 
-logger.info("RTH filtering applied to 30-minute data for trade execution.")
+# -- Compute Intraday VWAP on 30m RTH Data --
+# Use typical price = (high + low + close) / 3
+df_30m_rth['typical_price'] = (df_30m_rth['high'] + df_30m_rth['low'] + df_30m_rth['close']) / 3
+df_30m_rth['cum_vwap_numer'] = df_30m_rth['typical_price'] * df_30m_rth['volume']
+df_30m_rth['cum_vwap_denom'] = df_30m_rth['volume']
+df_30m_rth['cum_vwap_numer'] = df_30m_rth.groupby('date')['cum_vwap_numer'].cumsum()
+df_30m_rth['cum_vwap_denom'] = df_30m_rth.groupby('date')['cum_vwap_denom'].cumsum()
+df_30m_rth['vwap'] = df_30m_rth['cum_vwap_numer'] / df_30m_rth['cum_vwap_denom']
 
+# Ensure there are no missing values for our indicators
+df_30m_rth.dropna(subset=['atr', 'vwap'], inplace=True)
+logger.info(f"30-Minute RTH Data Points after computing ATR and VWAP: {len(df_30m_rth)}")
+
+# --- Print Summary of Key Data ---
 print(f"\nBacktesting from {start_time.strftime('%Y-%m-%d')} to {end_time.strftime('%Y-%m-%d')}")
 print(f"1-Minute Data Points after Filtering: {len(df_1m)}")
 print(f"30-Minute Full Data Points after Slicing: {len(df_30m_full)}")
-print(f"30-Minute RTH Data Points after RTH Filtering: {len(df_30m_rth)}")
+print(f"30-Minute RTH Data Points after RTH Filtering and Indicator Calculation: {len(df_30m_rth)}")
 
 # --- Initialize Backtest Variables ---
 position_size = 0
 entry_price = None
-position_type = None  # Only 'long' will be used
+position_type = None  # 'long' or 'short'
 cash = INITIAL_CASH
 trade_results = []
-balance_series = []  # Initialize as an empty list to store balance at each bar
+balance_series = []  # To store account balance over time
 exposure_bars = 0
 
+# High-frequency data remains for other purposes (if needed)
 df_high_freq = df_1m.sort_index()
 df_high_freq = df_high_freq.astype({
     'open': 'float32',
@@ -339,54 +264,69 @@ df_high_freq = df_high_freq.astype({
     'barCount': 'int32'
 })
 
-# --- Backtesting Loop ---
-logger.info("Starting backtesting loop (Long Only Strategy)...")
+# --- Backtesting Loop with Mean Reversion Entry/Exit ---
+logger.info("Starting backtesting loop with Mean Reversion (VWAP + ATR) strategy...")
 for i, current_time in enumerate(df_30m_rth.index):
     current_bar = df_30m_rth.loc[current_time]
     current_price = current_bar['close']
-    daily_sma = current_bar['daily_50SMA']
+    current_vwap = current_bar['vwap']
+    current_atr = current_bar['atr']
 
     if position_size != 0:
         exposure_bars += 1
 
-    # Only consider entries if flat and if daily SMA is available (non-NaN)
-    if position_size == 0 and not pd.isna(daily_sma):
-        # Entry conditions: current price is below the lower Bollinger band and above the daily 50 SMA
-        lower_band = df_30m_full.loc[current_time, 'lower_band']
-        if current_price < lower_band and current_price > daily_sma:
-            position_size = POSITION_SIZE
-            entry_price = current_price
-            position_type = 'long'
-            stop_loss_price = entry_price - STOP_LOSS_DISTANCE
-            take_profit_price = entry_price + TAKE_PROFIT_DISTANCE
-            entry_time = current_time
-            logger.debug(f"Entered LONG at {entry_price} on {entry_time} UTC | Daily 50SMA: {daily_sma}")
+    # Check for entries only when not in a position
+    if position_size == 0:
+        # Ensure the indicator values are available
+        if pd.notna(current_atr) and pd.notna(current_vwap):
+            # Calculate the threshold (1 ATR away from VWAP)
+            atr_threshold = current_atr * ATR_THRESHOLD_MULTIPLIER
 
+            # Entry Conditions:
+            #   - If price is below VWAP by at least 1 ATR, then go LONG (expect reversion upward)
+            #   - If price is above VWAP by at least 1 ATR, then go SHORT (expect reversion downward)
+            if current_price <= current_vwap - atr_threshold:
+                position_size = POSITION_SIZE
+                entry_price = current_price
+                position_type = 'long'
+                entry_time = current_time
+                logger.debug(f"Entered LONG at {entry_price:.2f} on {entry_time} UTC | VWAP: {current_vwap:.2f}, ATR: {current_atr:.2f}")
+            elif current_price >= current_vwap + atr_threshold:
+                position_size = POSITION_SIZE
+                entry_price = current_price
+                position_type = 'short'
+                entry_time = current_time
+                logger.debug(f"Entered SHORT at {entry_price:.2f} on {entry_time} UTC | VWAP: {current_vwap:.2f}, ATR: {current_atr:.2f}")
+
+    # Exit Conditions (Check if we are in a position)
     elif position_size != 0:
-        exit_price, exit_time, hit_tp = evaluate_exit_vectorized(
-            position_type,
-            entry_price,
-            stop_loss_price,
-            take_profit_price,
-            df_high_freq,
-            entry_time
-        )
+        # For a LONG position: exit when price crosses (or equals) the VWAP from below
+        # For a SHORT position: exit when price crosses (or equals) the VWAP from above
+        exit_trade = False
+        if position_type == 'long' and current_price >= current_vwap:
+            exit_trade = True
+        elif position_type == 'short' and current_price <= current_vwap:
+            exit_trade = True
 
-        if exit_price is not None and exit_time is not None:
-            # Calculate profit and loss (P&L) for the long position
-            pnl = ((exit_price - entry_price) * CONTRACT_MULTIPLIER * position_size) - (0.62 * 2)
+        if exit_trade:
+            exit_price = current_price
+            exit_time = current_time
+            # Calculate P&L
+            if position_type == 'long':
+                pnl = ((exit_price - entry_price) * CONTRACT_MULTIPLIER * position_size)
+            elif position_type == 'short':
+                pnl = ((entry_price - exit_price) * CONTRACT_MULTIPLIER * position_size)
+            # Subtract commissions if needed (example: 0.62 per leg)
+            pnl -= (0.62 * 2)
             trade_results.append(pnl)
             cash += pnl
 
-            exit_type = "TAKE PROFIT" if hit_tp else "STOP LOSS"
-            logger.debug(f"Exited LONG at {exit_price} on {exit_time} UTC via {exit_type} for P&L: ${pnl:.2f}")
+            logger.debug(f"Exited {position_type.upper()} at {exit_price:.2f} on {exit_time} UTC for P&L: ${pnl:.2f}")
 
             # Reset position variables
             position_size = 0
             position_type = None
             entry_price = None
-            stop_loss_price = None
-            take_profit_price = None
             entry_time = None
 
     balance_series.append(cash)
@@ -398,7 +338,7 @@ del df_high_freq
 gc.collect()
 logger.info("Backtesting loop completed.")
 
-# --- Post-Backtest Calculations ---
+# --- Post-Backtest Calculations (same as before) ---
 balance_series = pd.Series(balance_series, index=df_30m_rth.index)
 total_return_percentage = ((cash - INITIAL_CASH) / INITIAL_CASH) * 100
 trading_days = max((df_30m_full.index.max() - df_30m_full.index.min()).days, 1)

@@ -18,7 +18,7 @@ INITIAL_CAPITAL = 5000             # Starting cash in USD
 POSITION_SIZE = 1                  # Number of contracts per trade
 CONTRACT_MULTIPLIER = 5            # Contract multiplier for MES
 
-TIMEFRAME = '1min'                 # 1‑minute bars for the main loop
+TIMEFRAME = '5 secs'               # Use 5‑second bars instead of 1‑minute bars
 STOP_LOSS_POINTS = 9               # Stop loss in points
 TAKE_PROFIT_POINTS = 10            # Take profit in points
 
@@ -26,7 +26,7 @@ COMMISSION = 0.62                  # Commission per trade (entry or exit)
 SLIPPAGE = 1                       # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2024-12-20'          # Format: 'YYYY-MM-DD'
+START_DATE = '2025-01-01'          # Format: 'YYYY-MM-DD'
 END_DATE = '2025-02-01'            # Format: 'YYYY-MM-DD'
 
 # IBKR Connection Parameters
@@ -56,7 +56,7 @@ def fetch_ibkr_data(ib, contract, bar_size, start_time, end_time, useRTH=False):
     Parameters:
       - ib: an active IB instance.
       - contract: an IBKR contract (e.g. Future with localSymbol 'ESH5')
-      - bar_size: string for the bar size (e.g. '1 min')
+      - bar_size: string for the bar size (e.g. '5 secs')
       - start_time: pd.Timestamp (tz-aware) for the start of data.
       - end_time: pd.Timestamp (tz-aware) for the end of data.
       - useRTH: Boolean; if True then only Regular Trading Hours are returned.
@@ -69,6 +69,8 @@ def fetch_ibkr_data(ib, contract, bar_size, start_time, end_time, useRTH=False):
         max_chunk = pd.Timedelta(days=7)  # For 1‑min bars, IBKR may allow about 7 days.
     elif bar_size == '30 mins':
         max_chunk = pd.Timedelta(days=365)
+    elif bar_size == '5 secs':
+        max_chunk = pd.Timedelta(days=1)  # IBKR typically limits sub‑minute bars to a shorter duration (here 1 day)
     else:
         max_chunk = pd.Timedelta(days=30)
     
@@ -225,11 +227,11 @@ class MESFuturesBacktest:
             logger.error(f"Could not connect to IBKR: {e}")
             sys.exit(1)
 
-        # Use the new function to fetch 1‑minute data.
+        # Use the new function to fetch 5‑second data.
         df_bars = fetch_ibkr_data(
             ib,
             contract,
-            bar_size="1 min",
+            bar_size=self.timeframe,  # now "5 secs"
             start_time=self.start_date,
             end_time=self.end_date,
             useRTH=False
@@ -256,7 +258,7 @@ class MESFuturesBacktest:
 
     def prepare_data(self):
         """
-        Prepare 1‑minute data by marking RTH, resampling if needed, calculating VWAP,
+        Prepare 5‑second data by marking RTH, resampling if needed, calculating VWAP,
         and computing 15‑minute RSI.
         """
         logger.info("Preparing data for backtest...")
@@ -269,7 +271,7 @@ class MESFuturesBacktest:
         logger.info(f"Filtered data from {self.start_date.date()} to {self.end_date.date()}. Points: {len(self.data)}")
         self.data.sort_index(inplace=True)
 
-        # Resample to the chosen timeframe (for 1‑min bars this is a no‑op).
+        # Resample to the chosen timeframe (for 5‑second bars this is a no‑op if already in that frequency).
         logger.info(f"Resampling data to {self.timeframe} bars if needed...")
         self.data_prepared = self.data.resample(self.timeframe).agg({
             'open': 'first',
@@ -285,8 +287,8 @@ class MESFuturesBacktest:
         }).dropna()
         logger.info(f"Resampled data: {len(self.data_prepared)} bars.")
 
-        # Compute VWAP on the 1‑minute data.
-        logger.info("Calculating 1‑minute VWAP (reset daily)...")
+        # Compute VWAP on the 5‑second data.
+        logger.info("Calculating 5‑second VWAP (reset daily)...")
         self.data_prepared['vwap'] = calculate_vwap(self.data_prepared)
         logger.info("Finished calculating VWAP.")
 
@@ -302,8 +304,8 @@ class MESFuturesBacktest:
         bars_15m['RSI'] = rsi(bars_15m, period=self.rsi_period)
         logger.info("Finished calculating 15‑minute RSI.")
 
-        # Align the 15‑minute RSI with the 1‑minute bars.
-        logger.info("Aligning 15‑minute RSI with 1‑minute data...")
+        # Align the 15‑minute RSI with the 5‑second bars.
+        logger.info("Aligning 15‑minute RSI with 5‑second data...")
         self.data_prepared['RSI'] = bars_15m['RSI'].reindex(self.data_prepared.index, method='ffill')
         self.data_prepared['RSI'].fillna(method='bfill', inplace=True)
         logger.info("Data preparation complete.")
@@ -318,7 +320,7 @@ class MESFuturesBacktest:
             return 0
 
     def run_backtest(self):
-        """Iterate over each 1‑minute bar and apply the trading logic."""
+        """Iterate over each 5‑second bar and apply the trading logic."""
         logger.info("Starting backtest execution...")
         times = self.data_prepared.index.to_numpy()
         closes = self.data_prepared['close'].to_numpy()
@@ -342,13 +344,13 @@ class MESFuturesBacktest:
                 if self.position is None:
                     if is_rth:
                         if price > vwap and rsi_value > 70:
-                            self.enter_position('long', price, current_idx)
+                            self.enter_position('long', price, current_idx, vwap, rsi_value)
                         elif price < vwap and rsi_value < 30:
-                            self.enter_position('short', price, current_idx)
+                            self.enter_position('short', price, current_idx, vwap, rsi_value)
                 else:
                     exit_info = self.check_exit_conditions(price, high, low, current_idx)
                     if exit_info:
-                        self.exit_position(exit_info, current_idx)
+                        self.exit_position(exit_info, current_idx, vwap, rsi_value)
 
             # Update equity curve.
             unrealized_pnl = self.get_unrealized_pnl(price)
@@ -363,7 +365,7 @@ class MESFuturesBacktest:
 
         logger.info("Backtest execution completed.")
 
-    def enter_position(self, position_type, price, current_idx):
+    def enter_position(self, position_type, price, current_idx, vwap, rsi_value):
         """Enter a long or short position."""
         self.position = position_type
         if position_type == 'long':
@@ -377,17 +379,25 @@ class MESFuturesBacktest:
 
         self.cash -= self.commission
         self.equity -= self.commission  # Deduct commission immediately.
+        # Log additional entry details: VWAP and RSI.
         self.trade_log.append({
             'Type': position_type.capitalize(),
             'Entry Time': current_idx,
             'Entry Price': self.entry_price,
+            'Entry VWAP': vwap,
+            'Entry RSI': rsi_value,
             'Exit Time': None,
             'Exit Price': None,
+            'Exit VWAP': None,
+            'Exit RSI': None,
             'Result': None,
             'Profit': 0
         })
         self.exposed_bars += 1
-        logger.debug(f"{position_type.capitalize()} entered at {self.entry_price} on {current_idx}")
+        msg = (f"Trade Entry: {position_type.capitalize()} at {self.entry_price:.2f} on {current_idx}. "
+               f"Price: {price:.2f}, VWAP: {vwap:.2f}, RSI: {rsi_value:.2f}")
+        logger.info(msg)
+        print(msg)
 
     def check_exit_conditions(self, price, high, low, current_idx):
         """Check if exit conditions are met for the current position."""
@@ -413,7 +423,7 @@ class MESFuturesBacktest:
                 return {'result': 'Stop Loss', 'price': self.stop_loss}
         return None
 
-    def exit_position(self, exit_info, current_idx):
+    def exit_position(self, exit_info, current_idx, vwap, rsi_value):
         """Exit the open position."""
         result = exit_info['result']
         exit_price = exit_info['price']
@@ -426,14 +436,20 @@ class MESFuturesBacktest:
         self.cash += pnl
         self.equity += pnl
 
+        # Update the last trade log with exit details including VWAP and RSI at exit.
         self.trade_log[-1].update({
             'Exit Time': current_idx,
             'Exit Price': exit_price,
+            'Exit VWAP': vwap,
+            'Exit RSI': rsi_value,
             'Result': result,
             'Profit': pnl
         })
 
-        logger.debug(f"{self.position.capitalize()} exited with {result} at {exit_price} on {current_idx} (Profit: {pnl})")
+        msg = (f"Trade Exit: {self.trade_log[-1]['Type']} exit at {exit_price:.2f} on {current_idx}. "
+               f"VWAP: {vwap:.2f}, RSI: {rsi_value:.2f}. Result: {result}. Profit: {pnl:.2f}")
+        logger.info(msg)
+        print(msg)
 
         # Reset position.
         self.position = None
@@ -562,11 +578,11 @@ class MESFuturesBacktest:
         plt.tight_layout()
         plt.show()
 
-        # Plot Price and VWAP from the 1‑min data.
+        # Plot Price and VWAP from the 5‑second data.
         plt.figure(figsize=(14, 7))
         plt.plot(self.data_prepared.index, self.data_prepared['close'], label='Close Price')
         plt.plot(self.data_prepared.index, self.data_prepared['vwap'], label='VWAP', linestyle='--')
-        plt.title('Price vs 1‑min VWAP')
+        plt.title('Price vs 5‑second VWAP')
         plt.xlabel('Time')
         plt.ylabel('Price ($)')
         plt.legend()
