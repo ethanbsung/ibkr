@@ -6,28 +6,36 @@ import pytz
 import logging
 import sys
 import gc
+import time
+import calendar
+
+# --- IBKR API Imports ---
+from ib_insync import *
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host
 IB_PORT = 7497               # IBKR Gateway/TWS paper trading port
 CLIENT_ID = 2                # Unique client ID (ensure it's different from other scripts)
-EXEC_SYMBOL = 'MES'          # Micro E-mini S&P 500 for execution
-EXEC_EXPIRY = '202503'       # March 2025
-EXEC_EXCHANGE = 'CME'        # Exchange for MES
+
+# Instrument to backtest (for example, ES for the E-mini S&P 500)
+EXEC_SYMBOL = 'ES'
+EXEC_EXCHANGE = 'CME'        # Exchange for the futures
 CURRENCY = 'USD'
 
 INITIAL_CASH = 5000          # Starting cash
-POSITION_SIZE = 1            # Number of MES contracts per trade
-CONTRACT_MULTIPLIER = 5      # Contract multiplier for MES
+POSITION_SIZE = 1            # Number of contracts per trade
+CONTRACT_MULTIPLIER = 50     # For ES the multiplier is 50
 
 BOLLINGER_PERIOD = 15
 BOLLINGER_STDDEV = 2
 STOP_LOSS_DISTANCE = 5       # Points away from entry
 TAKE_PROFIT_DISTANCE = 10    # Points away from entry
 
+ROLL_DAYS = 3  # Number of days before expiry to roll the contract
+
 # --- Setup Logging ---
 logging.basicConfig(
-    level=logging.WARNING,  # Set to WARNING to reduce logging verbosity during backtest
+    level=logging.INFO,  # or DEBUG as needed
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
@@ -37,158 +45,106 @@ logger = logging.getLogger()
 def filter_rth(df):
     """
     Filters the DataFrame to include only Regular Trading Hours (09:30 - 16:00 ET) on weekdays.
-
-    Parameters:
-        df (pd.DataFrame): The input DataFrame with a timezone-aware datetime index.
-
-    Returns:
-        pd.DataFrame: The filtered DataFrame containing only RTH data.
+    Assumes the DataFrame index is a timezone-aware datetime.
     """
     eastern = pytz.timezone('US/Eastern')
-
     if df.index.tz is None:
         df = df.tz_localize(eastern)
         logger.debug("Localized naive datetime index to US/Eastern.")
     else:
         df = df.tz_convert(eastern)
         logger.debug("Converted timezone-aware datetime index to US/Eastern.")
-
     df_eastern = df[df.index.weekday < 5]
     df_rth = df_eastern.between_time('09:30', '16:00')
     df_rth = df_rth.tz_convert('UTC')
     return df_rth
 
-# --- Function to Load Data ---
-def load_data(csv_file):
+def fetch_ibkr_data(ib, contract, bar_size, start_time, end_time, useRTH=False):
     """
-    Loads CSV data into a pandas DataFrame with appropriate data types and datetime parsing.
-
-    Parameters:
-        csv_file (str): Path to the CSV file.
-
-    Returns:
-        pd.DataFrame: Loaded and indexed DataFrame.
+    Fetch historical data from IBKR using ib_insync over the specified time range.
+    Data is fetched in chunks to satisfy IBKR’s limits.
     """
-    try:
-        converters = {
-            '%Chg': lambda x: float(x.strip('%')) if isinstance(x, str) else np.nan
-        }
-
-        df = pd.read_csv(
-            csv_file,
-            dtype={
-                'Symbol': str,
-                'Open': float,
-                'High': float,
-                'Low': float,
-                'Last': float,
-                'Change': float,
-                'Volume': float,
-                'Open Int': float
-            },
-            parse_dates=['Time'],
-            converters=converters
+    # Set maximum chunk duration based on bar size.
+    if bar_size == '1 min':
+        max_chunk = pd.Timedelta(days=7)  # IBKR limit for 1-min bars is about 7 days.
+    elif bar_size == '30 mins':
+        max_chunk = pd.Timedelta(days=365)  # 30-min bars allow for a longer duration.
+    else:
+        max_chunk = pd.Timedelta(days=30)
+    
+    current_end = end_time
+    all_bars = []
+    while current_end > start_time:
+        current_start = max(start_time, current_end - max_chunk)
+        delta = current_end - current_start
+        # Instead of using hours ("H"), use days ("D").
+        if delta < pd.Timedelta(days=1):
+            # For durations less than one day, request 1 day.
+            duration_str = "1 D"
+        else:
+            duration_days = delta.days
+            duration_str = f"{duration_days} D"
+        
+        # Format endDateTime as required by IBKR (YYYYMMDD HH:MM:SS)
+        end_dt_str = current_end.strftime("%Y%m%d %H:%M:%S")
+        logger.info(f"Requesting {bar_size} bars from {current_start} to {current_end} (Duration: {duration_str}) for contract expiry {contract.lastTradeDateOrContractMonth}")
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime=end_dt_str,
+            durationStr=duration_str,
+            barSizeSetting=bar_size,
+            whatToShow='TRADES',
+            useRTH=useRTH,
+            formatDate=1
         )
-
-        df.columns = df.columns.str.strip()
-        logger.info(f"Loaded '{csv_file}' with columns: {df.columns.tolist()}")
-
-        if 'Time' not in df.columns:
-            logger.error(f"The 'Time' column is missing in the file: {csv_file}")
-            sys.exit(1)
-
-        df.sort_values('Time', inplace=True)
-        df.set_index('Time', inplace=True)
-        df.rename(columns={
-            'Open': 'open',
-            'High': 'high',
-            'Low': 'low',
-            'Last': 'close',
-            'Volume': 'volume',
-            'Symbol': 'contract',
-            '%Chg': 'pct_chg'
-        }, inplace=True)
-        df['close'] = pd.to_numeric(df['close'], errors='coerce')
-
-        num_close_nans = df['close'].isna().sum()
-        if num_close_nans > 0:
-            logger.warning(f"'close' column has {num_close_nans} NaN values in file: {csv_file}")
-            df = df.dropna(subset=['close'])
-            logger.info(f"Dropped rows with NaN 'close'. Remaining data points: {len(df)}")
-
-        df['average'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4
-        df['barCount'] = 1
-        df['contract'] = df['contract'].astype(str)
-
-        required_columns = ['open', 'high', 'low', 'close', 'volume', 'contract', 'pct_chg', 'average', 'barCount']
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        if missing_columns:
-            logger.error(f"Missing columns {missing_columns} in file: {csv_file}")
-            sys.exit(1)
-
-        if df['close'].isna().any():
-            logger.error(f"After processing, 'close' column still contains NaNs in file: {csv_file}")
-            sys.exit(1)
-
-        logger.debug(f"'close' column statistics:\n{df['close'].describe()}")
-        logger.debug(f"Unique 'close' values: {df['close'].nunique()}")
-
-        return df
-    except FileNotFoundError:
-        logger.error(f"File not found: {csv_file}")
-        sys.exit(1)
-    except pd.errors.EmptyDataError:
-        logger.error("No data: The CSV file is empty.")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"An error occurred while reading the CSV '{csv_file}': {e}")
-        sys.exit(1)
+        if not bars:
+            logger.warning("No bars returned for this chunk.")
+            break
+        df_chunk = util.df(bars)
+        all_bars.append(df_chunk)
+        # Update current_end to just before the earliest bar in this chunk
+        earliest_bar_time = pd.to_datetime(df_chunk['date'].min())
+        current_end = earliest_bar_time - pd.Timedelta(seconds=1)
+        time.sleep(1)  # Pause to respect IBKR pacing limits
+    if all_bars:
+        df_all = pd.concat(all_bars, ignore_index=True)
+        df_all.sort_values('date', inplace=True)
+        df_all.rename(columns={'date': 'Time'}, inplace=True)
+        df_all.set_index('Time', inplace=True)
+        return df_all
+    else:
+        logger.error("No historical data fetched from IBKR.")
+        return pd.DataFrame()
 
 # --- Vectorized Exit Evaluation Function ---
 def evaluate_exit_vectorized(position_type, entry_price, stop_loss, take_profit, df_high_freq, entry_time):
     """
     Determines the exit price and time using vectorized operations.
-
-    Parameters:
-        position_type (str): 'long' or 'short'
-        entry_price (float): Entry price
-        stop_loss (float): Stop-loss price
-        take_profit (float): Take-profit price
-        df_high_freq (pd.DataFrame): 1-minute high-frequency data
-        entry_time (pd.Timestamp): Timestamp of entry
-
-    Returns:
-        tuple: (exit_price, exit_time, hit_take_profit) or (None, None, None)
     """
     df_period = df_high_freq.loc[entry_time:]
     if df_period.empty:
         return None, None, None
-
     max_valid_timestamp = pd.Timestamp('2262-04-11 23:47:16.854775807', tz='UTC')
-
     if position_type == 'long':
         hit_sl = df_period[df_period['low'] <= stop_loss]
         hit_tp = df_period[df_period['high'] >= take_profit]
         first_sl = hit_sl.index.min() if not hit_sl.empty else max_valid_timestamp
         first_tp = hit_tp.index.min() if not hit_tp.empty else max_valid_timestamp
-
         if first_sl < first_tp:
             return stop_loss, first_sl, False
         elif first_tp < first_sl:
             return take_profit, first_tp, True
         elif first_sl == first_tp and first_sl != max_valid_timestamp:
             row = df_period.loc[first_sl]
-            if row['open'] <= stop_loss:
+            if row['low'] <= stop_loss:
                 return stop_loss, first_sl, False
             else:
                 return take_profit, first_sl, True
-
     elif position_type == 'short':
         hit_sl = df_period[df_period['high'] >= stop_loss]
         hit_tp = df_period[df_period['low'] <= take_profit]
         first_sl = hit_sl.index.min() if not hit_sl.empty else max_valid_timestamp
         first_tp = hit_tp.index.min() if not hit_tp.empty else max_valid_timestamp
-
         if first_sl < first_tp:
             return stop_loss, first_sl, False
         elif first_tp < first_sl:
@@ -199,115 +155,160 @@ def evaluate_exit_vectorized(position_type, entry_price, stop_loss, take_profit,
                 return stop_loss, first_sl, False
             else:
                 return take_profit, first_sl, True
-
     return None, None, None
 
-# --- Load Datasets ---
-csv_file_1m = 'Data/es_1m_data.csv'
-csv_file_30m = 'Data/es_30m_data.csv'
+# --- Manual Contract Selection Functions ---
+def get_third_friday(year, month):
+    """
+    Returns a timezone-aware Timestamp for the third Friday of the given year and month (US/Eastern).
+    """
+    cal = calendar.monthcalendar(year, month)
+    fridays = [week[calendar.FRIDAY] for week in cal if week[calendar.FRIDAY] != 0]
+    third_friday = fridays[2]  # third Friday (0-indexed)
+    return pd.Timestamp(year=year, month=month, day=third_friday, tz='US/Eastern')
 
-logger.info("Loading datasets...")
-df_1m = load_data(csv_file_1m)
-df_30m_full = load_data(csv_file_30m)
-logger.info("Datasets loaded successfully.")
+def generate_sorted_contracts(symbol, exchange, currency, S, E, roll_days):
+    """
+    Manually generate a list of candidate futures contracts (tuples of (expiry, roll_date, contract))
+    for quarterly expiries (assumed in March, June, September, December) over a period covering S to E.
+    We use the full expiry date (YYYYMMDD) and set includeExpired=True.
+    Note: Removed the condition on roll_date < E so that candidates (like March 2025) are included.
+    """
+    valid_months = [3, 6, 9, 12]
+    contracts = []
+    # Generate a range wide enough to cover S to E (from one year before S to one year after E)
+    for year in range(S.year - 1, E.year + 2):
+        for month in valid_months:
+            expiry = get_third_friday(year, month)
+            roll_date = expiry - pd.Timedelta(days=roll_days)
+            if expiry > S:  # Only check that the expiry is after the start date.
+                expiry_str = expiry.strftime("%Y%m%d")
+                contract = Future(symbol=symbol,
+                                  lastTradeDateOrContractMonth=expiry_str,
+                                  exchange=exchange,
+                                  currency=currency)
+                contract.includeExpired = True
+                contract.multiplier = str(CONTRACT_MULTIPLIER)
+                contracts.append((expiry, roll_date, contract))
+    contracts.sort(key=lambda x: x[1])  # sort by roll_date
+    return contracts
 
-# --- Localize df_1m to US/Eastern and Convert to UTC ---
+def generate_contract_segments_manual(symbol, exchange, currency, S, E, roll_days):
+    """
+    From the manually generated sorted contracts, create segments for the backtest.
+    Each segment is a tuple (segment_start, segment_end, contract) indicating the time
+    period during which that contract was assumed to be most liquid.
+    """
+    sorted_contracts = generate_sorted_contracts(symbol, exchange, currency, S, E, roll_days)
+    segments = []
+    segment_start = S
+    for expiry, roll_date, contract in sorted_contracts:
+        if roll_date > segment_start:
+            segment_end = min(E, roll_date)
+            segments.append((segment_start, segment_end, contract))
+            segment_start = roll_date  # new segment starts at roll_date
+        if segment_start >= E:
+            break
+    if segment_start < E and sorted_contracts:
+        last_contract = sorted_contracts[-1][2]
+        segments.append((segment_start, E, last_contract))
+    return segments
+
+# --- Connect to IBKR ---
+logger.info("Connecting to IBKR...")
+ib = IB()
+try:
+    ib.connect(IB_HOST, IB_PORT, clientId=CLIENT_ID)
+except Exception as e:
+    logger.error(f"Could not connect to IBKR: {e}")
+    sys.exit(1)
+
+# --- Define Backtest Period: Last 2 Years ---
+end_time = pd.Timestamp.now(tz=pytz.UTC)
+start_time = end_time - pd.Timedelta(days=730)
+logger.info(f"Backtest Period: {start_time} to {end_time}")
+
+# --- Get Active Contract Segments (Manual Roll) ---
+segments = generate_contract_segments_manual(EXEC_SYMBOL, EXEC_EXCHANGE, CURRENCY, start_time, end_time, roll_days=ROLL_DAYS)
+if not segments:
+    logger.error("No contract segments available. Exiting.")
+    sys.exit(1)
+
+logger.info("Contract segments determined:")
+for seg_start, seg_end, contract in segments:
+    logger.info(f"Segment: {seg_start} to {seg_end} using contract expiry {contract.lastTradeDateOrContractMonth}")
+
+# --- Fetch Historical Data for Each Segment and Combine ---
+df_1m_list = []
+df_30m_list = []
+
+for seg_start, seg_end, contract in segments:
+    logger.info(f"Fetching 1-Minute data for contract expiry {contract.lastTradeDateOrContractMonth} from {seg_start} to {seg_end}...")
+    df1 = fetch_ibkr_data(ib, contract, '1 min', seg_start, seg_end, useRTH=False)
+    if not df1.empty:
+        df_1m_list.append(df1)
+    else:
+        logger.warning(f"No 1-Minute data for segment {seg_start} to {seg_end} using contract expiry {contract.lastTradeDateOrContractMonth}.")
+    
+    logger.info(f"Fetching 30-Minute data for contract expiry {contract.lastTradeDateOrContractMonth} from {seg_start} to {seg_end}...")
+    df30 = fetch_ibkr_data(ib, contract, '30 mins', seg_start, seg_end, useRTH=False)
+    if not df30.empty:
+        df_30m_list.append(df30)
+    else:
+        logger.warning(f"No 30-Minute data for segment {seg_start} to {seg_end} using contract expiry {contract.lastTradeDateOrContractMonth}.")
+
+if df_1m_list:
+    df_1m = pd.concat(df_1m_list).drop_duplicates().sort_index()
+else:
+    logger.error("No 1-minute data collected from any segment.")
+    sys.exit(1)
+
+if df_30m_list:
+    df_30m_full = pd.concat(df_30m_list).drop_duplicates().sort_index()
+else:
+    logger.error("No 30-minute data collected from any segment.")
+    sys.exit(1)
+
+# --- Localize and Convert Timezones ---
 eastern = pytz.timezone('US/Eastern')
 if df_1m.index.tz is None:
     df_1m = df_1m.tz_localize(eastern).tz_convert('UTC')
-    logger.debug("Localized 1-Minute data to US/Eastern and converted to UTC.")
 else:
     df_1m = df_1m.tz_convert('UTC')
-    logger.debug("Converted 1-Minute data to UTC.")
-
-# --- Shift 1-Minute Data Timestamps Forward by 30 Minutes ---
-# This aligns the 1-minute candle timestamps with the 30-minute bar timestamps
-df_1m.index = df_1m.index - pd.Timedelta(minutes=30)
-logger.info("Shifted 1-Minute data timestamps forward by 30 minutes for alignment.")
-
-# --- Localize df_30m_full to US/Eastern and Convert to UTC ---
 if df_30m_full.index.tz is None:
     df_30m_full = df_30m_full.tz_localize(eastern).tz_convert('UTC')
-    logger.debug("Localized 30-Minute data to US/Eastern and converted to UTC.")
 else:
     df_30m_full = df_30m_full.tz_convert('UTC')
-    logger.debug("Converted 30-Minute data to UTC.")
 
 logger.info(f"1-Minute Data Range: {df_1m.index.min()} to {df_1m.index.max()}")
 logger.info(f"30-Minute Data Range: {df_30m_full.index.min()} to {df_30m_full.index.max()}")
 
-# --- Define Backtest Period ---
-custom_start_date = "2015-01-01"  # Adjust based on your data
-custom_end_date = "2024-12-24"    # Adjust based on your data
+# --- Adjust 1-Minute Data Timestamp Alignment ---
+df_1m.index = df_1m.index - pd.Timedelta(minutes=30)
 
-if custom_start_date and custom_end_date:
-    try:
-        start_time = pd.to_datetime(custom_start_date).tz_localize('UTC')
-        end_time = pd.to_datetime(custom_end_date).tz_localize('UTC')
-    except Exception as e:
-        logger.error(f"Error parsing custom dates: {e}")
-        sys.exit(1)
-else:
-    start_time = df_30m_full.index.min()
-    end_time = df_30m_full.index.max()
-
-logger.info(f"Backtest Period: {start_time} to {end_time}")
-
-# --- Slice Dataframes to Backtest Period ---
-logger.info(f"Slicing data from {start_time} to {end_time}...")
-try:
-    df_1m = df_1m.loc[start_time:end_time]
-    logger.info(f"Sliced 1-Minute Data: {len(df_1m)} data points")
-except KeyError:
-    logger.warning("No data found for the specified 1-minute backtest period.")
-    df_1m = pd.DataFrame(columns=df_1m.columns)
-
-try:
-    df_30m_full = df_30m_full.loc[start_time:end_time]
-    logger.info(f"Sliced 30-Minute Full Data: {len(df_30m_full)} data points")
-except KeyError:
-    logger.warning("No data found for the specified 30-minute backtest period.")
-    df_30m_full = pd.DataFrame(columns=df_30m_full.columns)
-logger.info("Data sliced to backtest period.")
-
-if df_30m_full.empty:
-    logger.error("No 30-minute data available for the specified backtest period. Exiting.")
-    sys.exit(1)
-
-# --- Calculate Bollinger Bands on Full 30m Data (Including Extended Hours) ---
+# --- Calculate Bollinger Bands on Full 30-Minute Data (Including Extended Hours) ---
 logger.info("Calculating Bollinger Bands on full 30-minute data (including extended hours)...")
 df_30m_full['ma'] = df_30m_full['close'].rolling(window=BOLLINGER_PERIOD, min_periods=BOLLINGER_PERIOD).mean()
 df_30m_full['std'] = df_30m_full['close'].rolling(window=BOLLINGER_PERIOD, min_periods=BOLLINGER_PERIOD).std()
 df_30m_full['upper_band'] = df_30m_full['ma'] + (BOLLINGER_STDDEV * df_30m_full['std'])
 df_30m_full['lower_band'] = df_30m_full['ma'] - (BOLLINGER_STDDEV * df_30m_full['std'])
-
-num_ma_nans = df_30m_full['ma'].isna().sum()
-num_std_nans = df_30m_full['std'].isna().sum()
-logger.info(f"'ma' column has {num_ma_nans} NaN values after rolling calculation.")
-logger.info(f"'std' column has {num_std_nans} NaN values after rolling calculation.")
-
+logger.info(f"'ma' column has {df_30m_full['ma'].isna().sum()} NaN values after rolling calculation.")
+logger.info(f"'std' column has {df_30m_full['std'].isna().sum()} NaN values after rolling calculation.")
 df_30m_full.dropna(subset=['ma', 'std', 'upper_band', 'lower_band'], inplace=True)
 logger.info(f"After Bollinger Bands calculation, 30-Minute Full Data Points: {len(df_30m_full)}")
 
-if df_30m_full.empty:
-    logger.error("All 30-minute data points were removed after Bollinger Bands calculation. Exiting.")
-    sys.exit(1)
-
-# --- Filter RTH Data Separately for Trade Execution ---
+# --- Filter RTH Data for Trade Execution ---
 logger.info("Applying RTH filter to 30-minute data for trade execution...")
 df_30m_rth = filter_rth(df_30m_full)
 logger.info(f"30-Minute RTH Data Points after Filtering: {len(df_30m_rth)}")
-
 if df_30m_rth.empty:
     logger.warning("No 30-minute RTH data points after filtering. Exiting backtest.")
     sys.exit(1)
 
-logger.info("RTH filtering applied to 30-minute data for trade execution.")
-
 print(f"\nBacktesting from {start_time.strftime('%Y-%m-%d')} to {end_time.strftime('%Y-%m-%d')}")
-print(f"1-Minute Data Points after Filtering: {len(df_1m)}")
-print(f"30-Minute Full Data Points after Slicing: {len(df_30m_full)}")
-print(f"30-Minute RTH Data Points after RTH Filtering: {len(df_30m_rth)}")
+print(f"1-Minute Data Points: {len(df_1m)}")
+print(f"30-Minute Full Data Points: {len(df_30m_full)}")
+print(f"30-Minute RTH Data Points: {len(df_30m_rth)}")
 
 # --- Initialize Backtest Variables ---
 position_size = 0
@@ -315,9 +316,10 @@ entry_price = None
 position_type = None  
 cash = INITIAL_CASH
 trade_results = []
-balance_series = []  # Initialize as an empty list to store balance at each bar
+balance_series = []  # record account balance at each 30-min bar
 exposure_bars = 0
 
+# --- Prepare High-Frequency Data ---
 df_high_freq = df_1m.sort_index()
 df_high_freq = df_high_freq.astype({
     'open': 'float32',
@@ -332,16 +334,13 @@ df_high_freq = df_high_freq.astype({
 # --- Backtesting Loop ---
 logger.info("Starting backtesting loop...")
 for i, current_time in enumerate(df_30m_rth.index):
-    current_bar = df_30m_rth.iloc[i]
+    current_bar = df_30m_rth.loc[current_time]
     current_price = current_bar['close']
-
     if position_size != 0:
         exposure_bars += 1
-
     if position_size == 0:
         upper_band = df_30m_full.loc[current_time, 'upper_band']
         lower_band = df_30m_full.loc[current_time, 'lower_band']
-
         if current_price < lower_band:
             position_size = POSITION_SIZE
             entry_price = current_price
@@ -349,8 +348,7 @@ for i, current_time in enumerate(df_30m_rth.index):
             stop_loss_price = entry_price - STOP_LOSS_DISTANCE
             take_profit_price = entry_price + TAKE_PROFIT_DISTANCE
             entry_time = current_time
-            logger.debug(f"Entered LONG at {entry_price} on {entry_time} UTC")
-
+            logger.info(f"Entering LONG at {entry_price} on {entry_time} UTC; Bollinger Bands -> Lower: {lower_band}, Upper: {upper_band}")
         elif current_price > upper_band:
             position_size = POSITION_SIZE
             entry_price = current_price
@@ -358,7 +356,7 @@ for i, current_time in enumerate(df_30m_rth.index):
             stop_loss_price = entry_price + STOP_LOSS_DISTANCE
             take_profit_price = entry_price - TAKE_PROFIT_DISTANCE
             entry_time = current_time
-            logger.debug(f"Entered SHORT at {entry_price} on {entry_time} UTC")
+            logger.info(f"Entering SHORT at {entry_price} on {entry_time} UTC; Bollinger Bands -> Lower: {lower_band}, Upper: {upper_band}")
     else:
         exit_price, exit_time, hit_tp = evaluate_exit_vectorized(
             position_type,
@@ -368,28 +366,27 @@ for i, current_time in enumerate(df_30m_rth.index):
             df_high_freq,
             entry_time
         )
-
         if exit_price is not None and exit_time is not None:
+            try:
+                exit_candle = df_high_freq.loc[exit_time]
+                logger.info(f"Exit Candle Timestamp: {exit_time} | Open: {exit_candle['open']}, High: {exit_candle['high']}, Low: {exit_candle['low']}, Close: {exit_candle['close']}")
+            except KeyError:
+                logger.warning(f"Exit time {exit_time} not found in 1-min data.")
             if position_type == 'long':
                 pnl = ((exit_price - entry_price) * CONTRACT_MULTIPLIER * position_size) - (0.62 * 2)
             elif position_type == 'short':
                 pnl = ((entry_price - exit_price) * CONTRACT_MULTIPLIER * position_size) - (0.62 * 2)
-
             trade_results.append(pnl)
             cash += pnl
-
             exit_type = "TAKE PROFIT" if hit_tp else "STOP LOSS"
-            logger.debug(f"Exited {position_type.upper()} at {exit_price} on {exit_time} UTC via {exit_type} for P&L: ${pnl:.2f}")
-
+            logger.info(f"Exiting {position_type.upper()} at {exit_price} on {exit_time} UTC via {exit_type} for P&L: ${pnl:.2f}")
             position_size = 0
             position_type = None
             entry_price = None
             stop_loss_price = None
             take_profit_price = None
             entry_time = None
-
     balance_series.append(cash)
-
     if (i + 1) % 100000 == 0:
         logger.info(f"Processed {i + 1} out of {len(df_30m_rth)} 30-minute bars.")
 
@@ -404,7 +401,6 @@ trading_days = max((df_30m_full.index.max() - df_30m_full.index.min()).days, 1)
 annualized_return_percentage = ((cash / INITIAL_CASH) ** (252 / trading_days) - 1) * 100
 benchmark_return = ((df_30m_full['close'].iloc[-1] - df_30m_full['close'].iloc[0]) / df_30m_full['close'].iloc[0]) * 100
 equity_peak = balance_series.max()
-
 daily_equity = balance_series.resample('D').ffill()
 daily_returns = daily_equity.pct_change().dropna()
 volatility_annual = daily_returns.std() * np.sqrt(252) * 100
@@ -428,7 +424,6 @@ drawdowns = (balance_series - running_max_series) / running_max_series
 max_drawdown = drawdowns.min() * 100
 average_drawdown = drawdowns[drawdowns < 0].mean() * 100 if not drawdowns[drawdowns < 0].empty else 0
 exposure_time_percentage = (exposure_bars / len(df_30m_rth)) * 100 if len(df_30m_rth) > 0 else 0
-
 winning_trades = [pnl for pnl in trade_results if pnl > 0]
 losing_trades = [pnl for pnl in trade_results if pnl <= 0]
 profit_factor = (sum(winning_trades) / abs(sum(losing_trades))) if losing_trades else float('inf')
@@ -479,9 +474,21 @@ results = {
     "Max Drawdown Duration": f"{max_drawdown_duration_days:.2f} days",
     "Average Drawdown Duration": f"{average_drawdown_duration_days:.2f} days",
 }
-
 for key, value in results.items():
     print(f"{key:25}: {value:>15}")
+
+# --- Print Raw Bar Data at a Specific Timestamp ---
+target_timestamp = pd.Timestamp("2025-01-31 19:30:00", tz="UTC")
+if target_timestamp in df_1m.index:
+    raw_bar_1m = df_1m.loc[target_timestamp]
+    logger.info(f"1-Minute Bar at {target_timestamp} - Open: {raw_bar_1m['open']}, High: {raw_bar_1m['high']}, Low: {raw_bar_1m['low']}, Close: {raw_bar_1m['close']}, Volume: {raw_bar_1m['volume']}, Bar Count: {raw_bar_1m['barCount']}")
+else:
+    logger.warning(f"No 1-minute data found for timestamp {target_timestamp}.")
+if target_timestamp in df_30m_full.index:
+    raw_bar_30m = df_30m_full.loc[target_timestamp]
+    logger.info(f"30-Minute Bar at {target_timestamp} - Open: {raw_bar_30m['open']}, High: {raw_bar_30m['high']}, Low: {raw_bar_30m['low']}, Close: {raw_bar_30m['close']}, Volume: {raw_bar_30m['volume']}, Bar Count: {raw_bar_30m['barCount']}")
+else:
+    logger.warning(f"No 30-minute data found for timestamp {target_timestamp}.")
 
 # --- Plot Equity Curves ---
 if len(balance_series) < 2:
@@ -490,17 +497,12 @@ else:
     initial_close = df_30m_full['close'].iloc[0]
     benchmark_equity = (df_30m_full['close'] / initial_close) * INITIAL_CASH
     benchmark_equity = benchmark_equity.reindex(balance_series.index, method='ffill')
-    logger.info(f"Benchmark Equity Range: {benchmark_equity.index.min()} to {benchmark_equity.index.max()}")
-    num_benchmark_nans = benchmark_equity.isna().sum()
-    if num_benchmark_nans > 0:
-        logger.warning(f"Benchmark equity has {num_benchmark_nans} NaN values. Filling with forward fill.")
+    if benchmark_equity.isna().sum() > 0:
         benchmark_equity = benchmark_equity.fillna(method='ffill')
-
     equity_df = pd.DataFrame({
         'Strategy': balance_series,
         'Benchmark': benchmark_equity
     })
-
     plt.figure(figsize=(14, 7))
     plt.plot(equity_df['Strategy'], label='Strategy Equity')
     plt.plot(equity_df['Benchmark'], label='Benchmark Equity')
@@ -511,3 +513,7 @@ else:
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+
+# --- Disconnect from IBKR ---
+ib.disconnect()
+logger.info("Disconnected from IBKR.")
