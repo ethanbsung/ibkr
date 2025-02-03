@@ -395,17 +395,31 @@ class MESFuturesLiveStrategy:
         """
         Logs the current price, RSI, and VWAP values.
         Only places orders if the current time (in Eastern Time) is within RTH.
+        Also, no new order will be placed if there is an active position or any open MES orders.
         """
+        # Check if there are any open orders for MES
+        if self.ib.openOrders(self.mes_contract):
+            logger.warning("Existing open orders detected for MES. Not placing a new trade.")
+            return
+
+        # Check if a trade is already open
+        if self.position is not None:
+            logger.warning("A trade is already open. Not entering a new trade.")
+            return
+
+        # Check if there is a pending order already
+        if self.pending_order:
+            logger.debug("An order is already pending. Skipping new entry.")
+            return
+
         # Convert current_time to Eastern Time for display and checking
         current_time_et = current_time.astimezone(EASTERN).time()
-        
-        '''
-        # Always log the indicator values
-        logger.warning(
+
+        # Only log the indicator values if needed
+        logger.debug(
             f"Current Time (ET): {current_time_et}, Price: {current_price:.2f}, "
             f"RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}"
         )
-        '''
 
         # Check if we are in RTH before attempting to enter a trade
         if not (RTH_START <= current_time_et <= RTH_END):
@@ -415,19 +429,16 @@ class MESFuturesLiveStrategy:
         # Proceed with trading logic only if within RTH
         logger.debug(f"Checking signals: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
 
-        if self.position is None and not self.pending_order:
-            # Long Entry Condition
-            if (current_price > current_vwap) and (current_rsi > self.rsi_overbought):
-                logger.warning(f"Signal: Enter LONG at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
-                self.place_bracket_order('BUY', current_price, current_time)
-            # Short Entry Condition
-            elif (current_price < current_vwap) and (current_rsi < self.rsi_oversold):
-                logger.warning(f"Signal: Enter SHORT at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
-                self.place_bracket_order('SELL', current_price, current_time)
-            else:
-                logger.debug("No entry signal detected.")
+        # Long Entry Condition
+        if (current_price > current_vwap) and (current_rsi > self.rsi_overbought):
+            logger.warning(f"Signal: Enter LONG at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
+            self.place_bracket_order('BUY', current_price, current_time)
+        # Short Entry Condition
+        elif (current_price < current_vwap) and (current_rsi < self.rsi_oversold):
+            logger.warning(f"Signal: Enter SHORT at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
+            self.place_bracket_order('SELL', current_price, current_time)
         else:
-            logger.debug(f"Position={self.position}, PendingOrder={self.pending_order}. No new entry.")
+            logger.debug("No entry signal detected.")
 
     def place_bracket_order(self, action, current_price, current_time):
         """
@@ -496,7 +507,7 @@ class MESFuturesLiveStrategy:
             logger.debug(f"Trade Filled: {order_action} {fill_qty} @ {fill_price} on {fill_time}")
 
             # Parent order fill -> position entry
-            if trade.order.orderType == 'LIMIT' and not trade.order.parentId:
+            if trade.order.orderType == 'LMT' and not trade.order.parentId:
                 if order_action == 'BUY' and self.position is None:
                     self.position = 'LONG'
                     self.entry_price = fill_price
@@ -558,14 +569,14 @@ class MESFuturesLiveStrategy:
                     logger.warning(f"Exited SHORT @ {fill_price} PnL=${pnl:.2f} ({result})")
                     self.position = None
 
+            # If position is closed, clear the pending order flag
             if self.position is None:
                 self.pending_order = False
 
             self.equity_curve.append({'Time': fill_time.isoformat(), 'Equity': self.equity})
 
-            if trade.order.orderType == 'LIMIT' and not trade.order.parentId:
-                pass
-            elif trade.order.orderType in ['TAKE_PROFIT_LIMIT', 'STOP']:
+            # Update aggregate performance if a child order was filled
+            if trade.order.orderType in ['TAKE_PROFIT_LIMIT', 'STOP']:
                 self.aggregate_performance["total_trades"] += 1
                 self.aggregate_performance["total_pnl"] += pnl
                 if pnl > 0:
@@ -589,7 +600,7 @@ class MESFuturesLiveStrategy:
         try:
             logger.debug(f"Order Status: ID={trade.order.orderId}, Status={trade.orderStatus.status}")
             if trade.orderStatus.status in ['Cancelled', 'Inactive', 'Filled']:
-                if trade.order.orderType == 'LIMIT' and not trade.order.parentId and self.position is None:
+                if trade.order.orderType == 'LMT' and not trade.order.parentId and self.position is None:
                     logger.warning(f"Parent order {trade.order.orderId} cancelled or inactive, no position entered.")
                 if self.position is None:
                     self.pending_order = False
@@ -601,7 +612,7 @@ class MESFuturesLiveStrategy:
         Runs the strategy:
           1) Optionally fetch historical data for warmup.
           2) Subscribe to 5-second real-time bars.
-          3) Start the IB event loop.
+          3) Start the IB event loop in a resilient loop that attempts reconnection if needed.
         """
         self.fetch_historical_data(duration='3 D', bar_size='15 mins')
         self.subscribe_to_realtime_bars()
@@ -634,7 +645,15 @@ class MESFuturesLiveStrategy:
 
         logger.warning("Starting IB event loop. Press Ctrl+C to exit.")
         try:
-            self.ib.run()
+            # Keep the event loop running and attempt reconnection if disconnected
+            while True:
+                self.ib.run()
+                if not self.ib.isConnected():
+                    logger.warning("IB is disconnected. Attempting to reconnect...")
+                    self.try_reconnect()
+                    time_module.sleep(5)
+                else:
+                    break
         except KeyboardInterrupt:
             logger.warning("KeyboardInterrupt received, shutting down...")
         except Exception as e:
@@ -646,7 +665,10 @@ class MESFuturesLiveStrategy:
                 logger.debug(f"Trade Log:\n{trade_df}")
             else:
                 logger.debug("No trades were executed.")
-            self.ib.disconnect()
+            try:
+                self.ib.disconnect()
+            except Exception as e:
+                logger.error(f"Error disconnecting: {e}")
             logger.warning("Disconnected from IBKR.")
 
 
