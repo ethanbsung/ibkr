@@ -492,7 +492,7 @@ class MESFuturesLiveStrategy:
             logger.debug(f"Trade Filled: {order_action} {fill_qty} @ {fill_price} on {fill_time}")
 
             # Parent order fill -> position entry (only update if we are in 'PENDING' state)
-            if trade.order.orderType == 'LIMIT' and not trade.order.parentId:
+            if trade.order.orderType in ['LMT', 'LIMIT'] and not trade.order.parentId:
                 if self.position == 'PENDING':
                     if order_action == 'BUY':
                         self.position = 'LONG'
@@ -526,7 +526,7 @@ class MESFuturesLiveStrategy:
                         logger.warning(f"Entered SHORT @ {self.entry_price}")
 
             # Child order fill -> position exit
-            elif trade.order.orderType in ['TAKE_PROFIT_LIMIT', 'STOP']:
+            elif trade.order.orderType in ['TAKE_PROFIT_LIMIT', 'STP']:
                 if self.position == 'LONG' and order_action == 'SELL':
                     pnl = (fill_price - self.entry_price) * self.position_size * self.contract_multiplier - 1.24
                     self.cash += pnl
@@ -558,7 +558,7 @@ class MESFuturesLiveStrategy:
             self.equity_curve.append({'Time': fill_time.isoformat(), 'Equity': self.equity})
 
             # Record performance data when an exit order fills
-            if trade.order.orderType in ['TAKE_PROFIT_LIMIT', 'STOP']:
+            if trade.order.orderType in ['TAKE_PROFIT_LIMIT', 'STP']:
                 self.aggregate_performance["total_trades"] += 1
                 self.aggregate_performance["total_pnl"] += pnl
                 if pnl > 0:
@@ -582,7 +582,7 @@ class MESFuturesLiveStrategy:
         try:
             logger.debug(f"Order Status: ID={trade.order.orderId}, Status={trade.orderStatus.status}")
             if trade.orderStatus.status in ['Cancelled', 'Inactive', 'Filled']:
-                if trade.order.orderType == 'LIMIT' and not trade.order.parentId and self.position == 'PENDING':
+                if trade.order.orderType in ['LMT', 'LIMIT'] and not trade.order.parentId and self.position == 'PENDING':
                     logger.warning(f"Parent order {trade.order.orderId} cancelled or inactive, no position entered.")
                     self.position = None
         except Exception as e:
