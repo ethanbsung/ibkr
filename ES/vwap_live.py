@@ -399,12 +399,14 @@ class MESFuturesLiveStrategy:
         # Convert current_time to Eastern Time for display and checking
         current_time_et = current_time.astimezone(EASTERN).time()
         
+        '''
         # Always log the indicator values
         logger.warning(
             f"Current Time (ET): {current_time_et}, Price: {current_price:.2f}, "
             f"RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}"
         )
-        
+        '''
+
         # Check if we are in RTH before attempting to enter a trade
         if not (RTH_START <= current_time_et <= RTH_END):
             logger.warning(f"Time {current_time_et} is outside RTH. No trading action will be taken.")
