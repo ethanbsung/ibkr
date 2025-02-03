@@ -18,7 +18,9 @@ INITIAL_CAPITAL = 5000             # Starting cash in USD
 POSITION_SIZE = 1                  # Number of contracts per trade
 CONTRACT_MULTIPLIER = 5            # Contract multiplier for MES
 
-TIMEFRAME = '5 secs'               # Use 5‑second bars instead of 1‑minute bars
+TIMEFRAME = '1 min'               # Use 5‑second bars for IBKR data request
+RESAMPLE_FREQ = '1 min'               # Pandas-compatible frequency for resampling
+
 STOP_LOSS_POINTS = 9               # Stop loss in points
 TAKE_PROFIT_POINTS = 10            # Take profit in points
 
@@ -26,7 +28,7 @@ COMMISSION = 0.62                  # Commission per trade (entry or exit)
 SLIPPAGE = 1                       # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2025-01-01'          # Format: 'YYYY-MM-DD'
+START_DATE = '2024-12-01'          # Format: 'YYYY-MM-DD'
 END_DATE = '2025-02-01'            # Format: 'YYYY-MM-DD'
 
 # IBKR Connection Parameters
@@ -253,7 +255,7 @@ class MESFuturesBacktest:
         self.data['pct_chg'] = self.data['close'].pct_change() * 100
         self.data['average'] = (self.data['open'] + self.data['high'] + self.data['low'] + self.data['close']) / 4
         self.data['barCount'] = 1
-        self.data['pct_chg'].fillna(0, inplace=True)
+        self.data['pct_chg'] = self.data['pct_chg'].fillna(0)  # Avoid chained assignment warning.
         logger.info(f"Fetched {len(self.data)} bars of data from IBKR.")
 
     def prepare_data(self):
@@ -272,8 +274,8 @@ class MESFuturesBacktest:
         self.data.sort_index(inplace=True)
 
         # Resample to the chosen timeframe (for 5‑second bars this is a no‑op if already in that frequency).
-        logger.info(f"Resampling data to {self.timeframe} bars if needed...")
-        self.data_prepared = self.data.resample(self.timeframe).agg({
+        logger.info(f"Resampling data to {RESAMPLE_FREQ} bars if needed...")
+        self.data_prepared = self.data.resample(RESAMPLE_FREQ).agg({
             'open': 'first',
             'high': 'max',
             'low': 'min',
@@ -397,7 +399,6 @@ class MESFuturesBacktest:
         msg = (f"Trade Entry: {position_type.capitalize()} at {self.entry_price:.2f} on {current_idx}. "
                f"Price: {price:.2f}, VWAP: {vwap:.2f}, RSI: {rsi_value:.2f}")
         logger.info(msg)
-        print(msg)
 
     def check_exit_conditions(self, price, high, low, current_idx):
         """Check if exit conditions are met for the current position."""
@@ -449,7 +450,6 @@ class MESFuturesBacktest:
         msg = (f"Trade Exit: {self.trade_log[-1]['Type']} exit at {exit_price:.2f} on {current_idx}. "
                f"VWAP: {vwap:.2f}, RSI: {rsi_value:.2f}. Result: {result}. Profit: {pnl:.2f}")
         logger.info(msg)
-        print(msg)
 
         # Reset position.
         self.position = None

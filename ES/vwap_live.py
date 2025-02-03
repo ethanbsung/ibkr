@@ -393,14 +393,24 @@ class MESFuturesLiveStrategy:
 
     def apply_trading_logic(self, current_price, current_vwap, current_rsi, current_time):
         """
-        Decide whether to place a new trade or not, based on RSI & VWAP.
+        Logs the current price, RSI, and VWAP values.
+        Only places orders if the current time (in Eastern Time) is within RTH.
         """
-        # Convert current_time to Eastern Time for RTH check
+        # Convert current_time to Eastern Time for display and checking
         current_time_et = current_time.astimezone(EASTERN).time()
+        
+        # Always log the indicator values
+        logger.warning(
+            f"Current Time (ET): {current_time_et}, Price: {current_price:.2f}, "
+            f"RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}"
+        )
+        
+        # Check if we are in RTH before attempting to enter a trade
         if not (RTH_START <= current_time_et <= RTH_END):
-            logger.warning(f"Time {current_time_et} outside RTH. No trading action.")
+            logger.warning(f"Time {current_time_et} is outside RTH. No trading action will be taken.")
             return
 
+        # Proceed with trading logic only if within RTH
         logger.debug(f"Checking signals: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
 
         if self.position is None and not self.pending_order:

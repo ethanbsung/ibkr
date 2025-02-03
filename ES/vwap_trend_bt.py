@@ -21,7 +21,7 @@ COMMISSION = 0.62                  # Commission per trade (entry or exit)
 SLIPPAGE = 1                       # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2019-01-01'          # Format: 'YYYY-MM-DD'
+START_DATE = '2008-01-01'          # Format: 'YYYY-MM-DD'
 END_DATE = '2024-12-25'            # Format: 'YYYY-MM-DD'
 
 # --- Setup Logging ---
@@ -169,31 +169,35 @@ def rsi(ohlc: pd.DataFrame, period: int = 14) -> pd.Series:
 
 def calculate_vwap(ohlc: pd.DataFrame) -> pd.Series:
     """
-    Calculate Volume Weighted Average Price (VWAP), resetting each day,
-    on the provided time-indexed DataFrame.
+    Calculate Volume Weighted Average Price (VWAP) for the given DataFrame,
+    resetting each session at 6:00 PM Eastern time.
     """
-    ohlc = ohlc.copy()
+    df = ohlc.copy()
+    # Convert index to US/Eastern
+    df['date_eastern'] = df.index.tz_convert('US/Eastern')
     
-    # Convert to US/Eastern
-    ohlc_eastern = ohlc.tz_convert('US/Eastern')
+    # Define session open at 6:00 PM Eastern:
+    # If the bar time is >= 6:00 PM, the session open is that same day at 6:00 PM;
+    # Otherwise, the session open is 6:00 PM of the previous day.
+    def session_open(dt_eastern):
+        if dt_eastern.time() >= time(18, 0):
+            return dt_eastern.replace(hour=18, minute=0, second=0, microsecond=0)
+        else:
+            return (dt_eastern - timedelta(days=1)).replace(hour=18, minute=0, second=0, microsecond=0)
     
-    # Extract date for grouping
-    ohlc_eastern['date'] = ohlc_eastern.index.date
+    df['session_open'] = df['date_eastern'].apply(session_open)
     
-    # Typical Price
-    typical_price = (ohlc_eastern['high'] + ohlc_eastern['low'] + ohlc_eastern['close']) / 3
+    # Calculate the typical price for each bar.
+    df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
+    df['tpv'] = df['typical_price'] * df['volume']
     
-    # TPV and daily cumsum
-    ohlc_eastern['tpv'] = typical_price * ohlc_eastern['volume']
-    ohlc_eastern['cum_tpv'] = ohlc_eastern.groupby('date')['tpv'].cumsum()
-    ohlc_eastern['cum_vol'] = ohlc_eastern.groupby('date')['volume'].cumsum()
+    # For each session, compute cumulative sums and then VWAP
+    df.sort_index(inplace=True)
+    df['cum_tpv'] = df.groupby('session_open')['tpv'].cumsum()
+    df['cum_vol'] = df.groupby('session_open')['volume'].cumsum()
+    df['vwap'] = df['cum_tpv'] / df['cum_vol']
     
-    # VWAP
-    ohlc_eastern['vwap'] = ohlc_eastern['cum_tpv'] / ohlc_eastern['cum_vol']
-    
-    # Assign back
-    ohlc['vwap'] = ohlc_eastern['vwap']
-    return ohlc['vwap']
+    return df['vwap']
 
 # --- Backtest Class ---
 class MESFuturesBacktest:
@@ -246,7 +250,7 @@ class MESFuturesBacktest:
     def prepare_data(self):
         """
         Prepares 1-minute data: mark RTH, filter by date, resample to 1-min,
-        calculate VWAP, and precompute 15-minute RSI.
+        calculate VWAP (with a 6PM Eastern session reset), and precompute 15-minute RSI.
         """
         logger.info("Preparing data for backtest...")
 
@@ -277,8 +281,8 @@ class MESFuturesBacktest:
         }).dropna()
         logger.info(f"Resampled data: {len(self.data_prepared)} bars.")
 
-        # Compute VWAP on the 1-min data (we keep VWAP updated every minute)
-        logger.info("Calculating 1-minute VWAP (reset daily)...")
+        # Calculate 1-minute VWAP with a reset at 6:00 PM Eastern.
+        logger.info("Calculating 1-minute VWAP with session reset at 6:00 PM Eastern...")
         self.data_prepared['vwap'] = calculate_vwap(self.data_prepared)
         logger.info("Finished calculating VWAP.")
 
@@ -463,7 +467,6 @@ class MESFuturesBacktest:
                 if not self.in_drawdown:
                     self.in_drawdown = True
                     self.drawdown_start = current_idx
-            # Optionally track further drawdown details here
 
     def get_trade_results(self):
         """Returns trade results as a DataFrame."""
@@ -640,10 +643,6 @@ class MESFuturesBacktest:
         plt.grid(True)
         plt.tight_layout()
         plt.show()
-
-        # Optionally save trade results or equity curve:
-        # trade_results.to_csv('trade_results.csv', index=False)
-        # equity_df.to_csv('equity_curve.csv')
 
     def get_trade_results(self):
         """Returns trade results as a DataFrame."""
