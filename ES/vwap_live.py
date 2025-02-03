@@ -397,7 +397,8 @@ class MESFuturesLiveStrategy:
     def apply_trading_logic(self, current_price, current_vwap, current_rsi, current_time):
         """
         Logs the current price, RSI, and VWAP values.
-        Only places orders if the current time (in Eastern Time) is within RTH.
+        Only places orders if the current time (in Eastern Time) is within RTH
+        and no trade (or bracket order) is already active.
         """
         # Convert current_time to Eastern Time for display and checking
         current_time_et = current_time.astimezone(EASTERN).time()
@@ -407,26 +408,36 @@ class MESFuturesLiveStrategy:
             logger.warning(f"Time {current_time_et} is outside RTH. No trading action will be taken.")
             return
 
-        # Proceed with trading logic only if no trade (or bracket order) is currently active
-        logger.debug(f"Checking signals: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
-        if self.position is None:
-            # Long Entry Condition
-            if (current_price > current_vwap) and (current_rsi > self.rsi_overbought):
-                logger.warning(f"Signal: Enter LONG at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
-                self.place_bracket_order('BUY', current_price, current_time)
-            # Short Entry Condition
-            elif (current_price < current_vwap) and (current_rsi < self.rsi_oversold):
-                logger.warning(f"Signal: Enter SHORT at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
-                self.place_bracket_order('SELL', current_price, current_time)
-            else:
-                logger.debug("No entry signal detected.")
-        else:
+        # Only proceed if no trade (or pending order) is active
+        if self.position is not None:
             logger.debug(f"Trade state is active ({self.position}). No new entry.")
+            return
+
+        logger.debug(f"Checking signals: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
+        # Long Entry Condition
+        if (current_price > current_vwap) and (current_rsi > self.rsi_overbought):
+            logger.warning(f"Signal: Enter LONG at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
+            self.place_bracket_order('BUY', current_price, current_time)
+        # Short Entry Condition
+        elif (current_price < current_vwap) and (current_rsi < self.rsi_oversold):
+            logger.warning(f"Signal: Enter SHORT at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
+            self.place_bracket_order('SELL', current_price, current_time)
+        else:
+            logger.debug("No entry signal detected.")
 
     def place_bracket_order(self, action, current_price, current_time):
         """
         Places a bracket (parent + take-profit + stop-loss) order using ib_insync's bracketOrder method.
+        Now includes an explicit check to ensure that if a position is already open (or pending),
+        no new order is placed.
         """
+        with self.lock:
+            if self.position is not None:
+                logger.warning("A position is already open. Not placing a new bracket order.")
+                return
+            # Immediately mark the state as pending so that subsequent signals are ignored
+            self.position = 'PENDING'
+
         try:
             action = action.upper()
             if action == 'BUY':
@@ -439,6 +450,8 @@ class MESFuturesLiveStrategy:
                 order_action      = 'SELL'
             else:
                 logger.error(f"Invalid action: {action}. Must be 'BUY' or 'SELL'.")
+                with self.lock:
+                    self.position = None
                 return
 
             logger.debug(
@@ -469,14 +482,12 @@ class MESFuturesLiveStrategy:
             stop_loss_trade.filledEvent += self.on_trade_filled
             stop_loss_trade.statusEvent += self.on_order_status
 
-            # Set trade state to 'PENDING' so no new orders are entered until this one resolves.
-            self.position = 'PENDING'
             logger.warning("Bracket order placed successfully and event handlers attached.")
 
         except Exception as e:
             logger.error(f"Failed to place bracket order: {e}")
-            # Reset state if order placement fails
-            self.position = None
+            with self.lock:
+                self.position = None
 
     def on_trade_filled(self, trade):
         """
