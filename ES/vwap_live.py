@@ -139,11 +139,14 @@ class MESFuturesLiveStrategy:
         # Strategy state
         self.cash = initial_cash
         self.equity = initial_cash
-        self.position = None  # None, 'LONG', or 'SHORT'
+        # self.position will be:
+        #   None    -> no trade active
+        #   'PENDING' -> bracket order placed but not yet filled
+        #   'LONG' or 'SHORT' -> trade active
+        self.position = None  
         self.entry_price = 0
         self.stop_loss = 0
         self.take_profit = 0
-        self.pending_order = False
 
         # For tracking equity curve and trade log
         self.equity_curve = []
@@ -395,50 +398,30 @@ class MESFuturesLiveStrategy:
         """
         Logs the current price, RSI, and VWAP values.
         Only places orders if the current time (in Eastern Time) is within RTH.
-        Also, no new order will be placed if there is an active position or any open MES orders.
         """
-        # Check if there are any open orders for MES
-        if self.ib.openOrders(self.mes_contract):
-            logger.warning("Existing open orders detected for MES. Not placing a new trade.")
-            return
-
-        # Check if a trade is already open
-        if self.position is not None:
-            logger.warning("A trade is already open. Not entering a new trade.")
-            return
-
-        # Check if there is a pending order already
-        if self.pending_order:
-            logger.debug("An order is already pending. Skipping new entry.")
-            return
-
         # Convert current_time to Eastern Time for display and checking
         current_time_et = current_time.astimezone(EASTERN).time()
-
-        # Only log the indicator values if needed
-        logger.debug(
-            f"Current Time (ET): {current_time_et}, Price: {current_price:.2f}, "
-            f"RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}"
-        )
-
+        
         # Check if we are in RTH before attempting to enter a trade
         if not (RTH_START <= current_time_et <= RTH_END):
             logger.warning(f"Time {current_time_et} is outside RTH. No trading action will be taken.")
             return
 
-        # Proceed with trading logic only if within RTH
+        # Proceed with trading logic only if no trade (or bracket order) is currently active
         logger.debug(f"Checking signals: Price={current_price:.2f}, VWAP={current_vwap:.2f}, RSI={current_rsi:.2f}")
-
-        # Long Entry Condition
-        if (current_price > current_vwap) and (current_rsi > self.rsi_overbought):
-            logger.warning(f"Signal: Enter LONG at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
-            self.place_bracket_order('BUY', current_price, current_time)
-        # Short Entry Condition
-        elif (current_price < current_vwap) and (current_rsi < self.rsi_oversold):
-            logger.warning(f"Signal: Enter SHORT at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
-            self.place_bracket_order('SELL', current_price, current_time)
+        if self.position is None:
+            # Long Entry Condition
+            if (current_price > current_vwap) and (current_rsi > self.rsi_overbought):
+                logger.warning(f"Signal: Enter LONG at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
+                self.place_bracket_order('BUY', current_price, current_time)
+            # Short Entry Condition
+            elif (current_price < current_vwap) and (current_rsi < self.rsi_oversold):
+                logger.warning(f"Signal: Enter SHORT at price {current_price:.2f}, RSI: {current_rsi:.2f}, VWAP: {current_vwap:.2f}")
+                self.place_bracket_order('SELL', current_price, current_time)
+            else:
+                logger.debug("No entry signal detected.")
         else:
-            logger.debug("No entry signal detected.")
+            logger.debug(f"Trade state is active ({self.position}). No new entry.")
 
     def place_bracket_order(self, action, current_price, current_time):
         """
@@ -486,12 +469,14 @@ class MESFuturesLiveStrategy:
             stop_loss_trade.filledEvent += self.on_trade_filled
             stop_loss_trade.statusEvent += self.on_order_status
 
-            self.pending_order = True
+            # Set trade state to 'PENDING' so no new orders are entered until this one resolves.
+            self.position = 'PENDING'
             logger.warning("Bracket order placed successfully and event handlers attached.")
 
         except Exception as e:
             logger.error(f"Failed to place bracket order: {e}")
-            self.pending_order = False
+            # Reset state if order placement fails
+            self.position = None
 
     def on_trade_filled(self, trade):
         """
@@ -506,38 +491,39 @@ class MESFuturesLiveStrategy:
 
             logger.debug(f"Trade Filled: {order_action} {fill_qty} @ {fill_price} on {fill_time}")
 
-            # Parent order fill -> position entry
-            if trade.order.orderType == 'LMT' and not trade.order.parentId:
-                if order_action == 'BUY' and self.position is None:
-                    self.position = 'LONG'
-                    self.entry_price = fill_price
-                    self.stop_loss   = self.entry_price - self.stop_loss_points
-                    self.take_profit = self.entry_price + self.take_profit_points
-                    self.trade_log.append({
-                        'Type': 'LONG',
-                        'Entry Time': fill_time.isoformat(),
-                        'Entry Price': self.entry_price,
-                        'Exit Time': None,
-                        'Exit Price': None,
-                        'Result': None,
-                        'Profit': 0
-                    })
-                    logger.warning(f"Entered LONG @ {self.entry_price}")
-                elif order_action == 'SELL' and self.position is None:
-                    self.position = 'SHORT'
-                    self.entry_price = fill_price
-                    self.stop_loss   = self.entry_price + self.stop_loss_points
-                    self.take_profit = self.entry_price - self.take_profit_points
-                    self.trade_log.append({
-                        'Type': 'SHORT',
-                        'Entry Time': fill_time.isoformat(),
-                        'Entry Price': self.entry_price,
-                        'Exit Time': None,
-                        'Exit Price': None,
-                        'Result': None,
-                        'Profit': 0
-                    })
-                    logger.warning(f"Entered SHORT @ {self.entry_price}")
+            # Parent order fill -> position entry (only update if we are in 'PENDING' state)
+            if trade.order.orderType == 'LIMIT' and not trade.order.parentId:
+                if self.position == 'PENDING':
+                    if order_action == 'BUY':
+                        self.position = 'LONG'
+                        self.entry_price = fill_price
+                        self.stop_loss   = self.entry_price - self.stop_loss_points
+                        self.take_profit = self.entry_price + self.take_profit_points
+                        self.trade_log.append({
+                            'Type': 'LONG',
+                            'Entry Time': fill_time.isoformat(),
+                            'Entry Price': self.entry_price,
+                            'Exit Time': None,
+                            'Exit Price': None,
+                            'Result': None,
+                            'Profit': 0
+                        })
+                        logger.warning(f"Entered LONG @ {self.entry_price}")
+                    elif order_action == 'SELL':
+                        self.position = 'SHORT'
+                        self.entry_price = fill_price
+                        self.stop_loss   = self.entry_price + self.stop_loss_points
+                        self.take_profit = self.entry_price - self.take_profit_points
+                        self.trade_log.append({
+                            'Type': 'SHORT',
+                            'Entry Time': fill_time.isoformat(),
+                            'Entry Price': self.entry_price,
+                            'Exit Time': None,
+                            'Exit Price': None,
+                            'Result': None,
+                            'Profit': 0
+                        })
+                        logger.warning(f"Entered SHORT @ {self.entry_price}")
 
             # Child order fill -> position exit
             elif trade.order.orderType in ['TAKE_PROFIT_LIMIT', 'STOP']:
@@ -569,13 +555,9 @@ class MESFuturesLiveStrategy:
                     logger.warning(f"Exited SHORT @ {fill_price} PnL=${pnl:.2f} ({result})")
                     self.position = None
 
-            # If position is closed, clear the pending order flag
-            if self.position is None:
-                self.pending_order = False
-
             self.equity_curve.append({'Time': fill_time.isoformat(), 'Equity': self.equity})
 
-            # Update aggregate performance if a child order was filled
+            # Record performance data when an exit order fills
             if trade.order.orderType in ['TAKE_PROFIT_LIMIT', 'STOP']:
                 self.aggregate_performance["total_trades"] += 1
                 self.aggregate_performance["total_pnl"] += pnl
@@ -600,10 +582,9 @@ class MESFuturesLiveStrategy:
         try:
             logger.debug(f"Order Status: ID={trade.order.orderId}, Status={trade.orderStatus.status}")
             if trade.orderStatus.status in ['Cancelled', 'Inactive', 'Filled']:
-                if trade.order.orderType == 'LMT' and not trade.order.parentId and self.position is None:
+                if trade.order.orderType == 'LIMIT' and not trade.order.parentId and self.position == 'PENDING':
                     logger.warning(f"Parent order {trade.order.orderId} cancelled or inactive, no position entered.")
-                if self.position is None:
-                    self.pending_order = False
+                    self.position = None
         except Exception as e:
             logger.error(f"Error in on_order_status handler: {e}")
 
@@ -612,7 +593,7 @@ class MESFuturesLiveStrategy:
         Runs the strategy:
           1) Optionally fetch historical data for warmup.
           2) Subscribe to 5-second real-time bars.
-          3) Start the IB event loop in a resilient loop that attempts reconnection if needed.
+          3) Start the IB event loop.
         """
         self.fetch_historical_data(duration='3 D', bar_size='15 mins')
         self.subscribe_to_realtime_bars()
@@ -645,15 +626,9 @@ class MESFuturesLiveStrategy:
 
         logger.warning("Starting IB event loop. Press Ctrl+C to exit.")
         try:
-            # Keep the event loop running and attempt reconnection if disconnected
+            # Use a loop with waitOnUpdate so that the script continues running even after disconnections.
             while True:
-                self.ib.run()
-                if not self.ib.isConnected():
-                    logger.warning("IB is disconnected. Attempting to reconnect...")
-                    self.try_reconnect()
-                    time_module.sleep(5)
-                else:
-                    break
+                self.ib.waitOnUpdate(timeout=1)
         except KeyboardInterrupt:
             logger.warning("KeyboardInterrupt received, shutting down...")
         except Exception as e:
@@ -665,10 +640,7 @@ class MESFuturesLiveStrategy:
                 logger.debug(f"Trade Log:\n{trade_df}")
             else:
                 logger.debug("No trades were executed.")
-            try:
-                self.ib.disconnect()
-            except Exception as e:
-                logger.error(f"Error disconnecting: {e}")
+            self.ib.disconnect()
             logger.warning("Disconnected from IBKR.")
 
 
