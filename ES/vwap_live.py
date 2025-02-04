@@ -11,8 +11,8 @@ import os
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host
-IB_PORT = 4002               # IBKR Gateway/TWS paper trading port
-CLIENT_ID = 1                # Unique client ID
+IB_PORT = 7497               # IBKR Gateway/TWS paper trading port
+CLIENT_ID = 2                # Unique client ID
 
 DATA_SYMBOL = 'ES'           # E-mini S&P 500 for data
 DATA_EXPIRY = '202503'       # March 2025 (example)
@@ -123,8 +123,6 @@ class MESFuturesLiveStrategy:
         Initializes the live trading strategy with performance tracking.
         """
         self.ib = ib
-        self.ib.autoReconnect = False  # We'll handle reconnection manually
-
         self.es_contract = es_contract
         self.mes_contract = mes_contract
         self.initial_cash = initial_cash
@@ -167,10 +165,7 @@ class MESFuturesLiveStrategy:
         self.performance_file = PERFORMANCE_FILE
         self.equity_curve_file = EQUITY_CURVE_FILE
         self.load_performance()
-
-        # Bind the events to handlers (note the on_disconnect now accepts extra args)
-        self.ib.disconnectedEvent += self.on_disconnect
-        self.ib.connectedEvent += self.on_reconnected
+        
 
     def load_performance(self):
         """Load existing performance data from files or initialize new."""
@@ -241,7 +236,7 @@ class MESFuturesLiveStrategy:
 
     def fetch_historical_data(self, duration='3 D', bar_size='15 mins'):
         """
-        (Optional) Fetch historical data to initialize indicators if desired.
+        Fetch historical data to initialize indicators if desired.
         """
         logger.warning("Fetching historical ES data for indicator initialization...")
         try:
@@ -295,47 +290,6 @@ class MESFuturesLiveStrategy:
             logger.warning("Real-time bar subscription set up.")
         except Exception as e:
             logger.error(f"Failed to subscribe to real-time bars: {e}")
-
-    # -------------------------------------------------------------------------
-    # Callback to handle disconnections. Accept extra args to avoid errors.
-    def on_disconnect(self, *args):
-        logger.warning("Disconnected from IBKR. Will try to reconnect in 5 seconds...")
-        self.ib.schedule(5, self.try_reconnect)
-
-    def try_reconnect(self):
-        """
-        Attempts to reconnect to IBKR, re-qualify contracts, and re-subscribe to real-time bars.
-        """
-        if self.ib.isConnected():
-            # Already connected: nothing to do
-            return
-
-        logger.warning("Attempting to reconnect to IBKR...")
-        try:
-            self.ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
-            logger.warning("Reconnected to IBKR.")
-
-            # Re-qualify contracts
-            qualified_contracts = self.ib.qualifyContracts(self.es_contract, self.mes_contract)
-            if not qualified_contracts:
-                raise ValueError("Failed to qualify contracts after reconnection.")
-            self.es_contract, self.mes_contract = qualified_contracts
-            logger.warning(f"Re-qualified ES Contract: {self.es_contract}")
-            logger.warning(f"Re-qualified MES Contract: {self.mes_contract}")
-
-            # Optionally clear the old data buffer if needed
-            self.realtime_5s_data = []
-
-            # Resubscribe to real-time bars
-            self.subscribe_to_realtime_bars()
-
-            logger.warning("Reconnection and resubscription successful.")
-        except Exception as e:
-            logger.error(f"Reconnection attempt failed: {e}. Scheduling another attempt in 5 seconds.")
-            self.ib.schedule(5, self.try_reconnect)
-
-    def on_reconnected(self):
-        logger.warning("Successfully reconnected to IBKR.")
 
     def on_bar_update(self, bars: RealTimeBarList, hasNewBar: bool):
         with self.lock:
@@ -605,12 +559,9 @@ class MESFuturesLiveStrategy:
     def run(self):
         """
         Runs the strategy:
-          1) Optionally fetch historical data for warmup.
+          1) Fetch historical data for warmup.
           2) Subscribe to 5-second real-time bars.
           3) Start the IB event loop.
-          
-        The main loop now continuously checks the connection. If disconnected,
-        it calls try_reconnect() to re-establish connectivity and subscriptions.
         """
         self.fetch_historical_data(duration='3 D', bar_size='15 mins')
         self.subscribe_to_realtime_bars()
@@ -643,14 +594,8 @@ class MESFuturesLiveStrategy:
 
         logger.warning("Starting IB event loop. Press Ctrl+C to exit.")
         try:
-            while True:
-                # If not connected, try to reconnect
-                if not self.ib.isConnected():
-                    logger.warning("IB is disconnected. Attempting reconnection...")
-                    self.try_reconnect()
-                    time_module.sleep(5)
-                    continue
-                self.ib.waitOnUpdate(timeout=1)
+            # Use IB-insync's built-in event loop instead of a custom while loop.
+            self.ib.run()
         except KeyboardInterrupt:
             logger.warning("KeyboardInterrupt received, shutting down...")
         except Exception as e:
