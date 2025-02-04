@@ -18,10 +18,10 @@ STOP_LOSS_POINTS = 9               # Stop loss in points
 TAKE_PROFIT_POINTS = 10            # Take profit in points
 
 COMMISSION = 0.62                  # Commission per trade (entry or exit)
-SLIPPAGE = 1                       # Slippage in points on entry
+SLIPPAGE = 0.25                       # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2008-01-01'          # Format: 'YYYY-MM-DD'
+START_DATE = '2024-12-01'          # Format: 'YYYY-MM-DD'
 END_DATE = '2024-12-25'            # Format: 'YYYY-MM-DD'
 
 # --- Setup Logging ---

@@ -306,30 +306,33 @@ class MESFuturesLiveStrategy:
         """
         Attempts to reconnect to IBKR, re-qualify contracts, and re-subscribe to real-time bars.
         """
-        if not self.ib.isConnected():
-            logger.warning("Attempting to reconnect to IBKR...")
-            try:
-                self.ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
-                logger.warning("Reconnected to IBKR.")
+        if self.ib.isConnected():
+            # Already connected: nothing to do
+            return
 
-                # Re-qualify contracts
-                qualified_contracts = self.ib.qualifyContracts(self.es_contract, self.mes_contract)
-                if not qualified_contracts:
-                    raise ValueError("Failed to qualify contracts after reconnection.")
-                self.es_contract, self.mes_contract = qualified_contracts
-                logger.warning(f"Re-qualified ES Contract: {self.es_contract}")
-                logger.warning(f"Re-qualified MES Contract: {self.mes_contract}")
+        logger.warning("Attempting to reconnect to IBKR...")
+        try:
+            self.ib.connect(host=IB_HOST, port=IB_PORT, clientId=CLIENT_ID)
+            logger.warning("Reconnected to IBKR.")
 
-                # Optionally clear the old data buffer if needed
-                self.realtime_5s_data = []
+            # Re-qualify contracts
+            qualified_contracts = self.ib.qualifyContracts(self.es_contract, self.mes_contract)
+            if not qualified_contracts:
+                raise ValueError("Failed to qualify contracts after reconnection.")
+            self.es_contract, self.mes_contract = qualified_contracts
+            logger.warning(f"Re-qualified ES Contract: {self.es_contract}")
+            logger.warning(f"Re-qualified MES Contract: {self.mes_contract}")
 
-                # Resubscribe to real-time bars
-                self.subscribe_to_realtime_bars()
+            # Optionally clear the old data buffer if needed
+            self.realtime_5s_data = []
 
-                logger.warning("Reconnection and resubscription successful.")
-            except Exception as e:
-                logger.error(f"Reconnection attempt failed: {e}. Scheduling another attempt in 5 seconds.")
-                self.ib.schedule(5, self.try_reconnect)
+            # Resubscribe to real-time bars
+            self.subscribe_to_realtime_bars()
+
+            logger.warning("Reconnection and resubscription successful.")
+        except Exception as e:
+            logger.error(f"Reconnection attempt failed: {e}. Scheduling another attempt in 5 seconds.")
+            self.ib.schedule(5, self.try_reconnect)
 
     def on_reconnected(self):
         logger.warning("Successfully reconnected to IBKR.")
@@ -605,6 +608,9 @@ class MESFuturesLiveStrategy:
           1) Optionally fetch historical data for warmup.
           2) Subscribe to 5-second real-time bars.
           3) Start the IB event loop.
+          
+        The main loop now continuously checks the connection. If disconnected,
+        it calls try_reconnect() to re-establish connectivity and subscriptions.
         """
         self.fetch_historical_data(duration='3 D', bar_size='15 mins')
         self.subscribe_to_realtime_bars()
@@ -637,8 +643,13 @@ class MESFuturesLiveStrategy:
 
         logger.warning("Starting IB event loop. Press Ctrl+C to exit.")
         try:
-            # Use a loop with waitOnUpdate so that the script continues running even after disconnections.
             while True:
+                # If not connected, try to reconnect
+                if not self.ib.isConnected():
+                    logger.warning("IB is disconnected. Attempting reconnection...")
+                    self.try_reconnect()
+                    time_module.sleep(5)
+                    continue
                 self.ib.waitOnUpdate(timeout=1)
         except KeyboardInterrupt:
             logger.warning("KeyboardInterrupt received, shutting down...")

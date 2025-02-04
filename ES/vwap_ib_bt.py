@@ -18,22 +18,22 @@ INITIAL_CAPITAL = 5000             # Starting cash in USD
 POSITION_SIZE = 1                  # Number of contracts per trade
 CONTRACT_MULTIPLIER = 5            # Contract multiplier for MES
 
-TIMEFRAME = '1 min'               # Use 5‑second bars for IBKR data request
-RESAMPLE_FREQ = '1 min'               # Pandas-compatible frequency for resampling
+TIMEFRAME = '5 secs'               # Use 5‑second bars for IBKR data request
+RESAMPLE_FREQ = '5s'               # Pandas-compatible frequency for resampling
 
 STOP_LOSS_POINTS = 9               # Stop loss in points
 TAKE_PROFIT_POINTS = 10            # Take profit in points
 
 COMMISSION = 0.62                  # Commission per trade (entry or exit)
-SLIPPAGE = 0.25                       # Slippage in points on entry
+SLIPPAGE = 0.25                    # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2024-12-01'          # Format: 'YYYY-MM-DD'
-END_DATE = '2025-02-01'            # Format: 'YYYY-MM-DD'
+START_DATE = '2024-10-01'          # Format: 'YYYY-MM-DD'
+END_DATE = '2025-02-04'            # Format: 'YYYY-MM-DD'
 
 # IBKR Connection Parameters
 IB_HOST = '127.0.0.1'
-IB_PORT = 7497
+IB_PORT = 4002
 IB_CLIENT_ID = 1
 
 # Define the MES futures contract.
@@ -48,7 +48,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-# --- New Historical Data Fetch Function ---
+# --- Historical Data Fetch Function ---
 def fetch_ibkr_data(ib, contract, bar_size, start_time, end_time, useRTH=False):
     """
     Fetch historical data from IBKR using ib_insync in chunks.
@@ -126,7 +126,7 @@ def fetch_ibkr_data(ib, contract, bar_size, start_time, end_time, useRTH=False):
         logger.error("No historical data fetched.")
         return pd.DataFrame()
 
-# --- Helper Functions (unchanged) ---
+# --- Helper Functions ---
 
 def mark_rth(df):
     """
@@ -175,7 +175,7 @@ def calculate_vwap(ohlc: pd.DataFrame) -> pd.Series:
     ohlc['vwap'] = ohlc_eastern['vwap']
     return ohlc['vwap']
 
-# --- Backtest Class Using the New Fetch Method ---
+# --- Backtest Class Using Dynamic RSI Update (Like the Live Code) ---
 
 class MESFuturesBacktest:
     def __init__(self, contract, start_date, end_date, timeframe, initial_capital,
@@ -255,13 +255,14 @@ class MESFuturesBacktest:
         self.data['pct_chg'] = self.data['close'].pct_change() * 100
         self.data['average'] = (self.data['open'] + self.data['high'] + self.data['low'] + self.data['close']) / 4
         self.data['barCount'] = 1
-        self.data['pct_chg'] = self.data['pct_chg'].fillna(0)  # Avoid chained assignment warning.
+        self.data['pct_chg'] = self.data['pct_chg'].fillna(0)
         logger.info(f"Fetched {len(self.data)} bars of data from IBKR.")
 
     def prepare_data(self):
         """
-        Prepare 5‑second data by marking RTH, resampling if needed, calculating VWAP,
-        and computing 15‑minute RSI.
+        Prepare 5‑second data by marking RTH and resampling if needed.
+        Also calculates the 5‑second VWAP.
+        Note: RSI is now calculated dynamically (using a 15‑minute resample) as in the live implementation.
         """
         logger.info("Preparing data for backtest...")
         # Mark Regular Trading Hours.
@@ -294,24 +295,6 @@ class MESFuturesBacktest:
         self.data_prepared['vwap'] = calculate_vwap(self.data_prepared)
         logger.info("Finished calculating VWAP.")
 
-        # Precompute 15‑minute RSI.
-        logger.info("Calculating 15‑minute RSI...")
-        bars_15m = self.data_prepared.resample('15min').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum'
-        }).dropna()
-        bars_15m['RSI'] = rsi(bars_15m, period=self.rsi_period)
-        logger.info("Finished calculating 15‑minute RSI.")
-
-        # Align the 15‑minute RSI with the 5‑second bars.
-        logger.info("Aligning 15‑minute RSI with 5‑second data...")
-        self.data_prepared['RSI'] = bars_15m['RSI'].reindex(self.data_prepared.index, method='ffill')
-        self.data_prepared['RSI'].fillna(method='bfill', inplace=True)
-        logger.info("Data preparation complete.")
-
     def get_unrealized_pnl(self, current_price):
         """Calculate the unrealized profit and loss based on the current price and open position."""
         if self.position == 'long':
@@ -322,24 +305,48 @@ class MESFuturesBacktest:
             return 0
 
     def run_backtest(self):
-        """Iterate over each 5‑second bar and apply the trading logic."""
+        """
+        Iterate over each 5‑second bar and apply the trading logic.
+        For each bar, update the RSI as follows:
+          1. Take all 5‑second bars up to the current time.
+          2. Resample that subset to 15‑minute bars (dropping incomplete bars).
+          3. Compute the RSI on the 15‑minute OHLC data.
+          4. Use the latest RSI value for trade decisions.
+        """
         logger.info("Starting backtest execution...")
-        times = self.data_prepared.index.to_numpy()
-        closes = self.data_prepared['close'].to_numpy()
-        highs = self.data_prepared['high'].to_numpy()
-        lows = self.data_prepared['low'].to_numpy()
-        vwaps = self.data_prepared['vwap'].to_numpy()
-        is_rths = self.data_prepared['is_rth'].astype(bool).to_numpy()
-        rsis = self.data_prepared['RSI'].to_numpy()
+        times = self.data_prepared.index
+        closes = self.data_prepared['close']
+        highs = self.data_prepared['high']
+        lows = self.data_prepared['low']
+        vwaps = self.data_prepared['vwap']
+        is_rths = self.data_prepared['is_rth'].astype(bool)
 
-        for i in range(len(self.data_prepared)):
-            current_idx = times[i]
-            price = closes[i]
-            high = highs[i]
-            low = lows[i]
-            vwap = vwaps[i]
-            is_rth = is_rths[i]
-            rsi_value = rsis[i]
+        for current_idx in times:
+            # Get current values from the 5‑second data.
+            price = closes.loc[current_idx]
+            high = highs.loc[current_idx]
+            low = lows.loc[current_idx]
+            vwap = vwaps.loc[current_idx]
+            is_rth = is_rths.loc[current_idx]
+
+            # Dynamically calculate the 15‑minute RSI exactly like in the live code.
+            # 1. Select all bars up to the current index.
+            subset = self.data_prepared.loc[:current_idx]
+            # 2. Resample these bars to 15‑minute OHLC data.
+            bars_15m = subset.resample('15min').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'sum'
+            }).dropna()
+            if len(bars_15m) < 1:
+                rsi_value = np.nan
+            else:
+                # 3. Compute the RSI on the 15‑minute data.
+                bars_15m['RSI'] = rsi(bars_15m, period=self.rsi_period)
+                # 4. Use the latest complete bar's RSI.
+                rsi_value = bars_15m['RSI'].iloc[-1]
 
             # Trading logic.
             if not np.isnan(rsi_value):
@@ -590,27 +597,6 @@ class MESFuturesBacktest:
         plt.tight_layout()
         plt.show()
 
-        # Plot the 15‑min RSI.
-        bars_15m_final = self.data_prepared.resample('15min').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum'
-        }).dropna()
-        bars_15m_final['RSI'] = rsi(bars_15m_final, period=self.rsi_period)
-        plt.figure(figsize=(14, 4))
-        plt.plot(bars_15m_final.index, bars_15m_final['RSI'], label='15‑min RSI', color='orange')
-        plt.axhline(70, color='red', linestyle='--', label='Overbought (70)')
-        plt.axhline(30, color='green', linestyle='--', label='Oversold (30)')
-        plt.title('RSI (15‑min) Over Full Date Range')
-        plt.xlabel('Time')
-        plt.ylabel('RSI')
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.show()
-
     def get_trade_results(self):
         """Return the trade log as a DataFrame."""
         if not self.trade_log:
@@ -633,7 +619,7 @@ if __name__ == "__main__":
             take_profit_points=TAKE_PROFIT_POINTS,
             commission=COMMISSION,
             slippage=SLIPPAGE,
-            rsi_period=14  # RSI period for the 15‑min bars
+            rsi_period=14  # RSI period for the 15‑minute bars
         )
         backtester.run_backtest()
         backtester.analyze_results()
