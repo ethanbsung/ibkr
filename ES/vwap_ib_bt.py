@@ -33,8 +33,8 @@ END_DATE = '2025-02-04'            # Format: 'YYYY-MM-DD'
 
 # IBKR Connection Parameters
 IB_HOST = '127.0.0.1'
-IB_PORT = 7497
-IB_CLIENT_ID = 1
+IB_PORT = 4002
+IB_CLIENT_ID = 2
 
 # Define the MES futures contract.
 # (Here we use the local symbol 'ESH5'; adjust parameters if needed.)

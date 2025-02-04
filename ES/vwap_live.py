@@ -11,8 +11,8 @@ import os
 
 # --- Configuration Parameters ---
 IB_HOST = '127.0.0.1'        # IBKR Gateway/TWS host
-IB_PORT = 7497               # IBKR Gateway/TWS paper trading port
-CLIENT_ID = 2                # Unique client ID
+IB_PORT = 4002               # IBKR Gateway/TWS paper trading port
+CLIENT_ID = 1                # Unique client ID
 
 DATA_SYMBOL = 'ES'           # E-mini S&P 500 for data
 DATA_EXPIRY = '202503'       # March 2025 (example)
