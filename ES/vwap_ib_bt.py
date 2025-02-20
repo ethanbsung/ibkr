@@ -18,8 +18,8 @@ INITIAL_CAPITAL = 5000             # Starting cash in USD
 POSITION_SIZE = 1                  # Number of contracts per trade
 CONTRACT_MULTIPLIER = 5            # Contract multiplier for MES
 
-TIMEFRAME = '5 secs'               # Use 5‑second bars for IBKR data request
-RESAMPLE_FREQ = '5s'               # Pandas-compatible frequency for resampling
+TIMEFRAME = '1 min'               # Use 5‑second bars for IBKR data request
+RESAMPLE_FREQ = '1 min'               # Pandas-compatible frequency for resampling
 
 STOP_LOSS_POINTS = 9               # Stop loss in points
 TAKE_PROFIT_POINTS = 10            # Take profit in points
@@ -28,7 +28,7 @@ COMMISSION = 0.62                  # Commission per trade (entry or exit)
 SLIPPAGE = 0.25                    # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2024-10-01'          # Format: 'YYYY-MM-DD'
+START_DATE = '2024-12-16'          # Format: 'YYYY-MM-DD'
 END_DATE = '2025-02-04'            # Format: 'YYYY-MM-DD'
 
 # IBKR Connection Parameters

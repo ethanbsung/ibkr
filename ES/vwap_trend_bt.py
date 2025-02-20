@@ -18,15 +18,15 @@ STOP_LOSS_POINTS = 9               # Stop loss in points
 TAKE_PROFIT_POINTS = 10            # Take profit in points
 
 COMMISSION = 0.62                  # Commission per trade (entry or exit)
-SLIPPAGE = 0.25                       # Slippage in points on entry
+SLIPPAGE = 0.25                    # Slippage in points on entry
 
 # Custom Backtest Dates (inclusive)
-START_DATE = '2024-12-01'          # Format: 'YYYY-MM-DD'
+START_DATE = '2024-06-01'          # Format: 'YYYY-MM-DD'
 END_DATE = '2024-12-25'            # Format: 'YYYY-MM-DD'
 
 # --- Setup Logging ---
 logging.basicConfig(
-    level=logging.INFO,  # Set to INFO to reduce verbosity
+    level=logging.DEBUG,  # Set to INFO to reduce verbosity
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout)
@@ -250,7 +250,8 @@ class MESFuturesBacktest:
     def prepare_data(self):
         """
         Prepares 1-minute data: mark RTH, filter by date, resample to 1-min,
-        calculate VWAP (with a 6PM Eastern session reset), and precompute 15-minute RSI.
+        and calculate VWAP (with a 6PM Eastern session reset).
+        Note: RSI will be calculated dynamically during the backtest loop.
         """
         logger.info("Preparing data for backtest...")
 
@@ -286,26 +287,6 @@ class MESFuturesBacktest:
         self.data_prepared['vwap'] = calculate_vwap(self.data_prepared)
         logger.info("Finished calculating VWAP.")
 
-        # Precompute 15-minute RSI
-        logger.info("Calculating 15-minute RSI...")
-        bars_15m = self.data_prepared.resample('15min').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum'
-        }).dropna()
-        bars_15m['RSI'] = rsi(bars_15m, period=self.rsi_period)
-        logger.info("Finished calculating 15-minute RSI.")
-
-        # Forward-fill RSI to 1-minute bars
-        logger.info("Aligning 15-minute RSI with 1-minute data...")
-        self.data_prepared['RSI'] = bars_15m['RSI'].reindex(self.data_prepared.index, method='ffill')
-        logger.info("Finished aligning RSI.")
-
-        # Optional: Fill initial NaNs if any
-        self.data_prepared['RSI'].fillna(method='bfill', inplace=True)
-
     def get_unrealized_pnl(self, current_price):
         """Calculates unrealized P&L based on the current price and open position."""
         if self.position == 'long':
@@ -317,27 +298,44 @@ class MESFuturesBacktest:
 
     def run_backtest(self):
         """
-        Main loop: Iterate over each 1-minute bar using precomputed RSI and perform trading logic.
+        Main loop: Iterate over each 1-minute bar using dynamic RSI calculation and perform trading logic.
+        RSI is calculated dynamically by:
+          1. Taking all 1-minute bars up to the current bar.
+          2. Resampling them to 15-minute bars.
+          3. Computing the RSI on these 15-minute bars.
+          4. Using the latest RSI value for trade decisions.
         """
         logger.info("Starting backtest execution...")
 
-        # Extract necessary columns as NumPy arrays for faster access
-        times = self.data_prepared.index.to_numpy()
-        closes = self.data_prepared['close'].to_numpy()
-        highs = self.data_prepared['high'].to_numpy()
-        lows = self.data_prepared['low'].to_numpy()
-        vwaps = self.data_prepared['vwap'].to_numpy()
-        is_rths = self.data_prepared['is_rth'].astype(bool).to_numpy()
-        rsis = self.data_prepared['RSI'].to_numpy()
+        times = self.data_prepared.index
+        closes = self.data_prepared['close']
+        highs = self.data_prepared['high']
+        lows = self.data_prepared['low']
+        vwaps = self.data_prepared['vwap']
+        is_rths = self.data_prepared['is_rth'].astype(bool)
 
-        for i in range(len(self.data_prepared)):
-            current_idx = times[i]
-            price = closes[i]
-            high = highs[i]
-            low = lows[i]
-            vwap = vwaps[i]
-            is_rth = is_rths[i]
-            rsi_value = rsis[i]
+        for current_idx in times:
+            # Current bar values
+            price = closes.loc[current_idx]
+            high = highs.loc[current_idx]
+            low = lows.loc[current_idx]
+            vwap = vwaps.loc[current_idx]
+            is_rth = is_rths.loc[current_idx]
+
+            # Dynamically calculate 15-minute RSI using all data up to the current bar.
+            subset = self.data_prepared.loc[:current_idx]
+            bars_15m = subset.resample('15min').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'sum'
+            }).dropna()
+            if len(bars_15m) < 1:
+                rsi_value = np.nan
+            else:
+                bars_15m['RSI'] = rsi(bars_15m, period=self.rsi_period)
+                rsi_value = bars_15m['RSI'].iloc[-1]
 
             # Trading logic
             if not np.isnan(rsi_value):
