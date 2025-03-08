@@ -1,386 +1,342 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from datetime import timedelta
+import logging
+from datetime import datetime
 
-# ------------- PARAMETERS -------------
-initial_capital = 5000
-# timeframe to test on (can be changed to '15T', '60T', etc.)
-timeframe = '30min'  
-bollinger_window = 20       # periods for Bollinger Bands
-bollinger_std = 2           # standard deviation multiplier
-stop_loss_points = 7        # fixed stop loss in points
-take_profit_points = 15     # fixed take profit in points
-contract_multiplier = 5     # assume 1 point = $1 (adjust if needed)
-data_file = "ib_es_1m_data.csv"
-# --------------------------------------
+# -------------------------------
+# Logging Configuration
+# -------------------------------
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger()
 
-# --- 1. Load the 1-minute data ---
-df = pd.read_csv(data_file, parse_dates=['date'])
-df.set_index('date', inplace=True)
-df.sort_index(inplace=True)
+# -------------------------------
+# Parameters & User Settings
+# -------------------------------
+data_file = "Data/es_daily_data.csv"  # Path to your CSV file (format: Symbol,Time,Open,High,Low,Last,...)
+initial_capital = 10000.0
+multiplier = 5
+commission_per_order = 1.24
+contracts = 1
 
-# --- 2. Compute daily cumulative VWAP on the 1-minute data ---
-# Typical price = (high + low + close) / 3
-df['typical'] = (df['high'] + df['low'] + df['close']) / 3
-df['tpv'] = df['typical'] * df['volume']
-# Group by day (using index.date) and compute cumulative sums:
-df['cum_tpv'] = df.groupby(df.index.date)['tpv'].cumsum()
-df['cum_volume'] = df.groupby(df.index.date)['volume'].cumsum()
-df['vwap'] = df['cum_tpv'] / df['cum_volume']
+# Bollinger Band Settings
+bb_period = 20         # e.g., 20-period Bollinger band
+bb_stddev = 2.0        # e.g., 2 standard deviations
 
-# --- 3. Resample data to the desired timeframe ---
-# We aggregate open, high, low, close, volume and take the last VWAP value in the period.
-agg_dict = {
-    'open': 'first',
-    'high': 'max',
-    'low': 'min',
-    'close': 'last',
-    'volume': 'sum',
-    'vwap': 'last'
-}
-df_resampled = df.resample(timeframe).agg(agg_dict).dropna()
+# ATR Settings
+atr_period = 14        # ATR lookback period
+atr_stop_multiplier = 5.0  # Stop loss will be set at 1 ATR away (change as needed)
 
-# --- 4. Calculate Bollinger Bands on the resampled data (using close price) ---
-df_resampled['ma'] = df_resampled['close'].rolling(window=bollinger_window).mean()
-df_resampled['std'] = df_resampled['close'].rolling(window=bollinger_window).std()
-df_resampled['upper_band'] = df_resampled['ma'] + bollinger_std * df_resampled['std']
-df_resampled['lower_band'] = df_resampled['ma'] - bollinger_std * df_resampled['std']
-df_resampled.dropna(inplace=True)
+start_date = '2008-01-01'
+end_date   = '2024-12-31'
 
-# --- 5. Backtest Simulation ---
-account_balance = initial_capital
-equity_list = []     # to record account equity at each bar
-equity_index = []    # corresponding timestamps
-trade_results = []   # list to hold trade details
-wins = []            # list of positive trade profits
-losses = []          # list of negative trade profits
+# -------------------------------
+# Data Preparation
+# -------------------------------
+df = pd.read_csv(data_file, parse_dates=['Time'])
+logger.info(f"Loaded {len(df)} rows from {data_file}")
+logger.info(f"Date range in data: {df['Time'].min()} to {df['Time'].max()}")
 
-# state variables
-in_trade = False
-trade_entry_price = None
-trade_entry_time = None
-trade_direction = None  # either 'long' or 'short'
-bars_in_trade = 0       # count bars with an open position
+# Rename "Last" to "Close" if needed
+if 'Last' in df.columns and 'Close' not in df.columns:
+    df.rename(columns={'Last': 'Close'}, inplace=True)
 
-# We will use a “next‐bar entry” approach:
-# On each bar (starting at index 1), check the *previous* bar for an entry signal.
-# If a signal exists and no trade is active, then we “enter” at the current bar's open.
-# Then, while in a trade, on each new bar we check if the bar’s high/low trigger our stop loss or take profit.
+# Verify required columns exist
+required_columns = ['Time', 'Close', 'High', 'Low']
+missing_columns = [col for col in required_columns if col not in df.columns]
+if missing_columns:
+    raise ValueError(f"Missing required columns: {missing_columns}")
 
-resampled_index = df_resampled.index
-i = 1
-while i < len(df_resampled):
-    current_bar = df_resampled.iloc[i]
-    current_time = resampled_index[i]
-    
-    # Mark-to-market equity: if in a trade, compute unrealized PnL using the current close.
-    if in_trade:
-        if trade_direction == 'long':
-            unrealized = (current_bar['close'] - trade_entry_price) * contract_multiplier
+# Convert key columns to numeric (in case they were read as strings)
+for col in ['Close', 'High', 'Low']:
+    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+df.sort_values('Time', inplace=True)
+
+# Filter by date range
+logger.info(f"Filtering data between {start_date} and {end_date}")
+df = df[(df['Time'] >= start_date) & (df['Time'] <= end_date)].copy()
+logger.info(f"After filtering: {len(df)} rows")
+
+if len(df) < bb_period:
+    raise ValueError(
+        f"Insufficient data ({len(df)} rows) for analysis. Need at least {bb_period} rows. "
+        "Please adjust your 'start_date'/'end_date' or check the CSV."
+    )
+
+df.reset_index(drop=True, inplace=True)
+
+# --- Compute Bollinger Bands ---
+df['BB_Middle'] = df['Close'].rolling(bb_period).mean()
+df['BB_Std']    = df['Close'].rolling(bb_period).std()
+df['BB_Upper']  = df['BB_Middle'] + bb_stddev * df['BB_Std']
+df['BB_Lower']  = df['BB_Middle'] - bb_stddev * df['BB_Std']
+
+# --- Compute ATR (14-period) ---
+df['PrevClose'] = df['Close'].shift(1)
+df['TR_1'] = df['High'] - df['Low']
+df['TR_2'] = (df['High'] - df['PrevClose']).abs()
+df['TR_3'] = (df['Low'] - df['PrevClose']).abs()
+df['TR']   = df[['TR_1', 'TR_2', 'TR_3']].max(axis=1)
+df['ATR']  = df['TR'].rolling(atr_period).mean()
+
+# Log the row count before dropping NaN values
+logger.info(f"Before dropping NaN values: {len(df)} rows")
+
+# Store initial close value before dropping NaN values
+initial_close = df['Close'].iloc[0]
+
+# Drop NaNs only from the columns we use for calculations
+df.dropna(subset=['Close', 'High', 'Low', 'BB_Middle', 'BB_Std', 'BB_Upper', 'BB_Lower', 'ATR'], inplace=True)
+logger.info(f"After dropping NaN values: {len(df)} rows")
+df.reset_index(drop=True, inplace=True)
+
+# -------------------------------
+# Backtest Simulation
+# -------------------------------
+capital = initial_capital
+in_position = False
+position = None
+trade_results = []
+equity_curve = []
+
+for i in range(len(df)):
+    row = df.loc[i]
+    current_time  = row['Time']
+    current_price = row['Close']
+
+    # Calculate mark-to-market equity
+    if in_position:
+        if position['direction'] == 'long':
+            unrealized = (current_price - position['entry_price']) * multiplier * position['contracts']
         else:  # short
-            unrealized = (trade_entry_price - current_bar['close']) * contract_multiplier
-        current_equity = account_balance + unrealized
+            unrealized = (position['entry_price'] - current_price) * multiplier * position['contracts']
+        equity = capital + unrealized
     else:
-        current_equity = account_balance
-        
-    equity_list.append(current_equity)
-    equity_index.append(current_time)
-    
-    # If not in a trade, check if the previous bar generated an entry signal.
-    if not in_trade:
-        prev_bar = df_resampled.iloc[i-1]
-        # Long signal: previous bar’s close above its VWAP AND its low dipped below its lower Bollinger band.
-        long_signal = (prev_bar['close'] > prev_bar['vwap']) and (prev_bar['low'] < prev_bar['lower_band'])
-        # Short signal: previous bar’s close below its VWAP AND its high exceeded its upper Bollinger band.
-        short_signal = (prev_bar['close'] < prev_bar['vwap']) and (prev_bar['high'] > prev_bar['upper_band'])
-        
-        if long_signal or short_signal:
-            # Enter trade at the current bar's open.
-            trade_entry_price = current_bar['open']
-            trade_entry_time = current_time
-            trade_direction = 'long' if long_signal else 'short'
-            in_trade = True
-            entry_bar = i  # record the bar index at which entry occurs
+        equity = capital
+    equity_curve.append((current_time, equity))
 
-            # Immediately check the entry bar for an exit (if price gaps through the stop or TP)
-            if trade_direction == 'long':
-                sl_price = trade_entry_price - stop_loss_points
-                tp_price = trade_entry_price + take_profit_points
-                if current_bar['low'] <= sl_price:
-                    # Stop loss triggered in the entry bar.
-                    exit_price = sl_price
-                    profit = (exit_price - trade_entry_price) * contract_multiplier
-                    trade_exit_time = current_time
-                    account_balance += profit
-                    trade_results.append({
-                        'entry_time': trade_entry_time,
-                        'exit_time': trade_exit_time,
-                        'direction': trade_direction,
-                        'entry_price': trade_entry_price,
-                        'exit_price': exit_price,
-                        'profit': profit
-                    })
-                    (wins if profit > 0 else losses).append(profit)
-                    in_trade = False
-                    i += 1
-                    continue  # move to the next bar
-                elif current_bar['high'] >= tp_price:
-                    # Take profit triggered.
-                    exit_price = tp_price
-                    profit = (exit_price - trade_entry_price) * contract_multiplier
-                    trade_exit_time = current_time
-                    account_balance += profit
-                    trade_results.append({
-                        'entry_time': trade_entry_time,
-                        'exit_time': trade_exit_time,
-                        'direction': trade_direction,
-                        'entry_price': trade_entry_price,
-                        'exit_price': exit_price,
-                        'profit': profit
-                    })
-                    (wins if profit > 0 else losses).append(profit)
-                    in_trade = False
-                    i += 1
-                    continue
-            else:  # short trade entry
-                sl_price = trade_entry_price + stop_loss_points
-                tp_price = trade_entry_price - take_profit_points
-                if current_bar['high'] >= sl_price:
-                    exit_price = sl_price
-                    profit = (trade_entry_price - exit_price) * contract_multiplier
-                    trade_exit_time = current_time
-                    account_balance += profit
-                    trade_results.append({
-                        'entry_time': trade_entry_time,
-                        'exit_time': trade_exit_time,
-                        'direction': trade_direction,
-                        'entry_price': trade_entry_price,
-                        'exit_price': exit_price,
-                        'profit': profit
-                    })
-                    (wins if profit > 0 else losses).append(profit)
-                    in_trade = False
-                    i += 1
-                    continue
-                elif current_bar['low'] <= tp_price:
-                    exit_price = tp_price
-                    profit = (trade_entry_price - exit_price) * contract_multiplier
-                    trade_exit_time = current_time
-                    account_balance += profit
-                    trade_results.append({
-                        'entry_time': trade_entry_time,
-                        'exit_time': trade_exit_time,
-                        'direction': trade_direction,
-                        'entry_price': trade_entry_price,
-                        'exit_price': exit_price,
-                        'profit': profit
-                    })
-                    (wins if profit > 0 else losses).append(profit)
-                    in_trade = False
-                    i += 1
-                    continue
+    # Check exit conditions if in a position
+    if in_position:
+        if position['direction'] == 'long':
+            # Exit if High touches or exceeds take_profit (price reverts to mean)
+            if row['High'] >= position['take_profit']:
+                exit_price = position['take_profit']
+                trade_profit = ((exit_price - position['entry_price']) * multiplier * position['contracts']) - commission_per_order
+                trade_results.append({
+                    'entry_time': position['entry_time'],
+                    'exit_time': current_time,
+                    'direction': 'long',
+                    'entry_price': position['entry_price'],
+                    'exit_price': exit_price,
+                    'profit': trade_profit
+                })
+                logger.info(f"Long TP hit at {current_time} | Exit: {exit_price:.2f} | Entry: {position['entry_price']:.2f} | Profit: {trade_profit:.2f}")
+                capital += trade_profit
+                in_position = False
+                position = None
+
+            # Exit if Low touches or falls below stop_loss
+            elif row['Low'] <= position['stop_loss']:
+                exit_price = position['stop_loss']
+                trade_profit = ((exit_price - position['entry_price']) * multiplier * position['contracts']) - commission_per_order
+                trade_results.append({
+                    'entry_time': position['entry_time'],
+                    'exit_time': current_time,
+                    'direction': 'long',
+                    'entry_price': position['entry_price'],
+                    'exit_price': exit_price,
+                    'profit': trade_profit
+                })
+                logger.info(f"Long SL hit at {current_time} | Exit: {exit_price:.2f} | Entry: {position['entry_price']:.2f} | Profit: {trade_profit:.2f}")
+                capital += trade_profit
+                in_position = False
+                position = None
+
+        else:  # Short position
+            if row['Low'] <= position['take_profit']:
+                exit_price = position['take_profit']
+                trade_profit = ((position['entry_price'] - exit_price) * multiplier * position['contracts']) - commission_per_order
+                trade_results.append({
+                    'entry_time': position['entry_time'],
+                    'exit_time': current_time,
+                    'direction': 'short',
+                    'entry_price': position['entry_price'],
+                    'exit_price': exit_price,
+                    'profit': trade_profit
+                })
+                logger.info(f"Short TP hit at {current_time} | Exit: {exit_price:.2f} | Entry: {position['entry_price']:.2f} | Profit: {trade_profit:.2f}")
+                capital += trade_profit
+                in_position = False
+                position = None
+
+            elif row['High'] >= position['stop_loss']:
+                exit_price = position['stop_loss']
+                trade_profit = ((position['entry_price'] - exit_price) * multiplier * position['contracts']) - commission_per_order
+                trade_results.append({
+                    'entry_time': position['entry_time'],
+                    'exit_time': current_time,
+                    'direction': 'short',
+                    'entry_price': position['entry_price'],
+                    'exit_price': exit_price,
+                    'profit': trade_profit
+                })
+                logger.info(f"Short SL hit at {current_time} | Exit: {exit_price:.2f} | Entry: {position['entry_price']:.2f} | Profit: {trade_profit:.2f}")
+                capital += trade_profit
+                in_position = False
+                position = None
+
+    # Check entry signals if not in a position
+    if not in_position:
+        if row['Close'] < row['BB_Lower']:
+            # Enter long when price is below lower band
+            entry_price = row['Close']
+            take_profit = row['BB_Middle']  # take profit when price reverts to the mean (middle band)
+            stop_loss   = entry_price - atr_stop_multiplier * row['ATR']  # adjustable ATR stop loss
+            capital -= commission_per_order
+            in_position = True
+            position = {
+                'direction': 'long',
+                'entry_time': current_time,
+                'entry_price': entry_price,
+                'take_profit': take_profit,
+                'stop_loss': stop_loss,
+                'contracts': contracts
+            }
+            logger.info(f"Entering LONG at {current_time} | Price: {entry_price:.2f} | TP: {take_profit:.2f} | SL: {stop_loss:.2f}")
+        elif row['Close'] > row['BB_Upper']:
+            # Enter short when price is above upper band
+            entry_price = row['Close']
+            take_profit = row['BB_Middle']  # take profit when price reverts to the mean (middle band)
+            stop_loss   = entry_price + atr_stop_multiplier * row['ATR']  # adjustable ATR stop loss
+            capital -= commission_per_order
+            in_position = True
+            position = {
+                'direction': 'short',
+                'entry_time': current_time,
+                'entry_price': entry_price,
+                'take_profit': take_profit,
+                'stop_loss': stop_loss,
+                'contracts': contracts
+            }
+            logger.info(f"Entering SHORT at {current_time} | Price: {entry_price:.2f} | TP: {take_profit:.2f} | SL: {stop_loss:.2f}")
+
+# Close any open position at the end of the data series
+if in_position:
+    last_idx = df.index[-1]
+    row = df.loc[last_idx]
+    current_time  = row['Time']
+    current_price = row['Close']
+    if position['direction'] == 'long':
+        exit_price = current_price
+        trade_profit = ((exit_price - position['entry_price']) * multiplier * position['contracts']) - commission_per_order
     else:
-        # If already in a trade, check for exit conditions.
-        if trade_direction == 'long':
-            sl_price = trade_entry_price - stop_loss_points
-            tp_price = trade_entry_price + take_profit_points
-            if current_bar['low'] <= sl_price:
-                exit_price = sl_price
-                profit = (exit_price - trade_entry_price) * contract_multiplier
-                trade_exit_time = current_time
-                account_balance += profit
-                trade_results.append({
-                    'entry_time': trade_entry_time,
-                    'exit_time': trade_exit_time,
-                    'direction': trade_direction,
-                    'entry_price': trade_entry_price,
-                    'exit_price': exit_price,
-                    'profit': profit
-                })
-                (wins if profit > 0 else losses).append(profit)
-                in_trade = False
-            elif current_bar['high'] >= tp_price:
-                exit_price = tp_price
-                profit = (exit_price - trade_entry_price) * contract_multiplier
-                trade_exit_time = current_time
-                account_balance += profit
-                trade_results.append({
-                    'entry_time': trade_entry_time,
-                    'exit_time': trade_exit_time,
-                    'direction': trade_direction,
-                    'entry_price': trade_entry_price,
-                    'exit_price': exit_price,
-                    'profit': profit
-                })
-                (wins if profit > 0 else losses).append(profit)
-                in_trade = False
-        else:  # short trade
-            sl_price = trade_entry_price + stop_loss_points
-            tp_price = trade_entry_price - take_profit_points
-            if current_bar['high'] >= sl_price:
-                exit_price = sl_price
-                profit = (trade_entry_price - exit_price) * contract_multiplier
-                trade_exit_time = current_time
-                account_balance += profit
-                trade_results.append({
-                    'entry_time': trade_entry_time,
-                    'exit_time': trade_exit_time,
-                    'direction': trade_direction,
-                    'entry_price': trade_entry_price,
-                    'exit_price': exit_price,
-                    'profit': profit
-                })
-                (wins if profit > 0 else losses).append(profit)
-                in_trade = False
-            elif current_bar['low'] <= tp_price:
-                exit_price = tp_price
-                profit = (trade_entry_price - exit_price) * contract_multiplier
-                trade_exit_time = current_time
-                account_balance += profit
-                trade_results.append({
-                    'entry_time': trade_entry_time,
-                    'exit_time': trade_exit_time,
-                    'direction': trade_direction,
-                    'entry_price': trade_entry_price,
-                    'exit_price': exit_price,
-                    'profit': profit
-                })
-                (wins if profit > 0 else losses).append(profit)
-                in_trade = False
-
-    if in_trade:
-        bars_in_trade += 1  # count this bar as time in trade
-        
-    i += 1
-
-# If a trade remains open at the end, close it at the final bar's close.
-if in_trade:
-    last_bar = df_resampled.iloc[-1]
-    if trade_direction == 'long':
-        profit = (last_bar['close'] - trade_entry_price) * contract_multiplier
-    else:
-        profit = (trade_entry_price - last_bar['close']) * contract_multiplier
-    account_balance += profit
+        exit_price = current_price
+        trade_profit = ((position['entry_price'] - exit_price) * multiplier * position['contracts']) - commission_per_order
     trade_results.append({
-        'entry_time': trade_entry_time,
-        'exit_time': df_resampled.index[-1],
-        'direction': trade_direction,
-        'entry_price': trade_entry_price,
-        'exit_price': last_bar['close'],
-        'profit': profit
+        'entry_time': position['entry_time'],
+        'exit_time': current_time,
+        'direction': position['direction'],
+        'entry_price': position['entry_price'],
+        'exit_price': exit_price,
+        'profit': trade_profit
     })
-    (wins if profit > 0 else losses).append(profit)
-    in_trade = False
-    # update last equity value:
-    if equity_list:
-        equity_list[-1] = account_balance
+    logger.info(f"Closing open {position['direction'].upper()} at end {current_time} | Exit: {exit_price:.2f} | Entry: {position['entry_price']:.2f} | Profit: {trade_profit:.2f}")
+    capital += trade_profit
+    equity_curve[-1] = (current_time, capital)
+    in_position = False
+    position = None
 
-# Build an equity curve DataFrame
-equity_df = pd.DataFrame({'Equity': equity_list}, index=equity_index)
+# Convert equity curve to DataFrame
+equity_df = pd.DataFrame(equity_curve, columns=['Time', 'Equity'])
+equity_df.set_index('Time', inplace=True)
 
-# --- 6. Compute Performance Metrics ---
-start_date = df_resampled.index[0]
-end_date = df_resampled.index[-1]
-total_bars = len(df_resampled)
-exposure_percentage = (bars_in_trade / total_bars) * 100
-final_balance = account_balance
-total_return_pct = ((final_balance / initial_capital) - 1) * 100
+# Benchmark calculation (move after equity curve creation)
+df.set_index('Time', inplace=True)
+benchmark_equity = (df['Close'] / initial_close) * initial_capital
+benchmark_equity = benchmark_equity.reindex(equity_df.index).ffill()
 
-# Annualized return calculation (using total days in the test period)
-total_days = (end_date - start_date).days + 1
-annualized_return = ((final_balance / initial_capital) ** (365 / total_days) - 1) * 100
+# -------------------------------
+# Performance Metrics Calculation
+# -------------------------------
+final_account_balance = capital
+total_return_percentage = ((final_account_balance / initial_capital) - 1) * 100
 
-# --- Benchmark: Buy & Hold on the resampled close ---
-initial_close = df_resampled['close'].iloc[0]
-benchmark_equity = (df_resampled['close'] / initial_close) * initial_capital
-benchmark_return = ((benchmark_equity.iloc[-1] / initial_capital) - 1) * 100
-
-# --- Risk Metrics ---
-# Resample the equity curve to daily values.
-daily_equity = equity_df['Equity'].resample('D').last()
-daily_returns = daily_equity.pct_change().dropna()
-volatility_annual = daily_returns.std() * np.sqrt(252)
-sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252) if daily_returns.std() != 0 else np.nan
-
-# Sortino Ratio (using only negative daily returns)
-downside_returns = daily_returns[daily_returns < 0]
-downside_std = downside_returns.std() * np.sqrt(252) if not downside_returns.empty else np.nan
-sortino_ratio = (daily_returns.mean() * 252) / downside_std if downside_std not in [0, np.nan] else np.nan
-
-# Drawdowns
-running_max = equity_df['Equity'].cummax()
-drawdown = (equity_df['Equity'] - running_max) / running_max
-max_drawdown_pct = drawdown.min() * 100  # negative value
-max_drawdown_dollar = (equity_df['Equity'] - running_max).min()
-
-# Average drawdown (only when equity is below its running max)
-if not drawdown[drawdown < 0].empty:
-    avg_drawdown_pct = drawdown[drawdown < 0].mean() * 100
+start_dt = pd.to_datetime(start_date)
+end_dt = pd.to_datetime(end_date)
+years = (end_dt - start_dt).days / 365.25
+if years <= 0:
+    annualized_return_percentage = np.nan
 else:
-    avg_drawdown_pct = 0
-avg_drawdown_dollar = np.nan  # (calculation can be refined if desired)
+    annualized_return_percentage = ((final_account_balance / initial_capital) ** (1 / years) - 1) * 100
 
-# Calmar Ratio: annualized return divided by the absolute max drawdown (in %)
-calmar_ratio = (annualized_return / abs(max_drawdown_pct)) if max_drawdown_pct != 0 else np.nan
+# Calculate returns and volatility
+equity_df['returns'] = equity_df['Equity'].pct_change()
+volatility_annual = equity_df['returns'].std() * np.sqrt(252) * 100  # approximate annualized volatility
 
-# Drawdown durations (in days)
-drawdown_durations = []
-drawdown_start = None
-peak_value = equity_df['Equity'].iloc[0]
+total_trades = len(trade_results)
+winning_trades = [t for t in trade_results if t['profit'] > 0]
+losing_trades  = [t for t in trade_results if t['profit'] <= 0]
+win_rate = (len(winning_trades) / total_trades * 100) if total_trades > 0 else 0
 
-for time, eq in equity_df['Equity'].items():
-    if eq >= peak_value:
-        # if a drawdown was active, record its duration
-        if drawdown_start is not None:
-            duration = (time - drawdown_start).days
-            drawdown_durations.append(duration)
-            drawdown_start = None
-        peak_value = eq
-    else:
-        if drawdown_start is None:
-            drawdown_start = time
+if losing_trades and sum(t['profit'] for t in losing_trades) != 0:
+    profit_factor = sum(t['profit'] for t in winning_trades) / abs(sum(t['profit'] for t in losing_trades))
+else:
+    profit_factor = np.nan
 
-max_drawdown_duration = max(drawdown_durations) if drawdown_durations else 0
-avg_drawdown_duration = np.mean(drawdown_durations) if drawdown_durations else 0
+avg_win = np.mean([t['profit'] for t in winning_trades]) if winning_trades else np.nan
+avg_loss = np.mean([t['profit'] for t in losing_trades]) if losing_trades else np.nan
 
-win_rate = (len(wins) / len(trade_results)) * 100 if trade_results else 0
-profit_factor = (sum(wins) / abs(sum(losses))) if sum(losses) != 0 else np.nan
+if equity_df['returns'].std() != 0:
+    sharpe_ratio = (equity_df['returns'].mean() / equity_df['returns'].std()) * np.sqrt(252)
+else:
+    sharpe_ratio = np.nan
+
+downside_std = equity_df[equity_df['returns'] < 0]['returns'].std()
+if downside_std != 0:
+    sortino_ratio = (equity_df['returns'].mean() / downside_std) * np.sqrt(252)
+else:
+    sortino_ratio = np.nan
+
+equity_df['EquityPeak'] = equity_df['Equity'].cummax()
+equity_df['Drawdown'] = (equity_df['Equity'] - equity_df['EquityPeak']) / equity_df['EquityPeak']
+max_drawdown_percentage = equity_df['Drawdown'].min() * 100
+equity_df['DrawdownDollar'] = equity_df['EquityPeak'] - equity_df['Equity']
+max_drawdown_dollar = equity_df['DrawdownDollar'].max()
 
 results = {
     "Start Date": start_date,
     "End Date": end_date,
-    "Exposure Time": f"{exposure_percentage:.2f}%",
-    "Final Account Balance": f"${final_balance:,.2f}",
-    "Total Return": f"{total_return_pct:.2f}%",
-    "Annualized Return": f"{annualized_return:.2f}%",
-    "Benchmark Return": f"{benchmark_return:.2f}%",
+    "Final Account Balance": f"${final_account_balance:,.2f}",
+    "Total Return": f"{total_return_percentage:.2f}%",
+    "Annualized Return": f"{annualized_return_percentage:.2f}%",
+    "Benchmark Return": f"{((df['Close'].iloc[-1]/initial_close)-1)*100:.2f}%",
     "Volatility (Annual)": f"{volatility_annual:.2f}%",
-    "Total Trades": len(trade_results),
-    "Winning Trades": len(wins),
-    "Losing Trades": len(losses),
+    "Total Trades": total_trades,
+    "Winning Trades": len(winning_trades),
+    "Losing Trades": len(losing_trades),
     "Win Rate": f"{win_rate:.2f}%",
-    "Profit Factor": f"{profit_factor:.2f}",
-    "Sharpe Ratio": f"{sharpe_ratio:.2f}",
-    "Sortino Ratio": f"{sortino_ratio:.2f}",
-    "Calmar Ratio": f"{calmar_ratio:.2f}",
-    "Max Drawdown (%)": f"{max_drawdown_pct:.2f}%",
-    "Average Drawdown (%)": f"{avg_drawdown_pct:.2f}%",
+    "Profit Factor": f"{profit_factor:.2f}" if not np.isnan(profit_factor) else "NaN",
+    "Sharpe Ratio": f"{sharpe_ratio:.2f}" if not np.isnan(sharpe_ratio) else "NaN",
+    "Sortino Ratio": f"{sortino_ratio:.2f}" if not np.isnan(sortino_ratio) else "NaN",
+    "Max Drawdown (%)": f"{max_drawdown_percentage:.2f}%",
     "Max Drawdown ($)": f"${max_drawdown_dollar:,.2f}",
-    "Average Drawdown ($)": f"${avg_drawdown_dollar if not np.isnan(avg_drawdown_dollar) else 0:,.2f}",
-    "Max Drawdown Duration": f"{max_drawdown_duration:.2f} days",
-    "Average Drawdown Duration": f"{avg_drawdown_duration:.2f} days",
+    "Average Win ($)": f"${avg_win:,.2f}" if not np.isnan(avg_win) else "NaN",
+    "Average Loss ($)": f"${avg_loss:,.2f}" if not np.isnan(avg_loss) else "NaN",
 }
 
 print("\nPerformance Summary:")
 for key, value in results.items():
     print(f"{key:30}: {value:>15}")
 
-# --- 7. Plot the Equity Curve vs. the Benchmark ---
+# -------------------------------
+# Plotting the Equity Curve vs. Benchmark
+# -------------------------------
 plt.figure(figsize=(14, 7))
 plt.plot(equity_df.index, equity_df['Equity'], label='Strategy Equity')
-plt.plot(df_resampled.index, benchmark_equity, label='Benchmark Equity (Buy & Hold)', alpha=0.7)
-plt.title('Equity Curve: Strategy vs Benchmark')
+#plt.plot(benchmark_equity.index, benchmark_equity, label='Benchmark Equity (Buy & Hold)', alpha=0.7)
+plt.title('Equity Curve: Bollinger Band Mean Reversion Strategy vs Benchmark')
 plt.xlabel('Time')
 plt.ylabel('Account Balance ($)')
 plt.legend()
