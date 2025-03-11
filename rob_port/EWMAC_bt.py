@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 # --------------- SETTINGS AND ASSUMPTIONS --------------------
 # Backtest account parameters
-initial_capital = 250000.0
+initial_capital = 25000.0
 risk_target = 0.20  # 20% risk target
 IDM = risk_target   # Using risk target as a risk adjustment factor
 tau = 1.0           # Time factor for position sizing
@@ -20,16 +20,16 @@ filters = [
 ]
 
 forecast_cap = 20       # Cap for forecast
-vol_window = 20         # Rolling window for volatility
+vol_window = 20         # Rolling window for daily volatility
 instrument_weight = 0.25
 FX = 1.0
 
 # Contract multipliers for each instrument
 contract_multipliers = {
-    'es': 50,
-    'nq': 20,
-    'cl': 1000,
-    'ng': 10000
+    'es': 5,
+    'nq': 2,
+    'cl': 100,
+    'ng': 1000
 }
 
 # CSV file paths
@@ -73,29 +73,39 @@ def single_filter_backtest(df, fast, slow, multiplier, capital, show_name="Filte
     Returns a DataFrame with columns: ['Position','Trade','PnL','Equity'].
     Mark-to-market approach.
     """
-    # Compute daily returns and volatility
+    # Compute daily returns
     df['Return'] = df['Close'].pct_change()
-    df['Vol'] = compute_volatility(df['Return'], vol_window)
+    # Rolling daily std dev
+    df['Vol_daily'] = compute_volatility(df['Return'], vol_window)
+    # Annualize (assuming 256 trading days)
+    df['Vol_annual'] = df['Vol_daily'] * np.sqrt(256)
     
     # Compute EWMAs
     df['EWMA_fast'] = compute_EWMA(df['Close'], fast)
     df['EWMA_slow'] = compute_EWMA(df['Close'], slow)
     
     # Raw forecast
-    df['RawForecast'] = (df['EWMA_fast'] - df['EWMA_slow']) / df['Vol'].replace(0, np.nan)
+    df['RawForecast'] = (df['EWMA_fast'] - df['EWMA_slow']) / df['Vol_daily'].replace(0, np.nan)
     
-    # For single filter, no weighting or FDM in this function, so treat as 1.0
-    # If you do want to incorporate weight & FDM for each filter, you can pass them in
+    # For single filter, treat weight & FDM as 1.0
     df['CappedForecast'] = capped_forecast(df['RawForecast'], forecast_cap)
     
     # Position sizing
-    # N_opt = (CappedForecast * capital * IDM * instrument_weight * tau) / (10 * multiplier * price * FX * vol)
-    df['N_opt'] = (df['CappedForecast'] * capital * IDM * instrument_weight * tau
-                   / (10 * multiplier * df['Close'] * FX * df['Vol'].replace(0, np.nan)))
+    # N_opt = (CappedForecast * capital * IDM * instrument_weight * tau) / (multiplier * price * FX * Vol_annual)
+    df['N_opt'] = (
+        df['CappedForecast'] 
+        * capital 
+        * IDM 
+        * instrument_weight 
+        * tau
+        / (multiplier * df['Close'] * FX * df['Vol_annual'].replace(0, np.nan))
+    )
     
     # Buffer width
-    df['BufferWidth'] = (0.1 * capital * IDM * instrument_weight * tau
-                         / (multiplier * df['Close'] * FX * df['Vol'].replace(0, np.nan)))
+    df['BufferWidth'] = (
+        0.1 * capital * IDM * instrument_weight * tau
+        / (multiplier * df['Close'] * FX * df['Vol_annual'].replace(0, np.nan))
+    )
     
     df['B_L'] = (df['N_opt'] - df['BufferWidth']).round()
     df['B_U'] = (df['N_opt'] + df['BufferWidth']).round()
@@ -151,9 +161,12 @@ def combined_filter_backtest(df, filter_defs, multiplier, capital, show_name="Co
     Combine multiple filters' raw forecasts with their weights & FDM, then do
     the same mark-to-market approach as above.
     """
-    # Daily returns & volatility
+    # Daily returns
     df['Return'] = df['Close'].pct_change()
-    df['Vol'] = compute_volatility(df['Return'], vol_window)
+    # Rolling daily std dev
+    df['Vol_daily'] = compute_volatility(df['Return'], vol_window)
+    # Annualize
+    df['Vol_annual'] = df['Vol_daily'] * np.sqrt(256)
     
     # Compute each filter's raw forecast
     df['RawCombinedForecast'] = 0.0
@@ -163,29 +176,35 @@ def combined_filter_backtest(df, filter_defs, multiplier, capital, show_name="Co
         w = f['weight']
         fdm = f['FDM']
         
-        # EWMAs
         col_fast = f'EWMA_fast_{fast}'
         col_slow = f'EWMA_slow_{slow}'
         df[col_fast] = compute_EWMA(df['Close'], fast)
         df[col_slow] = compute_EWMA(df['Close'], slow)
         
-        # Raw forecast
         col_rf = f'RawForecast_{fast}_{slow}'
-        df[col_rf] = (df[col_fast] - df[col_slow]) / df['Vol'].replace(0, np.nan)
+        df[col_rf] = (df[col_fast] - df[col_slow]) / df['Vol_daily'].replace(0, np.nan)
         
-        # Add to combined
+        # Weighted sum
         df['RawCombinedForecast'] += w * fdm * df[col_rf]
     
     # Cap
     df['CappedCombinedForecast'] = capped_forecast(df['RawCombinedForecast'], forecast_cap)
     
-    # Position sizing
-    df['N_opt'] = (df['CappedCombinedForecast'] * capital * IDM * instrument_weight * tau
-                   / (10 * multiplier * df['Close'] * FX * df['Vol'].replace(0, np.nan)))
+    # Position sizing (no "/10", use annual vol)
+    df['N_opt'] = (
+        df['CappedCombinedForecast'] 
+        * capital 
+        * IDM 
+        * instrument_weight 
+        * tau
+        / (multiplier * df['Close'] * FX * df['Vol_annual'].replace(0, np.nan))
+    )
     
     # Buffer
-    df['BufferWidth'] = (0.1 * capital * IDM * instrument_weight * tau
-                         / (multiplier * df['Close'] * FX * df['Vol'].replace(0, np.nan)))
+    df['BufferWidth'] = (
+        0.1 * capital * IDM * instrument_weight * tau
+        / (multiplier * df['Close'] * FX * df['Vol_annual'].replace(0, np.nan))
+    )
     df['B_L'] = (df['N_opt'] - df['BufferWidth']).round()
     df['B_U'] = (df['N_opt'] + df['BufferWidth']).round()
     
@@ -252,9 +271,6 @@ for inst in instruments:
     instruments[inst] = instruments[inst].loc[common_dates].copy()
 
 # --------------- RUN BACKTESTS --------------------
-# We'll store each instrument's strategy results in a dict of DataFrames:
-#   results[(inst, filterName)] = DataFrame of single-filter
-#   results[(inst, 'Combined')] = DataFrame of combined approach
 results = {}
 portfolio_df = pd.DataFrame(index=common_dates, columns=['PnL','Equity'], dtype=float)
 portfolio_df[['PnL','Equity']] = 0.0
@@ -285,7 +301,7 @@ for inst, df in instruments.items():
     portfolio_df['PnL'] += combined_res['PnL']
 
 # 4) Compute final portfolio equity
-portfolio_df['PnL'].fillna(0, inplace=True)
+portfolio_df['PnL'] = portfolio_df['PnL'].fillna(0)
 portfolio_df['Equity'] = initial_capital + portfolio_df['PnL'].cumsum()
 
 # --------------- PLOTTING --------------------
@@ -306,6 +322,10 @@ for inst in instruments.keys():
     
     plt.xlabel('Date')
     plt.ylabel('Equity ($)')
+    
+    # Turn off scientific notation on the y-axis:
+    plt.ticklabel_format(style='plain', axis='y')
+    
     plt.legend()
     plt.show()
 
@@ -315,6 +335,10 @@ plt.title("Portfolio Equity (All Instruments Combined)")
 plt.plot(portfolio_df.index, portfolio_df['Equity'], label='Portfolio', color='red')
 plt.xlabel('Date')
 plt.ylabel('Equity ($)')
+
+# Ensure we see the actual scale (no scientific notation):
+plt.ticklabel_format(style='plain', axis='y')
+
 plt.legend()
 plt.show()
 

@@ -19,7 +19,7 @@ data_file = "Data/es_daily_data.csv"  # CSV file with columns: Time, High, Low, 
 # Common backtest parameters for each strategy
 initial_capital = 10000.0         # starting account balance per strategy (aggregate will be 2x this)
 commission_per_order = 1.24       # commission per order (per contract)
-num_contracts = 2                 # number of contracts to trade
+num_contracts = 1                 # number of contracts to trade
 multiplier = 5                    # each point move is worth $5 per contract
 
 # Common date range for both strategies
@@ -246,6 +246,9 @@ combined_equity_df['EquityPeak'] = combined_equity_df['Equity'].cummax()
 combined_equity_df['Drawdown'] = (combined_equity_df['Equity'] - combined_equity_df['EquityPeak']) / combined_equity_df['EquityPeak']
 max_drawdown_percentage = combined_equity_df['Drawdown'].min() * 100
 
+combined_equity_df['DrawdownAmount'] = combined_equity_df['EquityPeak'] - combined_equity_df['Equity']
+max_drawdown_dollar = combined_equity_df['DrawdownAmount'].max()
+
 sharpe_ratio = (combined_equity_df['returns'].mean() / combined_equity_df['returns'].std() * np.sqrt(252)
                 if combined_equity_df['returns'].std() != 0 else np.nan)
 downside_std = combined_equity_df[combined_equity_df['returns'] < 0]['returns'].std()
@@ -276,7 +279,10 @@ results = {
     "Sortino Ratio": f"{sortino_ratio:.2f}" if not np.isnan(sortino_ratio) else "NaN",
     "Calmar Ratio": f"{calmar_ratio:.2f}" if not np.isnan(calmar_ratio) else "NaN",
     "Max Drawdown (%)": f"{max_drawdown_percentage:.2f}%",
+    "Max Drawdown ($):": f"${max_drawdown_dollar:.2f}"
 }
+
+print(f"Max Drawdown ($): ${max_drawdown_dollar:,.2f}")
 
 print("\nAggregate Performance Summary:")
 for key, value in results.items():

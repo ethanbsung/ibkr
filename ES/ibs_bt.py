@@ -16,13 +16,13 @@ logger = logging.getLogger()
 # -------------------------------
 
 # Input file path for ES futures daily data (replace with your file path)
-data_file = "Data/es_daily_data.csv"  # File should include: Time, High, Low, Last, Volume (if available)
+data_file = "Data/chfmicro_daily_data.csv"  # File should include: Time, High, Low, Last, Volume (if available)
 
 # Backtest parameters
 initial_capital = 10000.0         # starting account balance in dollars
 commission_per_order = 1.24       # commission per order (per contract)
 num_contracts = 1                 # number of contracts to trade
-multiplier = 5                    # each point move is worth $5 per contract
+multiplier = 12500                    # each point move is worth $5 per contract
 
 # Custom start and end date (format: 'YYYY-MM-DD')
 start_date = '2000-01-01'

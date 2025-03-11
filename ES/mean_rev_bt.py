@@ -28,7 +28,7 @@ bb_stddev = 2.0        # e.g., 2 standard deviations
 atr_period = 14        # ATR lookback period
 atr_stop_multiplier = 5.0  # Stop loss will be set at 1 ATR away (change as needed)
 
-start_date = '2008-01-01'
+start_date = '2000-01-01'
 end_date   = '2024-12-31'
 
 # -------------------------------
