@@ -1,16 +1,8 @@
 #!/usr/bin/env python
 """
-Strategy 9 – Complete Code File
-
-This file includes all helper functions from your chapters (1, 3, 4, 5, 7, 8)
-integrated into one file. Data is loaded from your symbols CSV file.
-
-Your Data/symbols.csv file should have the format:
-
-Symbol,Multiplier
-Data/audmicro_daily_data.csv,10000
-Data/ba_daily_data.csv,0.1  # Micro Bitcoin Futures
-...
+Strategy 9 Backtest – Multiple EWMA Trend Filters
+Refactored to match the earlier logic and produce a single final
+portfolio curve plus an ES multi-strategy plot.
 """
 
 import matplotlib
@@ -18,10 +10,8 @@ matplotlib.use("TkAgg")
 import pandas as pd
 import numpy as np
 from scipy.stats import norm, linregress
-from enum import Enum
-from copy import copy
-from typing import Tuple
 import os
+import matplotlib.pyplot as plt
 
 # =============================================================================
 # Chapter 1: Basic Returns, Statistics, and Frequency Aggregation
@@ -31,10 +21,6 @@ DEFAULT_DATE_FORMAT = "%Y-%m-%d"
 BUSINESS_DAYS_IN_YEAR = 256  # Trading days per year
 
 def pd_readcsv(filename: str, date_format=DEFAULT_DATE_FORMAT, date_index_name: str = "Time") -> pd.DataFrame:
-    """
-    Reads a CSV file and sets its index using the given date column.
-    Expects a column named "Time" (or change date_index_name if needed).
-    """
     df = pd.read_csv(filename)
     if date_index_name not in df.columns:
         raise ValueError(f"Expected date column '{date_index_name}' not found in {filename}.")
@@ -43,46 +29,48 @@ def pd_readcsv(filename: str, date_format=DEFAULT_DATE_FORMAT, date_index_name: 
     df.index.name = None
     return df
 
-def calculate_perc_returns(position_contracts_held: pd.Series,
-                           adjusted_price: pd.Series,
-                           fx_series: pd.Series,
-                           multiplier: float,
-                           capital_required: float) -> pd.Series:
-    return_price_points = (adjusted_price - adjusted_price.shift(1)) * position_contracts_held.shift(1)
-    return_instrument_currency = return_price_points * multiplier
-    fx_series_aligned = fx_series.reindex(return_instrument_currency.index, method="ffill")
-    return_base_currency = return_instrument_currency * fx_series_aligned
-    perc_return = return_base_currency / capital_required
-    return perc_return
-
-# Frequency definitions for resampling
-Frequency = Enum("Frequency", "Natural Year Month Week BDay")
-NATURAL = Frequency.Natural
-YEAR = Frequency.Year
-MONTH = Frequency.Month
-WEEK = Frequency.Week
-
-def sum_at_frequency(perc_return: pd.Series, at_frequency: Frequency = NATURAL) -> pd.Series:
-    if at_frequency == NATURAL:
+def sum_at_frequency(perc_return: pd.Series, freq: str = "NATURAL") -> pd.Series:
+    """
+    freq='NATURAL' means no resampling (use daily returns as-is).
+    Otherwise use 'Y','M','W' for year/month/week.
+    """
+    if freq.upper() == "NATURAL":
         return perc_return
-    freq_map = {YEAR: "Y", WEEK: "7D", MONTH: "1M"}
-    return perc_return.resample(freq_map[at_frequency]).sum()
+    elif freq.upper() == "Y":
+        return perc_return.resample("Y").sum()
+    elif freq.upper() == "M":
+        return perc_return.resample("M").sum()
+    elif freq.upper() == "W":
+        return perc_return.resample("W").sum()
+    else:
+        return perc_return
 
-def ann_mean_given_frequency(perc_return_at_freq: pd.Series, at_frequency: Frequency) -> float:
-    periods = BUSINESS_DAYS_IN_YEAR if at_frequency == NATURAL else {YEAR: 1, WEEK: 52.25, MONTH: 12}[at_frequency]
-    return perc_return_at_freq.mean() * periods
-
-def ann_std_given_frequency(perc_return_at_freq: pd.Series, at_frequency: Frequency) -> float:
-    periods = BUSINESS_DAYS_IN_YEAR if at_frequency == NATURAL else {YEAR: 1, WEEK: 52.25, MONTH: 12}[at_frequency]
-    return perc_return_at_freq.std() * (periods ** 0.5)
+def ann_mean_std(perc_return: pd.Series, freq: str = "NATURAL") -> tuple[float, float]:
+    """
+    Compute annualized mean & std from daily or resampled returns.
+    """
+    ret = sum_at_frequency(perc_return, freq)
+    if freq.upper() == "NATURAL":
+        periods_per_year = BUSINESS_DAYS_IN_YEAR
+    elif freq.upper() == "Y":
+        periods_per_year = 1
+    elif freq.upper() == "M":
+        periods_per_year = 12
+    elif freq.upper() == "W":
+        periods_per_year = 52
+    else:
+        periods_per_year = BUSINESS_DAYS_IN_YEAR
+    mu = ret.mean() * periods_per_year
+    sigma = ret.std() * np.sqrt(periods_per_year)
+    return mu, sigma
 
 def calculate_drawdown(perc_return: pd.Series) -> pd.Series:
     cum = perc_return.cumsum()
-    running_max = cum.rolling(len(cum) + 1, min_periods=1).max()
+    running_max = cum.cummax()
     return running_max - cum
 
 QUANT_PERCENTILE_EXTREME = 0.01
-QUANT_PERCENTILE_STD = 0.3
+QUANT_PERCENTILE_STD = 0.30
 NORMAL_DISTR_RATIO = norm.ppf(QUANT_PERCENTILE_EXTREME) / norm.ppf(QUANT_PERCENTILE_STD)
 
 def demeaned_remove_zeros(x: pd.Series) -> pd.Series:
@@ -92,52 +80,47 @@ def demeaned_remove_zeros(x: pd.Series) -> pd.Series:
 
 def calculate_quant_ratio_lower(x: pd.Series) -> float:
     x_dm = demeaned_remove_zeros(x)
-    raw_ratio = x_dm.quantile(QUANT_PERCENTILE_EXTREME) / x_dm.quantile(QUANT_PERCENTILE_STD)
-    return raw_ratio / NORMAL_DISTR_RATIO
+    raw = x_dm.quantile(QUANT_PERCENTILE_EXTREME) / x_dm.quantile(QUANT_PERCENTILE_STD)
+    return raw / NORMAL_DISTR_RATIO
 
 def calculate_quant_ratio_upper(x: pd.Series) -> float:
     x_dm = demeaned_remove_zeros(x)
-    raw_ratio = x_dm.quantile(1 - QUANT_PERCENTILE_EXTREME) / x_dm.quantile(1 - QUANT_PERCENTILE_STD)
-    return raw_ratio / NORMAL_DISTR_RATIO
+    raw = x_dm.quantile(1 - QUANT_PERCENTILE_EXTREME) / x_dm.quantile(1 - QUANT_PERCENTILE_STD)
+    return raw / NORMAL_DISTR_RATIO
 
-def calculate_stats(perc_return: pd.Series, at_frequency: Frequency = NATURAL) -> dict:
-    pr_freq = sum_at_frequency(perc_return, at_frequency)
-    ann_mean = ann_mean_given_frequency(pr_freq, at_frequency)
-    ann_std = ann_std_given_frequency(pr_freq, at_frequency)
-    sharpe_ratio = ann_mean / ann_std if ann_std != 0 else np.nan
-    skew = pr_freq.skew()
-    drawdowns = calculate_drawdown(pr_freq)
-    avg_drawdown = drawdowns.mean()
-    max_drawdown = drawdowns.max()
-    quant_ratio_lower = calculate_quant_ratio_lower(pr_freq)
-    quant_ratio_upper = calculate_quant_ratio_upper(pr_freq)
+def calculate_stats(perc_return: pd.Series, freq: str = "NATURAL") -> dict:
+    ann_mu, ann_sigma = ann_mean_std(perc_return, freq)
+    sharpe = ann_mu / ann_sigma if ann_sigma != 0 else np.nan
+    skew = sum_at_frequency(perc_return, freq).skew()
+    dd = calculate_drawdown(perc_return)
+    avg_dd = dd.mean()
+    max_dd = dd.max()
+    qr_lower = calculate_quant_ratio_lower(perc_return)
+    qr_upper = calculate_quant_ratio_upper(perc_return)
     return {
-        "ann_mean": ann_mean,
-        "ann_std": ann_std,
-        "sharpe_ratio": sharpe_ratio,
+        "ann_mean": ann_mu,
+        "ann_std": ann_sigma,
+        "sharpe_ratio": sharpe,
         "skew": skew,
-        "avg_drawdown": avg_drawdown,
-        "max_drawdown": max_drawdown,
-        "quant_ratio_lower": quant_ratio_lower,
-        "quant_ratio_upper": quant_ratio_upper,
+        "avg_drawdown": avg_dd,
+        "max_drawdown": max_dd,
+        "quant_ratio_lower": qr_lower,
+        "quant_ratio_upper": qr_upper
     }
 
 # =============================================================================
 # Chapter 3 & 4: Data Loading, Volatility, and Position Sizing
 # =============================================================================
 
-def load_data_from_symbols(symbols_csv: str) -> Tuple[dict, dict, dict]:
+def load_data_from_symbols(symbols_csv: str) -> tuple[dict, dict, dict]:
     """
-    Reads your Data/symbols.csv file and loads data for each instrument.
-    Returns three dictionaries:
-      - adjusted_prices: keys are instrument IDs (derived from the file basename),
-        values are the price series.
-      - current_prices: same as adjusted_prices.
-      - multipliers: keys as instrument IDs, values as float multipliers.
-    The symbols CSV is expected to have columns "Symbol" and "Multiplier".
+    Reads your symbols CSV file and loads data for each instrument.
+    Returns dictionaries:
+      - adjusted_prices: keys are instrument IDs (e.g., 'es' from "Data/es_daily_data.csv"),
+      - current_prices: same as adjusted_prices,
+      - multipliers: from the CSV.
     """
     df = pd.read_csv(symbols_csv, comment='#')
-    # Clean the multiplier column (take first token)
     df["Multiplier"] = df["Multiplier"].apply(lambda x: float(str(x).split()[0]))
     adjusted_prices = {}
     current_prices = {}
@@ -147,33 +130,27 @@ def load_data_from_symbols(symbols_csv: str) -> Tuple[dict, dict, dict]:
         if not os.path.exists(file_path):
             print(f"File not found: {file_path} – skipping.")
             continue
-        try:
-            data = pd_readcsv(file_path)  # uses "Time" column for dates
-            data = data.dropna()
-            # Use 'adjusted' and 'underlying' if present, else use "Last"
-            if "adjusted" in data.columns and "underlying" in data.columns:
-                price_adj = data["adjusted"]
-                price_curr = data["underlying"]
-            elif "Last" in data.columns:
-                price_adj = data["Last"]
-                price_curr = data["Last"]
-            else:
-                raise ValueError(f"Expected price columns not found in {file_path}")
-            # Derive an instrument ID from the file name.
-            # E.g., "Data/es_daily_data.csv" becomes "es"
-            base = os.path.basename(file_path)
-            inst_id = base.split("_")[0].lower()
-            adjusted_prices[inst_id] = price_adj
-            current_prices[inst_id] = price_curr
-            multipliers[inst_id] = row["Multiplier"]
-        except Exception as e:
-            print(f"Error processing {file_path}: {e}")
+        data = pd_readcsv(file_path)
+        data = data.dropna()
+        if "adjusted" in data.columns and "underlying" in data.columns:
+            price_adj = data["adjusted"]
+            price_curr = data["underlying"]
+        elif "Last" in data.columns:
+            price_adj = data["Last"]
+            price_curr = data["Last"]
+        else:
+            raise ValueError(f"Expected price columns not found in {file_path}")
+        base = os.path.basename(file_path)
+        inst_id = base.split("_")[0].lower()
+        adjusted_prices[inst_id] = price_adj
+        current_prices[inst_id] = price_curr
+        multipliers[inst_id] = row["Multiplier"]
     return adjusted_prices, current_prices, multipliers
 
 def create_fx_series_given_adjusted_prices_dict(adjusted_prices_dict: dict) -> dict:
     fx_series = {}
     for inst, series in adjusted_prices_dict.items():
-        fx_series[inst] = pd.Series(1, index=series.index)
+        fx_series[inst] = pd.Series(1.0, index=series.index)
     return fx_series
 
 def calculate_variable_standard_deviation_for_risk_targeting(adjusted_price: pd.Series,
@@ -185,9 +162,9 @@ def calculate_variable_standard_deviation_for_risk_targeting(adjusted_price: pd.
     else:
         daily_returns = adjusted_price.diff()
     daily_exp_std = daily_returns.ewm(span=32).std()
-    factor = BUSINESS_DAYS_IN_YEAR ** 0.5 if annualise_stdev else 1
+    factor = (BUSINESS_DAYS_IN_YEAR ** 0.5) if annualise_stdev else 1.0
     annualised_std = daily_exp_std * factor
-    ten_year_vol = annualised_std.rolling(BUSINESS_DAYS_IN_YEAR * 10, min_periods=1).mean()
+    ten_year_vol = annualised_std.rolling(BUSINESS_DAYS_IN_YEAR*10, min_periods=1).mean()
     weighted_vol = 0.3 * ten_year_vol + 0.7 * annualised_std
     return weighted_vol
 
@@ -197,10 +174,10 @@ class standardDeviation(pd.Series):
                  current_price: pd.Series,
                  use_perc_returns: bool = True,
                  annualise_stdev: bool = True):
-        stdev_series = calculate_variable_standard_deviation_for_risk_targeting(
+        stddev_series = calculate_variable_standard_deviation_for_risk_targeting(
             adjusted_price, current_price, use_perc_returns, annualise_stdev
         )
-        super().__init__(stdev_series)
+        super().__init__(stddev_series)
         self._use_perc_returns = use_perc_returns
         self._annualised = annualise_stdev
         self._current_price = current_price
@@ -218,12 +195,12 @@ class standardDeviation(pd.Series):
         return self._current_price
 
     def daily_risk_price_terms(self) -> pd.Series:
-        stdev = self.copy()
+        stddev = self.copy()
         if self.annualised:
-            stdev = stdev / (BUSINESS_DAYS_IN_YEAR ** 0.5)
+            stddev /= (BUSINESS_DAYS_IN_YEAR ** 0.5)
         if self.use_perc_returns:
-            stdev = stdev * self.current_price
-        return stdev
+            stddev = stddev * self.current_price
+        return stddev
 
 def calculate_variable_standard_deviation_for_risk_targeting_from_dict(adjusted_prices: dict,
                                                                        current_prices: dict,
@@ -232,10 +209,10 @@ def calculate_variable_standard_deviation_for_risk_targeting_from_dict(adjusted_
     std_dev_dict = {}
     for inst in adjusted_prices.keys():
         std_dev_dict[inst] = standardDeviation(
-            adjusted_price=adjusted_prices[inst],
-            current_price=current_prices[inst],
-            use_perc_returns=use_perc_returns,
-            annualise_stdev=annualise_stdev
+            adjusted_prices[inst],
+            current_prices[inst],
+            use_perc_returns,
+            annualise_stdev
         )
     return std_dev_dict
 
@@ -256,7 +233,7 @@ def calculate_position_series_given_variable_risk_for_dict(capital: float,
                                                            std_dev_dict: dict) -> dict:
     pos_dict = {}
     for inst in std_dev_dict.keys():
-        effective_capital = capital * idm * weights.get(inst, 1)
+        effective_capital = capital * idm * weights.get(inst, 1.0)
         pos_dict[inst] = calculate_position_series_given_variable_risk(
             capital=effective_capital,
             risk_target_tau=risk_target_tau,
@@ -266,13 +243,6 @@ def calculate_position_series_given_variable_risk_for_dict(capital: float,
         )
     return pos_dict
 
-def perc_returns_to_df(perc_returns_dict: dict) -> pd.DataFrame:
-    df = pd.concat(perc_returns_dict, axis=1)
-    return df.dropna(how="all")
-
-def aggregate_returns(perc_returns_dict: dict) -> pd.Series:
-    return perc_returns_to_df(perc_returns_dict).sum(axis=1)
-
 # =============================================================================
 # Chapter 5: Cost-Adjusted Percentage Returns
 # =============================================================================
@@ -281,14 +251,13 @@ def calculate_deflated_costs(stddev_series: standardDeviation, cost_per_contract
     stdev_daily = stddev_series.daily_risk_price_terms()
     final_stdev = stdev_daily.iloc[-1]
     cost_deflator = stdev_daily / final_stdev
-    historic_cost_per_contract = cost_per_contract * cost_deflator
-    return historic_cost_per_contract
+    return cost_per_contract * cost_deflator
 
 def calculate_costs_deflated_for_vol(stddev_series: standardDeviation,
                                      cost_per_contract: float,
                                      position_contracts_held: pd.Series) -> pd.Series:
     rounded_positions = position_contracts_held.round()
-    position_change = rounded_positions - rounded_positions.shift(1)
+    position_change = rounded_positions.diff()
     abs_trades = position_change.abs()
     historic_cost = calculate_deflated_costs(stddev_series, cost_per_contract)
     historic_cost_aligned = historic_cost.reindex(abs_trades.index, method="ffill")
@@ -297,23 +266,23 @@ def calculate_costs_deflated_for_vol(stddev_series: standardDeviation,
 def calculate_perc_returns_with_costs(position_contracts_held: pd.Series,
                                       adjusted_price: pd.Series,
                                       fx_series: pd.Series,
-                                      stdev_series: standardDeviation,
+                                      stddev_series: standardDeviation,
                                       multiplier: float,
                                       capital_required: float,
                                       cost_per_contract: float) -> pd.Series:
-    precost_return = (adjusted_price - adjusted_price.shift(1)) * position_contracts_held.shift(1)
-    precost_return_currency = precost_return * multiplier
-    historic_costs = calculate_costs_deflated_for_vol(stddev_series, cost_per_contract, position_contracts_held)
-    historic_costs_aligned = historic_costs.reindex(precost_return_currency.index, method="ffill")
-    net_return = precost_return_currency - historic_costs_aligned
-    fx_aligned = fx_series.reindex(net_return.index, method="ffill")
-    return_base = net_return * fx_aligned
-    return return_base / capital_required
+    pl_points = (adjusted_price - adjusted_price.shift(1)) * position_contracts_held.shift(1)
+    pl_currency = pl_points * multiplier
+    costs = calculate_costs_deflated_for_vol(stddev_series, cost_per_contract, position_contracts_held)
+    costs_aligned = costs.reindex(pl_currency.index, method="ffill")
+    net_pl = pl_currency - costs_aligned
+    fx_aligned = fx_series.reindex(net_pl.index, method="ffill")
+    net_pl_in_base = net_pl * fx_aligned
+    return net_pl_in_base / capital_required
 
 def calculate_perc_returns_for_dict_with_costs(position_contracts_dict: dict,
                                                adjusted_prices: dict,
                                                multipliers: dict,
-                                               fx_series: dict,
+                                               fx_series_dict: dict,
                                                capital: float,
                                                cost_per_contract_dict: dict,
                                                std_dev_dict: dict) -> dict:
@@ -322,8 +291,8 @@ def calculate_perc_returns_for_dict_with_costs(position_contracts_dict: dict,
         pr_dict[inst] = calculate_perc_returns_with_costs(
             position_contracts_held=position_contracts_dict[inst],
             adjusted_price=adjusted_prices[inst],
-            fx_series=fx_series[inst],
-            stdev_series=std_dev_dict[inst],
+            fx_series=fx_series_dict[inst],
+            stddev_series=std_dev_dict[inst],
             multiplier=multipliers[inst],
             capital_required=capital,
             cost_per_contract=cost_per_contract_dict[inst]
@@ -340,58 +309,63 @@ def ewmac(adjusted_price: pd.Series, fast_span=16, slow_span=64) -> pd.Series:
     return fast_ewma - slow_ewma
 
 def calculate_risk_adjusted_forecast_for_ewmac(adjusted_price: pd.Series,
-                                               stdev_ann_perc: standardDeviation,
+                                               stddev_ann_perc: standardDeviation,
                                                fast_span: int = 64) -> pd.Series:
-    ewmac_vals = ewmac(adjusted_price, fast_span=fast_span, slow_span=fast_span * 4)
-    daily_vol = stdev_ann_perc.daily_risk_price_terms()
+    ewmac_vals = ewmac(adjusted_price, fast_span=fast_span, slow_span=fast_span*4)
+    daily_vol = stddev_ann_perc.daily_risk_price_terms()
     return ewmac_vals / daily_vol
 
 def calculate_scaled_forecast_for_ewmac(adjusted_price: pd.Series,
-                                        stdev_ann_perc: standardDeviation,
+                                        stddev_ann_perc: standardDeviation,
                                         fast_span: int = 64) -> pd.Series:
-    scalar_dict = {64: 1.91, 32: 2.79, 16: 4.1, 8: 5.95, 4: 8.53, 2: 12.1}
-    risk_adjusted = calculate_risk_adjusted_forecast_for_ewmac(adjusted_price, stdev_ann_perc, fast_span)
+    scalar_dict = {2: 12.1, 4: 8.53, 8: 5.95, 16: 4.10, 32: 2.79, 64: 1.91}
+    raw_forecast = calculate_risk_adjusted_forecast_for_ewmac(adjusted_price, stddev_ann_perc, fast_span)
     forecast_scalar = scalar_dict.get(fast_span, 1.0)
-    return risk_adjusted * forecast_scalar
+    scaled = raw_forecast * forecast_scalar
+    return scaled
 
 def calculate_forecast_for_ewmac(adjusted_price: pd.Series,
-                                 stdev_ann_perc: standardDeviation,
+                                 stddev_ann_perc: standardDeviation,
                                  fast_span: int = 64) -> pd.Series:
-    scaled = calculate_scaled_forecast_for_ewmac(adjusted_price, stdev_ann_perc, fast_span)
-    return scaled.clip(-20, 20)
+    scaled = calculate_scaled_forecast_for_ewmac(adjusted_price, stddev_ann_perc, fast_span)
+    capped = scaled.clip(-20, 20)
+    return capped
 
 def calculate_combined_ewmac_forecast(adjusted_price: pd.Series,
-                                      stdev_ann_perc: standardDeviation,
+                                      stddev_ann_perc: standardDeviation,
                                       fast_spans: list) -> pd.Series:
-    forecasts = [calculate_forecast_for_ewmac(adjusted_price, stdev_ann_perc, fs) for fs in fast_spans]
-    df_forecasts = pd.concat(forecasts, axis=1)
-    average_forecast = df_forecasts.mean(axis=1)
+    forecasts = []
+    for fs in fast_spans:
+        f = calculate_forecast_for_ewmac(adjusted_price, stddev_ann_perc, fs)
+        forecasts.append(f)
+    df_f = pd.concat(forecasts, axis=1)
+    avg_forecast = df_f.mean(axis=1)
     rule_count = len(fast_spans)
     FDM_DICT = {1: 1.0, 2: 1.03, 3: 1.08, 4: 1.13, 5: 1.19, 6: 1.26}
     fdm = FDM_DICT.get(rule_count, 1.0)
-    scaled = average_forecast * fdm
+    scaled = avg_forecast * fdm
     return scaled.clip(-20, 20)
 
 def calculate_position_with_multiple_trend_forecast_applied(adjusted_price: pd.Series,
                                                             average_position: pd.Series,
-                                                            stdev_ann_perc: standardDeviation,
+                                                            stddev_ann_perc: standardDeviation,
                                                             fast_spans: list) -> pd.Series:
-    forecast = calculate_combined_ewmac_forecast(adjusted_price, stdev_ann_perc, fast_spans)
-    return forecast * average_position / 10
+    combined_forecast = calculate_combined_ewmac_forecast(adjusted_price, stddev_ann_perc, fast_spans)
+    return combined_forecast * average_position / 10.0
 
 def calculate_position_dict_with_multiple_trend_forecast_applied(adjusted_prices_dict: dict,
                                                                  average_position_contracts_dict: dict,
                                                                  std_dev_dict: dict,
                                                                  fast_spans: list) -> dict:
-    pos = {}
+    pos_dict = {}
     for inst in adjusted_prices_dict.keys():
-        pos[inst] = calculate_position_with_multiple_trend_forecast_applied(
+        pos_dict[inst] = calculate_position_with_multiple_trend_forecast_applied(
             adjusted_price=adjusted_prices_dict[inst],
             average_position=average_position_contracts_dict[inst],
-            stdev_ann_perc=std_dev_dict[inst],
+            stddev_ann_perc=std_dev_dict[inst],
             fast_spans=fast_spans
         )
-    return pos
+    return pos_dict
 
 def apply_buffer_single_period(last_position: float, top_pos: float, bot_pos: float) -> float:
     if last_position > top_pos:
@@ -401,70 +375,68 @@ def apply_buffer_single_period(last_position: float, top_pos: float, bot_pos: fl
     else:
         return last_position
 
-def apply_buffer(optimal_position: pd.Series, upper_buffer: pd.Series, lower_buffer: pd.Series) -> pd.Series:
-    upper_buffer = upper_buffer.ffill().round()
-    lower_buffer = lower_buffer.ffill().round()
-    use_optimal = optimal_position.ffill()
-    current_pos = use_optimal.iloc[0]
-    if pd.isna(current_pos):
-        current_pos = 0.0
-    buffered = [current_pos]
-    for i in range(1, len(optimal_position.index)):
-        current_pos = apply_buffer_single_period(current_pos, upper_buffer.iloc[i], lower_buffer.iloc[i])
-        buffered.append(current_pos)
-    return pd.Series(buffered, index=optimal_position.index)
+def apply_buffer(optimal_position: pd.Series, top_buffer: pd.Series, bot_buffer: pd.Series) -> pd.Series:
+    top_buffer = top_buffer.ffill().round()
+    bot_buffer = bot_buffer.ffill().round()
+    pos_optimal = optimal_position.ffill()
+    current = pos_optimal.iloc[0] if not pd.isna(pos_optimal.iloc[0]) else 0.0
+    out = [current]
+    for i in range(1, len(pos_optimal)):
+        current = apply_buffer_single_period(current, top_buffer.iloc[i], bot_buffer.iloc[i])
+        out.append(current)
+    return pd.Series(out, index=pos_optimal.index)
 
 def apply_buffering_to_positions(position_contracts: pd.Series,
                                  average_position_contracts: pd.Series,
                                  buffer_size: float = 0.10) -> pd.Series:
-    buffer = average_position_contracts.abs() * buffer_size
-    upper_buffer = position_contracts + buffer
-    lower_buffer = position_contracts - buffer
-    return apply_buffer(position_contracts, upper_buffer, lower_buffer)
+    buf = average_position_contracts.abs() * buffer_size
+    top = position_contracts + buf
+    bot = position_contracts - buf
+    return apply_buffer(position_contracts, top, bot)
 
 def apply_buffering_to_position_dict(position_contracts_dict: dict,
-                                     average_position_contracts_dict: dict) -> dict:
+                                     average_position_contracts_dict: dict,
+                                     buffer_size: float = 0.10) -> dict:
     buffered = {}
     for inst, pos in position_contracts_dict.items():
-        buffered[inst] = apply_buffering_to_positions(pos, average_position_contracts_dict[inst])
+        buffered[inst] = apply_buffering_to_positions(pos, average_position_contracts_dict[inst], buffer_size)
     return buffered
 
 # =============================================================================
-# Strategy 9 Main Execution
+# MAIN: Strategy 9 Backtest
 # =============================================================================
 
 if __name__ == "__main__":
-    # Step 1: Load instrument data from the symbols file.
-    symbols_file = "Data/symbols.csv"  # Path to your symbols file
+    # Step 1: Load symbols from CSV.
+    symbols_file = "Data/symbols.csv"  # Update path if needed.
     adjusted_prices_dict, current_prices_dict, file_multipliers = load_data_from_symbols(symbols_file)
-    
-    # For demonstration, you can print the loaded instruments:
-    print("Loaded instruments:", list(adjusted_prices_dict.keys()))
-    
-    # Step 2: Use the multipliers from the symbols file.
-    multipliers = file_multipliers  # keys are instrument IDs derived from filenames
-    
-    # Step 3: Create FX series (assume all USD).
+    instruments = list(adjusted_prices_dict.keys())
+    print("Loaded instruments:", instruments)
+
+    # Step 2: Use multipliers from the CSV.
+    multipliers = file_multipliers
+
+    # Step 3: Create FX series (assume USD 1:1).
     fx_series_dict = create_fx_series_given_adjusted_prices_dict(adjusted_prices_dict)
-    
-    # Step 4: Define other strategy parameters.
-    capital = 1000000
-    risk_target_tau = 0.2
+
+    # Step 4: Define strategy parameters.
+    capital = 1_000_000.0
+    risk_target_tau = 0.20
     idm = 1.5
-    # Define instrument weights (if not provided, use equal weights)
-    instrument_weights = {inst: 1/len(adjusted_prices_dict) for inst in adjusted_prices_dict.keys()}
-    # Define cost per contract (you can adjust these; here we set default values)
-    cost_per_contract_dict = {inst: 1.0 for inst in adjusted_prices_dict.keys()}
-    
-    # Step 5: Calculate instrument risk (volatility).
+    instrument_weights = {inst: 1.0/len(instruments) for inst in instruments}
+
+    # Set cost per contract (adjust as needed; e.g., sp500=0.875, us10=5)
+    cost_per_contract_dict = {inst: 1.0 for inst in instruments}
+
+    # Step 5: Calculate instrument risk.
     std_dev_dict = calculate_variable_standard_deviation_for_risk_targeting_from_dict(
         adjusted_prices=adjusted_prices_dict,
         current_prices=current_prices_dict,
         use_perc_returns=True,
-        annualise_stdev=True,
+        annualise_stdev=True
     )
-    
-    # Step 6: Determine average risk-based position sizing.
+
+    # Step 6: Compute average risk-based position sizing.
     average_position_contracts_dict = calculate_position_series_given_variable_risk_for_dict(
         capital=capital,
         risk_target_tau=risk_target_tau,
@@ -474,44 +446,80 @@ if __name__ == "__main__":
         multipliers=multipliers,
         std_dev_dict=std_dev_dict,
     )
-    
-    # Step 7: Apply multiple trend forecast (Strategy 9).
-    fast_spans = [16, 32, 64]  # Adjustable list of fast spans
+
+    # Step 7: Apply multiple EWMAC trend filters.
+    fast_spans = [4, 8, 16, 32, 64]
     position_contracts_dict = calculate_position_dict_with_multiple_trend_forecast_applied(
         adjusted_prices_dict=adjusted_prices_dict,
         average_position_contracts_dict=average_position_contracts_dict,
         std_dev_dict=std_dev_dict,
         fast_spans=fast_spans,
     )
-    
+
     # Step 8: Buffer positions to reduce turnover.
     buffered_position_dict = apply_buffering_to_position_dict(
         position_contracts_dict=position_contracts_dict,
         average_position_contracts_dict=average_position_contracts_dict,
+        buffer_size=0.10
     )
-    
+
     # Step 9: Compute cost-adjusted percentage returns.
     perc_return_dict = calculate_perc_returns_for_dict_with_costs(
         position_contracts_dict=buffered_position_dict,
         adjusted_prices=adjusted_prices_dict,
         multipliers=multipliers,
-        fx_series=fx_series_dict,
+        fx_series_dict=fx_series_dict,
         capital=capital,
         cost_per_contract_dict=cost_per_contract_dict,
         std_dev_dict=std_dev_dict,
     )
-    
-    # Step 10: Output performance statistics.
-    for inst, stats in calculate_stats(perc_return_dict[list(perc_return_dict.keys())[0]]).items():
-        print(f"Stats for {list(perc_return_dict.keys())[0]}: {stats}")
-    
-    perc_return_agg = aggregate_returns(perc_return_dict)
-    print("Aggregated portfolio stats:", calculate_stats(perc_return_agg))
-    
-    # Optional: Linear regression (beta estimation)
-    time_numeric = pd.Series(perc_return_agg.index.astype(np.int64))
-    reg_results = linregress(time_numeric, perc_return_agg.values)
-    print("Beta slope: {:.4f}".format(reg_results.slope))
-    daily_alpha = reg_results.intercept
-    annual_alpha = 100 * daily_alpha * BUSINESS_DAYS_IN_YEAR
-    print("Annual alpha: {:.2f}%".format(annual_alpha))
+
+    # Step 10: Plot aggregated portfolio equity curve.
+    combined_df = pd.concat(perc_return_dict, axis=1)
+    portfolio_returns = combined_df.sum(axis=1).dropna()
+    portfolio_stats = calculate_stats(portfolio_returns)
+    print("Portfolio stats:", portfolio_stats)
+
+    portfolio_equity = capital + (capital * portfolio_returns.cumsum())
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(portfolio_equity, label="Aggregated Portfolio Equity")
+    plt.xlabel("Date")
+    plt.ylabel("Equity ($)")
+    plt.title("Strategy 9: Aggregated Portfolio Equity Curve")
+    plt.legend()
+    plt.ticklabel_format(style='plain', axis='y')
+    plt.show()
+
+    # Step 11: Plot ES multi-EWMAC equity curves.
+    if "es" in instruments:
+        es_adj = adjusted_prices_dict["es"]
+        es_std = std_dev_dict["es"]
+        all_equities = {}
+        for fs in fast_spans:
+            single_forecast = calculate_forecast_for_ewmac(es_adj, es_std, fs)
+            single_pos = (single_forecast * average_position_contracts_dict["es"] / 10.0)
+            single_pos_buffered = apply_buffering_to_positions(single_pos, average_position_contracts_dict["es"], 0.10)
+            single_ret = calculate_perc_returns_with_costs(
+                position_contracts_held=single_pos_buffered,
+                adjusted_price=es_adj,
+                fx_series=fx_series_dict["es"],
+                stddev_series=es_std,
+                multiplier=multipliers["es"],
+                capital_required=capital,
+                cost_per_contract=cost_per_contract_dict["es"]
+            )
+            single_equity = capital + (capital * single_ret.cumsum())
+            all_equities[f"EWMAC({fs},{fs*4})"] = single_equity
+
+        plt.figure(figsize=(10, 6))
+        for label, eq in all_equities.items():
+            plt.plot(eq, label=label)
+        plt.xlabel("Date")
+        plt.ylabel("Equity ($)")
+        plt.title("ES - EWMAC Single-Speed Equity Curves")
+        plt.legend()
+        plt.ticklabel_format(style='plain', axis='y')
+        plt.show()
+    else:
+        print("No ES instrument found to plot multi-EWMAC speeds.")
