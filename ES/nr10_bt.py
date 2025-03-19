@@ -30,7 +30,7 @@ commission_per_order = 1.24         # commission per order (entry or exit)
 
 # Daily ATR settings for stop loss and take profit
 stop_atr_multiplier = 2            # stop loss = 1 ATR (daily)
-tp_atr_multiplier = 2               # take profit = 2 ATR (daily)
+tp_atr_multiplier = 3               # take profit = 2 ATR (daily)
 atr_period = 14                     # ATR period for daily timeframe
 
 # Custom start and end date (format: 'YYYY-MM-DD')
@@ -71,7 +71,6 @@ data['avg_volume'] = data['Volume'].shift(1).rolling(window=volume_lookback, min
 # -------------------------------
 # Backtest Simulation
 # -------------------------------
-
 capital = initial_capital  # realized account equity
 in_position = False        # flag if a trade is active
 position = None            # dictionary to hold trade details
@@ -92,10 +91,12 @@ for i, row in data.iterrows():
     if in_position:
         exposure_bars += 1
         
-        # For long trades: update trailing stop based on current close and daily ATR.
         if position['direction'] == 'long':
-            new_stop_candidate = row['Last'] - stop_atr_multiplier * row['ATR']
-            position['trailing_stop'] = max(position['trailing_stop'], new_stop_candidate)
+            # Update maximum favorable price and adjust trailing stop accordingly.
+            if row['High'] > position['max_price']:
+                position['max_price'] = row['High']
+                position['trailing_stop'] = position['max_price'] - stop_atr_multiplier * row['ATR']
+            
             # Check take profit first
             if row['High'] >= position['take_profit']:
                 exit_price = position['take_profit']
@@ -129,10 +130,12 @@ for i, row in data.iterrows():
                 in_position = False
                 position = None
 
-        # For short trades: update trailing stop based on current close and daily ATR.
         elif position['direction'] == 'short':
-            new_stop_candidate = row['Last'] + stop_atr_multiplier * row['ATR']
-            position['trailing_stop'] = min(position['trailing_stop'], new_stop_candidate)
+            # Update minimum favorable price and adjust trailing stop accordingly.
+            if row['Low'] < position['min_price']:
+                position['min_price'] = row['Low']
+                position['trailing_stop'] = position['min_price'] + stop_atr_multiplier * row['ATR']
+            
             # Check take profit first
             if row['Low'] <= position['take_profit']:
                 exit_price = position['take_profit']
@@ -168,35 +171,37 @@ for i, row in data.iterrows():
 
     # Check for entry signals only at the close of a candle and if not already in a position.
     if not in_position and i >= lookback_period:
-        # Ensure volume filter condition is met
         if row['Volume'] > volume_multiplier * row['avg_volume']:
             # Long entry: if the close breaks above the previous high and is above the MA200.
             if (row['Last'] > row['prev_high']) and (row['Last'] > row['MA200']):
-                entry_price = row['Last']  # entry at the close
-                # Set initial trailing stop and take profit using daily ATR
+                entry_price = row['Last']
                 trailing_stop = entry_price - stop_atr_multiplier * row['ATR']
                 take_profit = entry_price + tp_atr_multiplier * row['ATR']
                 in_position = True
                 capital -= commission_per_order  # commission on entry
+                # Initialize 'max_price' to track the best price reached.
                 position = {
                     'direction': 'long',
                     'entry_price': entry_price,
                     'entry_time': current_time,
+                    'max_price': entry_price,       # New field for trailing stop calculation
                     'trailing_stop': trailing_stop,
                     'take_profit': take_profit
                 }
                 logger.info(f"Entering LONG at {current_time} | Entry Price: {entry_price:.2f} | Initial SL: {trailing_stop:.2f} | TP: {take_profit:.2f}")
             # Short entry: if the close breaks below the previous low and is below the MA200.
             elif (row['Last'] < row['prev_low']) and (row['Last'] < row['MA200']):
-                entry_price = row['Last']  # entry at the close
+                entry_price = row['Last']
                 trailing_stop = entry_price + stop_atr_multiplier * row['ATR']
                 take_profit = entry_price - tp_atr_multiplier * row['ATR']
                 in_position = True
                 capital -= commission_per_order  # commission on entry
+                # Initialize 'min_price' to track the best price reached.
                 position = {
                     'direction': 'short',
                     'entry_price': entry_price,
                     'entry_time': current_time,
+                    'min_price': entry_price,       # New field for trailing stop calculation
                     'trailing_stop': trailing_stop,
                     'take_profit': take_profit
                 }
