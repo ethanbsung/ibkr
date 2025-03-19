@@ -11,13 +11,13 @@ import pytz
 # Configuration Parameters
 # -------------------------------
 IB_HOST = '127.0.0.1'
-IB_PORT = 7497
-CLIENT_ID = 2
+IB_PORT = 4002
+CLIENT_ID = 1
 
 # Instruments & Contract Settings for daily signals:
 # For IBS instruments, we now trade the micro contracts (prefixed with 'M')
 DATA_SYMBOL = 'MES'          # Micro E-mini S&P 500 for data
-DATA_EXPIRY = '202503'
+DATA_EXPIRY = '202506'
 DATA_EXCHANGE = 'CME'
 CURRENCY = 'USD'
 
@@ -184,9 +184,9 @@ def run_daily_signals(ib):
 
     # Define micro Futures contracts for IBS instruments.
     mes_contract  = Future(symbol='MES', lastTradeDateOrContractMonth=DATA_EXPIRY, exchange=DATA_EXCHANGE, currency=CURRENCY)
-    mym_contract  = Future(symbol='MYM', lastTradeDateOrContractMonth='202503', exchange='CBOT', currency=CURRENCY)
+    mym_contract  = Future(symbol='MYM', lastTradeDateOrContractMonth='202506', exchange='CBOT', currency=CURRENCY)
     mgc_contract  = Future(symbol='MGC', lastTradeDateOrContractMonth='202504', exchange='COMEX', currency=CURRENCY)
-    mnq_contract  = Future(symbol='MNQ', lastTradeDateOrContractMonth='202503', exchange='CME', currency=CURRENCY)
+    mnq_contract  = Future(symbol='MNQ', lastTradeDateOrContractMonth='202506', exchange='CME', currency=CURRENCY)
 
     # Qualify all contracts.
     try:
