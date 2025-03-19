@@ -14,7 +14,7 @@ import pandas_ta as ta  # New import for technical analysis
 warnings.filterwarnings("ignore", category=FutureWarning, message=".*'H' is deprecated.*")
 
 # --- Configuration Parameters ---
-INITIAL_CASH = 5000          # Starting cash
+INITIAL_CASH = 10000          # Starting cash
 POSITION_SIZE = 1            # Number of contracts per trade
 CONTRACT_MULTIPLIER = 5      # Contract multiplier
 COMMISSION = 1.24            # Commission per trade
@@ -23,7 +23,7 @@ SHORT_EMA_PERIOD = 64        # Short EMA period (e.g., 64-period EMA)
 LONG_EMA_PERIOD = 256        # Long EMA period (e.g., 256-period EMA)
 
 # --- Data File ---
-CSV_FILE_DAILY = 'Data/es_1h_data.csv'
+CSV_FILE_DAILY = 'Data/es_daily_data.csv'
 
 # --- Setup Logging ---
 logging.basicConfig(

@@ -16,17 +16,17 @@ logger = logging.getLogger()
 # -------------------------------
 
 # Input file path for ES futures daily data
-data_file = "Data/es_daily_data.csv"  # File should include: Time, High, Low, Last, Volume (if available)
+data_file = "Data/sq_daily_data.csv"  # File should include: Time, High, Low, Last, Volume (if available)
 
 # Backtest parameters
 initial_capital = 10000.0         # starting account balance in dollars
 commission_per_order = 1.24       # commission per order (per contract)
 num_contracts = 1                 # number of contracts to trade
-multiplier = 5                    # each point move is worth $5 per contract
+multiplier = 2500                 # each point move is worth $5 per contract
 
 # Custom start and end date (format: 'YYYY-MM-DD')
 start_date = '2000-01-01'
-end_date   = '2024-12-31'
+end_date   = '2025-03-12'
 
 # Williams %R parameters
 williams_period = 2  # 2-day lookback
