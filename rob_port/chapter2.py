@@ -1,7 +1,4 @@
-import pandas as pd
-import numpy as np
-from chapter1 import calculate_standard_deviation, calculate_fat_tails
-from chapter1 import annualized_standard_deviation
+from chapter1 import *
 
 def calculate_notional_exposure(multiplier, price, fx=1.0):
     """
@@ -163,3 +160,8 @@ def calculate_maximum_risk_target(multiplier, price, annualized_std_percentage, 
     - float: The maximum possible risk target.
     """
     return (multiplier * price * annualized_std_percentage) / margin_per_contract
+
+def calculate_min_capital_4_contracts(multiplier, price, annualized_std_percentage, risk_target, fx=1):
+    contract_risk = calculate_contract_risk(multiplier, price, annualized_std_percentage, fx)
+    return (4 * contract_risk) / risk_target
+
