@@ -199,8 +199,7 @@ def calculate_position_series_with_variable_risk(csv_path, capital, multiplier, 
     
     # Skew and tail statistics.
     skewness = pd.Series(daily_returns_array).skew()
-    lower_tail = np.percentile(daily_returns_array, 1)
-    upper_tail = np.percentile(daily_returns_array, 99)
+    fat_tail_stats = calculate_fat_tails(df[['Last']].copy())
     
     print("\n----- Strategy Metrics -----")
     print("Mean Annual Return:", round(ann_mean_return, 6))
@@ -208,11 +207,15 @@ def calculate_position_series_with_variable_risk(csv_path, capital, multiplier, 
     print("Sharpe Ratio:", round(sharpe_ratio, 6))
     print("Skew:", round(skewness, 6))
     print("Average Drawdown:", round(avg_drawdown, 6))
-    print("Lower Tail (1%):", round(lower_tail, 6))
-    print("Upper Tail (99%):", round(upper_tail, 6))
+    print("\n----- Fat Tail Statistics -----")
+    for k, v in fat_tail_stats.items():
+        print(f"  {k}: {v}")
     
     print("\nPosition on second last day:", df['position'].iloc[-2])
     return df['position'].iloc[-2]
+
+def min_liquidity_met(avg_vol, annualized_std_percentage, price, multiplier, fx=1):
+    return (fx * avg_vol * annualized_std_percentage * price * multiplier) > 1250000
 
 # Example usage with S&P 500 micro futures values.
 if __name__ == "__main__":
