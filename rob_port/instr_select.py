@@ -1,205 +1,361 @@
-import os
 import pandas as pd
 import numpy as np
-from enum import Enum
-from scipy.stats import norm
+from scipy.cluster import hierarchy as sch
+import os
+import matplotlib.pyplot as plt
 
-# ------------------- CONSTANTS & SETTINGS -------------------
-DEFAULT_DATE_FORMAT = "%Y-%m-%d"
-BUSINESS_DAYS_IN_YEAR = 256  # Trading days per year
+PRINT_TRACE = False
 
-# Parameters for screening
-INITIAL_CAPITAL = 20000.0      # Your available capital
-RISK_TARGET = 0.20              # e.g. 20% risk target
-CONTRACTS_REQUIRED = 4          # Number of contracts used in the minimum-capital formula
-# For risk estimation
-USE_PERC_RETURNS = True         # Use percentage returns in volatility calculations
-ANNUALISE_STDEV = True          # Annualise the volatility estimate
+class correlationEstimate(object):
+    def __init__(self, values: pd.DataFrame):
+        columns = values.columns
+        values = values.values
+        self._values = values
+        self._columns = columns
 
-# ------------------- UPDATED pd_readcsv -------------------
-def pd_readcsv(filename: str,
-               date_format=DEFAULT_DATE_FORMAT,
-               date_index_name: str = "Time") -> pd.DataFrame:
-    """
-    Reads a CSV file and parses the date column.
-    Default date column is 'Time'. If not found, raises an error.
-    """
-    df = pd.read_csv(filename)
-    if date_index_name not in df.columns:
-        raise ValueError(f"Expected date column '{date_index_name}' not found in {filename}.")
-    df.index = pd.to_datetime(df[date_index_name], format=date_format).values
-    del df[date_index_name]
-    df.index.name = None
-    return df
+    def __repr__(self):
+        return str(self.as_pd())
 
-# ------------------- HELPER FUNCTIONS FROM AUTHOR'S CODE -------------------
-def calculate_daily_returns(adjusted_price: pd.Series) -> pd.Series:
-    return adjusted_price.diff()
+    def __len__(self):
+        return len(self.columns)
 
-def calculate_percentage_returns(adjusted_price: pd.Series, current_price: pd.Series) -> pd.Series:
-    daily_changes = calculate_daily_returns(adjusted_price)
-    return daily_changes / current_price.shift(1)
+    def as_pd(self) -> pd.DataFrame:
+        values = self.values
+        columns = self.columns
+        return pd.DataFrame(values, index=columns, columns=columns)
 
-def calculate_variable_standard_deviation_for_risk_targeting(adjusted_price: pd.Series,
-                                                             current_price: pd.Series,
-                                                             use_perc_returns: bool = True,
-                                                             annualise_stdev: bool = True) -> pd.Series:
-    if use_perc_returns:
-        daily_returns = calculate_percentage_returns(adjusted_price, current_price)
-    else:
-        daily_returns = calculate_daily_returns(adjusted_price)
-    
-    daily_exp_std_dev = daily_returns.ewm(span=32).std()
-    annualisation_factor = BUSINESS_DAYS_IN_YEAR ** 0.5 if annualise_stdev else 1
-    annualised_std_dev = daily_exp_std_dev * annualisation_factor
-    ten_year_vol = annualised_std_dev.rolling(BUSINESS_DAYS_IN_YEAR * 10, min_periods=1).mean()
-    weighted_vol = 0.3 * ten_year_vol + 0.7 * annualised_std_dev
-    
-    return weighted_vol
+    @property
+    def values(self) -> np.array:
+        return self._values
 
-class standardDeviation(pd.Series):
-    def __init__(self,
-                 adjusted_price: pd.Series,
-                 current_price: pd.Series,
-                 use_perc_returns: bool = True,
-                 annualise_stdev: bool = True):
-        stdev_series = calculate_variable_standard_deviation_for_risk_targeting(
-            adjusted_price, current_price, use_perc_returns, annualise_stdev
+    @property
+    def columns(self) -> list:
+        return self._columns
+
+    @property
+    def size(self) -> int:
+        return len(self.columns)
+
+    def subset(self, subset_of_asset_names: list):
+        as_pd = self.as_pd()
+        subset_pd = as_pd.loc[subset_of_asset_names, subset_of_asset_names]
+        new_correlation = correlationEstimate(subset_pd)
+        return new_correlation
+
+def cluster_correlation_matrix(corr_matrix: correlationEstimate,
+                             cluster_size: int = 2):
+    clusters = get_list_of_clusters_for_correlation_matrix(corr_matrix,
+                                                          cluster_size=cluster_size)
+    clusters_as_names = from_cluster_index_to_asset_names(clusters, corr_matrix)
+    if PRINT_TRACE:
+        print("Cluster split: %s" % str(clusters_as_names))
+    return clusters_as_names
+
+def get_list_of_clusters_for_correlation_matrix(corr_matrix, cluster_size: int = 2) -> list:
+    corr_as_np = corr_matrix.values
+    try:
+        clusters = get_list_of_clusters_for_correlation_matrix_as_np(
+            corr_as_np,
+            cluster_size=cluster_size
         )
-        super().__init__(stdev_series)
-        self._use_perc_returns = use_perc_returns
-        self._annualised = annualise_stdev
-        self._current_price = current_price
+    except:
+        clusters = arbitrary_split_of_correlation_matrix(
+            corr_as_np,
+            cluster_size=cluster_size
+        )
+    return clusters
+
+def get_list_of_clusters_for_correlation_matrix_as_np(corr_as_np: np.array,
+                                                     cluster_size: int = 2) -> list:
+    d = sch.distance.pdist(corr_as_np)
+    L = sch.linkage(d, method="complete")
+    cutoff = cutoff_distance_to_guarantee_N_clusters(corr_as_np, L=L,
+                                                    cluster_size=cluster_size)
+    ind = sch.fcluster(L, cutoff, "distance")
+    ind = list(ind)
+    if max(ind) > cluster_size:
+        raise Exception("Couldn't cluster into %d clusters" % cluster_size)
+    return ind
+
+def cutoff_distance_to_guarantee_N_clusters(corr_as_np: np.array, L: np.array,
+                                          cluster_size: int = 2):
+    N = len(corr_as_np)
+    return L[N - cluster_size][2] - 0.000001
+
+def arbitrary_split_of_correlation_matrix(corr_matrix: np.array,
+                                        cluster_size: int = 2) -> list:
+    count_assets = len(corr_matrix)
+    return arbitrary_split_for_asset_length(count_assets, cluster_size=cluster_size)
+
+def arbitrary_split_for_asset_length(count_assets: int,
+                                   cluster_size: int = 2) -> list:
+    return [(x % cluster_size) + 1 for x in range(count_assets)]
+
+def from_cluster_index_to_asset_names(
+    clusters: list, corr_matrix: correlationEstimate
+) -> list:
+    all_clusters = list(set(clusters))
+    asset_names = corr_matrix.columns
+    list_of_asset_clusters = [
+        get_asset_names_for_cluster_index(cluster_id, clusters, asset_names)
+        for cluster_id in all_clusters
+    ]
+    return list_of_asset_clusters
+
+def get_asset_names_for_cluster_index(
+    cluster_id: int, clusters: list, asset_names: list
+):
+    list_of_assets = [
+        asset for asset, cluster in zip(asset_names, clusters) if cluster == cluster_id
+    ]
+    return list_of_assets
+
+class portfolioWeights(dict):
+    @property
+    def weights(self):
+        return list(self.values())
 
     @property
-    def annualised(self) -> bool:
-        return self._annualised
+    def assets(self):
+        return list(self.keys())
+
+    def multiply_by_float(self, multiplier: float):
+        list_of_assets = self.assets
+        list_of_weights = [self[asset] for asset in list_of_assets]
+        list_of_weights_multiplied = [weight * multiplier for weight in list_of_weights]
+        return portfolioWeights.from_weights_and_keys(
+            list_of_weights=list_of_weights_multiplied,
+            list_of_keys=list_of_assets
+        )
+
+    @classmethod
+    def from_list_of_subportfolios(portfolioWeights, list_of_portfolio_weights):
+        list_of_unique_asset_names = list(
+            set(
+                flatten_list(
+                    [
+                        subportfolio.assets
+                        for subportfolio in list_of_portfolio_weights
+                    ]
+                )
+            )
+        )
+        portfolio_weights = portfolioWeights.allzeros(list_of_unique_asset_names)
+        for subportfolio_weights in list_of_portfolio_weights:
+            for asset_name in subportfolio_weights.assets:
+                portfolio_weights[asset_name] = (
+                    portfolio_weights[asset_name] + subportfolio_weights[asset_name]
+                )
+        return portfolio_weights
+
+    @classmethod
+    def allzeros(portfolioWeights, list_of_keys: list):
+        return portfolioWeights.all_one_value(list_of_keys, value=0.0)
+
+    @classmethod
+    def all_one_value(portfolioWeights, list_of_keys: list, value=0.0):
+        return portfolioWeights.from_weights_and_keys(
+            list_of_weights=[value] * len(list_of_keys), list_of_keys=list_of_keys
+        )
+
+    @classmethod
+    def from_weights_and_keys(
+        portfolioWeights, list_of_weights: list, list_of_keys: list
+    ):
+        assert len(list_of_keys) == len(list_of_weights)
+        pweights_as_list = [
+            (key, weight) for key, weight in zip(list_of_keys, list_of_weights)
+        ]
+        return portfolioWeights(pweights_as_list)
+
+def flatten_list(some_list):
+    return [item for sublist in some_list for item in sublist]
+
+def one_over_n_weights_given_asset_names(list_of_asset_names: list) -> portfolioWeights:
+    weight = 1.0 / len(list_of_asset_names)
+    return portfolioWeights(
+        [(asset_name, weight) for asset_name in list_of_asset_names]
+    )
+
+class handcraftPortfolio(object):
+    def __init__(self, correlation: correlationEstimate):
+        self._correlation = correlation
 
     @property
-    def use_perc_returns(self) -> bool:
-        return self._use_perc_returns
+    def correlation(self) -> correlationEstimate:
+        return self._correlation
 
     @property
-    def current_price(self) -> pd.Series:
-        return self._current_price
+    def size(self) -> int:
+        return len(self.correlation)
 
-    def daily_risk_price_terms(self) -> pd.Series:
-        stdev = self.copy()
-        if self.annualised:
-            stdev = stdev / (BUSINESS_DAYS_IN_YEAR ** 0.5)
-        if self.use_perc_returns:
-            stdev = stdev * self.current_price
-        return stdev
+    @property
+    def asset_names(self) -> list:
+        return list(self.correlation.columns)
 
-    def annual_risk_price_terms(self) -> pd.Series:
-        stdev = self.copy()
-        if not self.annualised:
-            stdev = stdev * (BUSINESS_DAYS_IN_YEAR ** 0.5)
-        if self.use_perc_returns:
-            stdev = stdev * self.current_price
-        return stdev
+    def weights(self) -> portfolioWeights:
+        if self.size <= 2:
+            raw_weights = self.risk_weights_this_portfolio()
+        else:
+            raw_weights = self.aggregated_risk_weights()
+        return raw_weights
 
-def calculate_minimum_capital(multiplier: float,
-                              price: float,
-                              fx: float,
-                              instrument_risk_ann_perc: float,
-                              risk_target: float,
-                              contracts: int = 4) -> float:
-    """
-    Calculates the minimum capital requirement using the formula:
-      (contracts × multiplier × price × fx × σ%) ÷ risk_target
-    """
-    return contracts * multiplier * price * fx * instrument_risk_ann_perc / risk_target
+    def risk_weights_this_portfolio(self) -> portfolioWeights:
+        asset_names = self.asset_names
+        raw_weights = one_over_n_weights_given_asset_names(asset_names)
+        return raw_weights
 
-# ------------------- INSTRUMENT SCREENING FUNCTION -------------------
-def screen_instruments(symbols_csv: str,
-                       initial_capital: float,
-                       risk_target: float,
-                       contracts: int = 4,
-                       use_perc_returns: bool = True,
-                       annualise_stdev: bool = True):
-    """
-    Reads a CSV file with columns 'Symbol' and 'Multiplier'
-    and screens instruments based on the minimum capital requirement.
-    """
-    df_symbols = pd.read_csv(symbols_csv, comment='#')
-    # Clean the Multiplier column (e.g. "0.1  # comment" becomes 0.1)
-    df_symbols['Multiplier'] = df_symbols['Multiplier'].apply(lambda x: float(str(x).split()[0]))
+    def aggregated_risk_weights(self):
+        sub_portfolios = create_sub_portfolios_from_portfolio(self)
+        aggregate_risk_weights = aggregate_risk_weights_over_sub_portfolios(
+            sub_portfolios
+        )
+        return aggregate_risk_weights
+
+    def subset(self, subset_of_asset_names: list):
+        return handcraftPortfolio(self.correlation.subset(subset_of_asset_names))
+
+def create_sub_portfolios_from_portfolio(handcraft_portfolio: handcraftPortfolio):
+    clusters_as_names = cluster_correlation_matrix(handcraft_portfolio.correlation)
+    sub_portfolios = create_sub_portfolios_given_clusters(
+        clusters_as_names, handcraft_portfolio
+    )
+    return sub_portfolios
+
+def create_sub_portfolios_given_clusters(
+    clusters_as_names: list, handcraft_portfolio: handcraftPortfolio
+) -> list:
+    list_of_sub_portfolios = [
+        handcraft_portfolio.subset(subset_of_asset_names)
+        for subset_of_asset_names in clusters_as_names
+    ]
+    return list_of_sub_portfolios
+
+def aggregate_risk_weights_over_sub_portfolios(
+    sub_portfolios: list,
+) -> portfolioWeights:
+    asset_count = len(sub_portfolios)
+    weights_for_each_subportfolio = [1.0/asset_count]*asset_count
+
+    risk_weights_by_portfolio = [
+        sub_portfolio.weights() for sub_portfolio in
+        sub_portfolios
+    ]
+
+    multiplied_risk_weights_by_portfolio = [
+        sub_portfolio_weights.multiply_by_float(weight_for_subportfolio) for
+        weight_for_subportfolio, sub_portfolio_weights in
+        zip(weights_for_each_subportfolio, risk_weights_by_portfolio)
+    ]
+
+    aggregate_weights = portfolioWeights.from_list_of_subportfolios(
+        multiplied_risk_weights_by_portfolio
+    )
+
+    return aggregate_weights
+
+def load_instrument_returns(instrument_config: pd.DataFrame) -> pd.DataFrame:
+    """Load returns data for all instruments from their daily data files."""
+    returns_dict = {}
     
-    tradable = []
-    non_tradable = []
-    
-    for _, row in df_symbols.iterrows():
-        file_path = row['Symbol']
-        multiplier = row['Multiplier']
-        
-        if not os.path.exists(file_path):
-            print(f"File not found: {file_path} – skipping.")
-            continue
-        
+    for symbol in instrument_config.index:
         try:
-            data = pd_readcsv(file_path)  # Uses the 'Time' column for dates
-            data = data.dropna()
-            
-            # Use the author's expected columns if they exist;
-            # otherwise, fall back to using "Last" as the price.
-            if "adjusted" in data.columns and "underlying" in data.columns:
-                adjusted_price = data["adjusted"]
-                current_price = data["underlying"]
-            elif "Last" in data.columns:
-                adjusted_price = data["Last"]
-                current_price = data["Last"]
-            else:
-                raise ValueError(f"Expected price columns not found in {file_path}")
-            
-            risk_series = standardDeviation(adjusted_price, current_price,
-                                            use_perc_returns=use_perc_returns,
-                                            annualise_stdev=annualise_stdev)
-            risk_value = risk_series.iloc[-1]
-            fx = 1.0
-            latest_price = current_price.iloc[-1]
-            
-            min_cap_required = calculate_minimum_capital(multiplier=multiplier,
-                                                         price=latest_price,
-                                                         fx=fx,
-                                                         instrument_risk_ann_perc=risk_value,
-                                                         risk_target=risk_target,
-                                                         contracts=contracts)
-            
-            instrument_info = {
-                'File': file_path,
-                'Multiplier': multiplier,
-                'LatestPrice': latest_price,
-                'Risk(σ%)': risk_value,
-                'MinCapital': min_cap_required
-            }
-            
-            if initial_capital >= min_cap_required:
-                tradable.append(instrument_info)
-            else:
-                non_tradable.append(instrument_info)
-                
+            df = pd.read_csv(f'Data/{symbol}_daily_data.csv', parse_dates=['Time'])
+            df.set_index('Time', inplace=True)
+            df['returns'] = df['Last'].pct_change(fill_method=None)
+            df.dropna(inplace=True)
+            returns_dict[symbol] = df['returns']
+            print(f"✓ Loaded {symbol}")
+        except FileNotFoundError:
+            print(f"✗ No data found for {symbol}")
+            continue
         except Exception as e:
-            print(f"Error processing {file_path}: {e}")
+            print(f"✗ Error loading {symbol}: {str(e)}")
+            continue
     
-    return tradable, non_tradable
+    if not returns_dict:
+        raise ValueError("No data available for any instruments")
+    
+    returns_df = pd.DataFrame(returns_dict)
+    returns_df = returns_df.dropna(how='all')
+    return returns_df
 
-# ------------------- MAIN EXECUTION -------------------
+def get_asset_class(instrument_code: str, instrument_config: pd.DataFrame) -> str:
+    """Determine the asset class for an instrument based on its code."""
+    if instrument_code in ['ZT', 'Z3N', 'ZF', 'ZN', 'TN', 'TWE', 'ZB', 'LIW', 'N1U', 'YE',
+                          'OAT', 'GBS', 'GBM', 'GBL', 'GBX', 'BTS', 'BTP', '3KTB', 'FLKTB', 'FBON']:
+        return 'Bonds'
+    elif instrument_code in ['MYM', 'MNQ', 'RSV', 'M2K', 'EMD', 'MES']:
+        return 'US_Equity'
+    elif instrument_code in ['EOE', 'CAC40', 'DAX', 'SMI', 'DJ200S', 'DJSD', 'DJ600', 'ESTX50',
+                           'SXAP', 'SXPP', 'SXDP', 'SXIP', 'SXEP', 'SX8P', 'SXTP', 'SX6P']:
+        return 'EU_Equity'
+    elif instrument_code in ['M1MS', 'XINA50', 'XINO1', 'NIFTY', 'N225M', 'JPNK400',
+                           'TSEMOTHR', 'MNTPX', 'KOSDQ150', 'K200', 'SSG', 'TWN']:
+        return 'Asia_Equity'
+    elif instrument_code in ['VIX', 'V2TX']:
+        return 'Volatility'
+    elif instrument_code in ['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'JPY', 'NOK', 'NZD', 'SEK']:
+        return 'Major_FX'
+    elif instrument_code in ['RP', 'RY', 'BRE', 'UC', 'SIR', 'MXP', 'RUR', 'SND']:
+        return 'EM_FX'
+    elif instrument_code in ['ALI', 'HG', 'MGC', 'SCI', 'PA', 'PL', 'SI', 'MBT', 'ETHUSDRR']:
+        return 'Metals'
+    elif instrument_code in ['BZ', 'QM', 'HH', 'RB', 'QG', 'HO']:
+        return 'Energy'
+    elif instrument_code in ['AIGCI', 'CSC', 'ZC', 'GF', 'HE', 'LE', 'ZO', 'KE', 'ZR',
+                           'ZS', 'ZM', 'ZL', 'ZW']:
+        return 'Agricultural'
+    else:
+        print(f"Warning: Unknown asset class for instrument {instrument_code}")
+        return 'Other'
+
+def analyze_portfolio_weights(weights: portfolioWeights, instrument_config: pd.DataFrame):
+    """Analyze and print portfolio weights by asset class."""
+    asset_classes = {}
+    for instrument in weights.assets:
+        asset_class = get_asset_class(instrument, instrument_config)
+        if asset_class not in asset_classes:
+            asset_classes[asset_class] = []
+        asset_classes[asset_class].append(instrument)
+    
+    print("\nPortfolio Weight Allocation:")
+    print(f"Number of asset classes: {len(asset_classes)}")
+    
+    for asset_class, instruments in asset_classes.items():
+        class_weight = sum(weights[inst] for inst in instruments)
+        print(f"\n{asset_class} ({len(instruments)} instruments, {class_weight*100:.1f}% class weight):")
+        for instrument in instruments:
+            print(f"  {instrument}: {weights[instrument]*100:.2f}%")
+
+def main():
+    print("\nLoading instrument configuration...")
+    instrument_config = pd.read_csv('Data/instruments.csv')
+    instrument_config.set_index('Symbol', inplace=True)
+    
+    print("\nLoading instrument returns data...")
+    returns_df = load_instrument_returns(instrument_config)
+    
+    print("\nCalculating correlation matrix...")
+    corr_matrix = correlationEstimate(returns_df.corr())
+    
+    print("\nCreating handcraft portfolio...")
+    handcraft_portfolio = handcraftPortfolio(corr_matrix)
+    
+    print("\nCalculating portfolio weights...")
+    PRINT_TRACE = True
+    weights = handcraft_portfolio.weights()
+    
+    print("\nSelected Instruments Summary:")
+    print(f"Total number of instruments selected: {len(weights.assets)}")
+    print("\nSelected instruments:")
+    for instrument in sorted(weights.assets):
+        print(f"  {instrument}: {weights[instrument]*100:.2f}%")
+    
+    print("\nAnalyzing portfolio weights by asset class...")
+    analyze_portfolio_weights(weights, instrument_config)
+    
+    return weights
+
 if __name__ == "__main__":
-    symbols_csv = "Data/symbols.csv"  # Update to your symbols CSV file path
-    tradable, non_tradable = screen_instruments(symbols_csv,
-                                                initial_capital=INITIAL_CAPITAL,
-                                                risk_target=RISK_TARGET,
-                                                contracts=CONTRACTS_REQUIRED,
-                                                use_perc_returns=USE_PERC_RETURNS,
-                                                annualise_stdev=ANNUALISE_STDEV)
-    
-    print("Tradable Instruments (min capital requirement <= available capital):")
-    for instr in tradable:
-        print(f"  {instr['File']} | Multiplier: {instr['Multiplier']} | Latest Price: {instr['LatestPrice']:.2f} | "
-              f"Risk: {instr['Risk(σ%)']:.4f} | Min Capital: ${instr['MinCapital']:,.2f}")
-    
-    print("\nNon-Tradable Instruments (min capital requirement > available capital):")
-    for instr in non_tradable:
-        print(f"  {instr['File']} | Multiplier: {instr['Multiplier']} | Latest Price: {instr['LatestPrice']:.2f} | "
-              f"Risk: {instr['Risk(σ%)']:.4f} | Min Capital: ${instr['MinCapital']:,.2f}")
+    weights = main()
