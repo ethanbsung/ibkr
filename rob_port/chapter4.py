@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from scipy.cluster import hierarchy as sch
 import os
+import matplotlib.pyplot as plt
 
 class correlationEstimate(object):
     def __init__(self, values: pd.DataFrame):
@@ -322,9 +323,8 @@ def calculate_expected_mean_for_instrument_in_portfolio(instrument_code: str,
                                                       position_turnover: float
                                                       ):
     weight = portfolio_weights[instrument_code]
-    costs_SR_units = risk_adjusted_cost_for_instrument(instrument_code=instrument_code,
-                                                      instrument_config=instrument_config,
-                                                      position_turnover=position_turnover)
+    # Set costs to zero temporarily
+    costs_SR_units = 0.0
     SR_for_instrument = pre_cost_SR - costs_SR_units
     return weight * SR_for_instrument
 
@@ -342,35 +342,9 @@ def risk_adjusted_cost_for_instrument(instrument_code: str,
                                     position_turnover: float) -> float:
     """
     Calculate the Sharpe ratio cost for an instrument based on commission and spread.
-    
-    Parameters:
-    - instrument_code (str): The instrument symbol
-    - instrument_config (pd.DataFrame): DataFrame with instrument configurations
-    - position_turnover (float): Position turnover per year
-    
-    Returns:
-    - float: Sharpe ratio cost per trade
+    Temporarily set to zero to exclude costs from calculations.
     """
-    # Default values for commission and spread
-    commission = 1.24  # Default commission per trade
-    spread_points = 0.625  # Default spread in points
-    
-    # Get instrument multiplier and current price
-    multiplier = instrument_config.loc[instrument_code, 'Multiplier']
-    price = 1000  # Default price - you should replace this with actual price data
-    
-    # Calculate risk-adjusted cost
-    spread_cost = multiplier * (spread_points / 2)
-    total_cost = spread_cost + commission
-    cost_percent = total_cost / (price * multiplier)
-    
-    # Get rolls_per_year from config or use default
-    rolls_per_year = instrument_config.loc[instrument_code, 'rolls_per_year']
-    
-    # Annualize the cost
-    annual_cost = cost_percent * (rolls_per_year + position_turnover)
-    
-    return annual_cost
+    return 0.0
 
 def get_remaining_instruments(selected_instruments: list,
                             instrument_config: pd.DataFrame) -> list:
@@ -473,16 +447,83 @@ def minimum_capital_okay_for_instrument(instrument_code: str,
                                       risk_target: float,
                                       capital: float) -> bool:
     config_for_instrument = instrument_config.loc[instrument_code]
-    minimum_capital = calculate_minimum_capital(
-        multiplier=config_for_instrument['Multiplier'],
-        price=1000,  # You'll need to get actual prices
-        fx_rate=1.0,  # You'll need to get actual FX rates
-        sigma_pct=0.16,  # You'll need to calculate actual volatility
-        idm=idm,
-        weight=weight,
-        risk_target=risk_target
-    )
-    return minimum_capital <= capital
+    
+    # Get actual price and calculate volatility
+    price = config_for_instrument['price']
+    
+    # Read the full data file to get price series
+    try:
+        df = pd.read_csv(f'Data/{instrument_code}_daily_data.csv', parse_dates=['Time'])
+        df.set_index('Time', inplace=True)
+        
+        # Calculate variable standard deviation using the function from chapter3
+        sigma_pct = calculate_variable_standard_deviation_for_risk_targeting(
+            adjusted_price=df['Last'],
+            current_price=df['Last'],
+            use_perc_returns=True,
+            annualise_stdev=True
+        ).iloc[-1]  # Get the most recent volatility estimate
+        
+        # Get FX rate based on currency
+        currency = config_for_instrument['Currency']
+        fx_rate = get_fx_rate(currency)
+        
+        minimum_capital = calculate_minimum_capital(
+            multiplier=config_for_instrument['Multiplier'],
+            price=price,
+            fx_rate=fx_rate,
+            sigma_pct=sigma_pct,
+            idm=idm,
+            weight=weight,
+            risk_target=risk_target
+        )
+        
+        if minimum_capital > capital:
+            print(f"\nInstrument {instrument_code} rejected due to capital requirements:")
+            print(f"Required capital: ${minimum_capital:,.2f}")
+            print(f"Available capital: ${capital:,.2f}")
+            print(f"Multiplier: {config_for_instrument['Multiplier']}")
+            print(f"Price: ${price:,.2f}")
+            print(f"Volatility: {sigma_pct:.2%}")
+            print(f"FX Rate: {fx_rate:.4f}")
+            print(f"IDM: {idm:.2f}")
+            print(f"Weight: {weight:.2%}")
+            print(f"Risk Target: {risk_target:.2%}")
+        
+        return minimum_capital <= capital
+    except FileNotFoundError:
+        print(f"No data found for {instrument_code}")
+        return False
+
+def get_fx_rate(currency: str) -> float:
+    """
+    Get the current FX rate for a given currency.
+    For USD-denominated instruments, return 1.0.
+    For other currencies, you'll need to implement actual FX rate retrieval.
+    
+    Parameters:
+    - currency (str): The currency code (e.g., 'USD', 'EUR', 'JPY')
+    
+    Returns:
+    - float: The FX rate relative to USD
+    """
+    if currency == 'USD':
+        return 1.0
+    elif currency == 'EUR':
+        return 1.08  # Example rate, replace with actual data
+    elif currency == 'JPY':
+        return 0.0067  # Example rate, replace with actual data
+    elif currency == 'GBP':
+        return 1.26  # Example rate, replace with actual data
+    elif currency == 'CNH':
+        return 0.14  # Example rate, replace with actual data
+    elif currency == 'KRW':
+        return 0.00075  # Example rate, replace with actual data
+    elif currency == 'SGD':
+        return 0.74  # Example rate, replace with actual data
+    else:
+        print(f"Warning: No FX rate found for {currency}, using 1.0")
+        return 1.0
 
 def read_instrument_data(symbol):
     """
@@ -492,16 +533,16 @@ def read_instrument_data(symbol):
     - symbol (str): The instrument symbol
     
     Returns:
-    - pd.DataFrame: DataFrame with daily returns
+    - tuple: (pd.Series, float) - (returns series, last price)
     """
     try:
         df = pd.read_csv(f'Data/{symbol}_daily_data.csv', parse_dates=['Time'])
         df.set_index('Time', inplace=True)
         df['returns'] = df['Last'].pct_change(fill_method=None)
-        return df['returns']
+        return df['returns'], df['Last'].iloc[-1]  # Return both returns and last price
     except FileNotFoundError:
         print(f"No data found for {symbol}")
-        return None
+        return None, None
 
 def create_correlation_matrix(instruments_df):
     """
@@ -563,64 +604,41 @@ def calculate_SR_cost_for_instrument(instrument_code: str,
                                    position_turnover: float) -> float:
     """
     Calculate the Sharpe ratio cost for an instrument based on commission and spread.
-    
-    Parameters:
-    - instrument_code (str): The instrument symbol
-    - instrument_config (pd.DataFrame): DataFrame with instrument configurations
-    - position_turnover (float): Position turnover per year
-    
-    Returns:
-    - float: Sharpe ratio cost per trade
+    Temporarily set to zero to exclude costs from calculations.
     """
-    # Default values for commission and spread
-    commission = 1.24  # Default commission per trade
-    spread_points = 0.625  # Default spread in points
-    
-    # Get instrument multiplier and current price
-    multiplier = instrument_config.loc[instrument_code, 'Multiplier']
-    price = 1000  # Default price - you should replace this with actual price data
-    
-    # Calculate risk-adjusted cost
-    spread_cost = multiplier * (spread_points / 2)
-    total_cost = spread_cost + commission
-    cost_percent = total_cost / (price * multiplier)
-    
-    # Annualize the cost
-    annual_cost = cost_percent * (position_turnover + 4)  # 4 rolls per year
-    
-    return annual_cost
+    return 0.0
 
 def select_instruments(capital, risk_target, approx_number_of_instruments, approx_idm, position_turnover, pre_cost_sr):
     """
     Select instruments using the handcrafting algorithm.
-    
-    Parameters:
-    - capital (float): Total capital
-    - risk_target (float): Risk target
-    - approx_number_of_instruments (int): Approximate number of instruments to select
-    - approx_idm (float): Approximate IDM
-    - position_turnover (int): Position turnover per year
-    - pre_cost_sr (float): Pre-cost Sharpe ratio
-    
-    Returns:
-    - list: Selected instruments
     """
+    print(f"\nStarting instrument selection with:")
+    print(f"Capital: ${capital:,.2f}")
+    print(f"Risk Target: {risk_target:.2%}")
+    print(f"Pre-cost SR: {pre_cost_sr:.2f}")
+    print(f"Position Turnover: {position_turnover}")
+    
     # Read instruments configuration
     instruments_df = pd.read_csv('Data/instruments.csv')
     instruments_df.set_index('Symbol', inplace=True)
     
-    # Create returns DataFrame for all instruments
+    # Create returns DataFrame and price dictionary for all instruments
     returns_dict = {}
+    price_dict = {}
     for symbol in instruments_df.index:
-        returns = read_instrument_data(symbol)
+        returns, price = read_instrument_data(symbol)
         if returns is not None:
             returns_dict[symbol] = returns
+            price_dict[symbol] = price
     
     # Filter instruments_df to only include instruments with data
     instruments_with_data = list(returns_dict.keys())
     instruments_df = instruments_df.loc[instruments_with_data]
     
-    # Add rolls_per_year column with default value of 4
+    print(f"\nFound {len(instruments_with_data)} instruments with data")
+    
+    # Add price and rolls_per_year columns
+    instruments_df['price'] = instruments_df.index.map(price_dict)
     instruments_df['rolls_per_year'] = 4
     
     # Add SR_cost column to instruments_df
@@ -639,6 +657,7 @@ def select_instruments(capital, risk_target, approx_number_of_instruments, appro
     selected_instruments = []
     approx_initial_weight = 1.0 / approx_number_of_instruments
     
+    print("\nSelecting first instrument...")
     # Select first instrument
     first_instrument = choose_next_instrument(
         selected_instruments=[],
@@ -663,53 +682,539 @@ def select_instruments(capital, risk_target, approx_number_of_instruments, appro
     )
     
     max_SR_achieved = current_SR
+    print(f"\nFirst instrument selected: {first_instrument}")
+    print(f"Initial Sharpe Ratio: {current_SR:.2f}")
     
-    # Continue selecting instruments until SR starts declining
-    while current_SR > (max_SR_achieved * 0.9):
-        print(f"{selected_instruments} SR: {current_SR:.2f}")
-        next_instrument = choose_next_instrument(
-            selected_instruments,
-            correlation_matrix=corr_matrix,
-            pre_cost_SR=pre_cost_sr,
-            instrument_config=instruments_df,
-            position_turnover=position_turnover,
-            capital=capital,
-            risk_target=risk_target
-        )
-        selected_instruments.append(next_instrument)
+    # Continue selecting instruments until no more improvements can be made
+    iteration = 1
+    improvement_found = True
+    
+    while improvement_found:
+        print(f"\nIteration {iteration}:")
+        print(f"Current portfolio: {selected_instruments}")
+        print(f"Current SR: {current_SR:.2f}")
+        print(f"Max SR achieved: {max_SR_achieved:.2f}")
+        print(f"Threshold (90% of max): {max_SR_achieved * 0.9:.2f}")
         
-        current_SR = calculate_SR_for_selected_instruments(
-            selected_instruments,
-            correlation_matrix=corr_matrix,
-            pre_cost_SR=pre_cost_sr,
-            instrument_config=instruments_df,
-            position_turnover=position_turnover,
-            capital=capital,
-            risk_target=risk_target
-        )
+        # Get all remaining instruments
+        remaining_instruments = get_remaining_instruments(selected_instruments, instruments_df)
+        print(f"Remaining instruments to try: {len(remaining_instruments)}")
         
-        if current_SR > max_SR_achieved:
-            max_SR_achieved = current_SR
+        # Try each remaining instrument
+        best_next_instrument = None
+        best_next_SR = current_SR
+        
+        for next_instrument in remaining_instruments:
+            print(f"\nTrying to add: {next_instrument}")
+            
+            # Calculate SR with the new instrument
+            test_instruments = selected_instruments + [next_instrument]
+            test_SR = calculate_SR_for_selected_instruments(
+                test_instruments,
+                correlation_matrix=corr_matrix,
+                pre_cost_SR=pre_cost_sr,
+                instrument_config=instruments_df,
+                position_turnover=position_turnover,
+                capital=capital,
+                risk_target=risk_target
+            )
+            
+            print(f"SR with new instrument: {test_SR:.2f}")
+            
+            if test_SR > best_next_SR:
+                best_next_SR = test_SR
+                best_next_instrument = next_instrument
+                print(f"New best SR found: {best_next_SR:.2f}")
+        
+        # If we found an improvement, add the best instrument
+        if best_next_instrument is not None and best_next_SR > current_SR:
+            selected_instruments.append(best_next_instrument)
+            current_SR = best_next_SR
+            if current_SR > max_SR_achieved:
+                max_SR_achieved = current_SR
+                print(f"New max SR achieved: {max_SR_achieved:.2f}")
+        else:
+            improvement_found = False
+            print("\nNo more improvements found with remaining instruments")
+        
+        iteration += 1
+    
+    print(f"\nSelection process stopped after {len(selected_instruments)} instruments")
+    print(f"Final portfolio: {selected_instruments}")
+    print(f"Final Sharpe Ratio: {current_SR:.2f}")
+    print(f"Maximum Sharpe Ratio achieved: {max_SR_achieved:.2f}")
     
     return selected_instruments
 
-if __name__ == "__main__":
-    # Example usage
-    capital = 1000000
-    risk_target = 0.2
-    approx_number_of_instruments = 5
-    approx_idm = 2.5
-    position_turnover = 5
-    pre_cost_sr = 0.4
+def get_asset_class(instrument_code: str, instrument_config: pd.DataFrame) -> str:
+    """
+    Categorize instruments into asset classes based on the book's tables.
     
-    selected = select_instruments(
+    Asset Classes:
+    1. Bonds - Government bonds and interest rate futures
+    2. Equities - Stock indices (US, European, Asian)
+    3. Volatility - VIX and VSTOXX
+    4. FX - Major and cross-rate currency futures
+    5. Metals - Including crypto
+    6. Energies - Oil, gas, etc.
+    7. Agricultural - Grains, meats, etc.
+    """
+    # Bonds and Interest Rates (Tables 172 & 173)
+    if instrument_code in ['ZT', 'Z3N', 'ZF', 'ZN', 'TN', 'ZB', 'UB', 'LIW', 'N1U', 'GE',  # US
+                          'OAT', 'GBS', 'GBM', 'GBL', 'GBX', 'BTS', 'BTP', 'JGB',           # European & Japanese
+                          '3KTB', 'FLKTB', 'FBON']:                                          # Korean & Spanish
+        return 'Bonds'
+    
+    # US Equity Indices (Table 174)
+    elif instrument_code in ['MYM', 'MNQ', 'RSV', 'M2K', 'EMD', 'MES']:
+        return 'US_Equity'
+    
+    # European Equity Indices and Sectors (Tables 175 & 176)
+    elif instrument_code in ['EOE', 'CAC40', 'DAX', 'SMI', 'DJ200S', 'DJSD', 'DJ600', 'ESTX50',
+                           'SXAP', 'SXPP', 'SXDP', 'SXIP', 'SXEP', 'SX8P', 'SXTP', 'SX6P']:
+        return 'EU_Equity'
+    
+    # Asian Equity Indices (Table 177)
+    elif instrument_code in ['M1MS', 'XINA50', 'XINO1', 'NIFTY', 'N225M', 'JPNK400',
+                           'TSEMOTHR', 'MNTPX', 'KOSDQ150', 'K200', 'SSG', 'TWN']:
+        return 'Asia_Equity'
+    
+    # Volatility (Table 178)
+    elif instrument_code in ['VIX', 'V2TX']:
+        return 'Volatility'
+    
+    # FX - Major (Table 179)
+    elif instrument_code in ['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'JPY', 'NOK', 'NZD', 'SEK']:
+        return 'Major_FX'
+    
+    # FX - Cross and EM (Table 180)
+    elif instrument_code in ['RP', 'RY', 'BRE', 'UC', 'SIR', 'MXP', 'RUR', 'SND']:
+        return 'EM_FX'
+    
+    # Metals and Crypto (Table 181)
+    elif instrument_code in ['ALI', 'HG', 'MGC', 'SCI', 'PA', 'PL', 'SI', 'MBT', 'ETHUSDRR']:
+        return 'Metals'
+    
+    # Energy (Table 182)
+    elif instrument_code in ['BZ', 'QM', 'HH', 'RB', 'QG', 'HO']:
+        return 'Energy'
+    
+    # Agricultural (Table 183)
+    elif instrument_code in ['AIGCI', 'CSC', 'ZC', 'GF', 'HE', 'LE', 'ZO', 'KE', 'ZR',
+                           'ZS', 'ZM', 'ZL', 'ZW']:
+        return 'Agricultural'
+    
+    else:
+        print(f"Warning: Unknown asset class for instrument {instrument_code}")
+        return 'Other'
+
+def get_idm_for_instrument_count(count: int) -> float:
+    """
+    Returns the IDM value based on number of instruments as per the book's table 16.
+    """
+    if count == 1:
+        return 1.00
+    elif count == 2:
+        return 1.20
+    elif count == 3:
+        return 1.48
+    elif count == 4:
+        return 1.56
+    elif count == 5:
+        return 1.70
+    elif count == 6:
+        return 1.90
+    elif count == 7:
+        return 2.10
+    elif count <= 14:
+        return 2.20
+    elif count <= 24:
+        return 2.30
+    elif count <= 29:
+        return 2.40
+    else:
+        return 2.50
+
+def handcraft_portfolio_weights(selected_instruments: list, instrument_config: pd.DataFrame) -> dict:
+    """
+    Implement the book's handcrafting method for portfolio weights:
+    1. Group instruments by major asset class
+    2. Give each major asset class equal weight
+    3. Within each asset class, subdivide by region/type if applicable
+    4. Within each subgroup, divide equally among instruments
+    """
+    # Group instruments by asset class
+    instruments_by_class = {}
+    for inst in selected_instruments:
+        asset_class = get_asset_class(inst, instrument_config)
+        if asset_class not in instruments_by_class:
+            instruments_by_class[asset_class] = []
+        instruments_by_class[asset_class].append(inst)
+    
+    # Remove 'Other' class if it exists and is empty
+    if 'Other' in instruments_by_class and not instruments_by_class['Other']:
+        del instruments_by_class['Other']
+    
+    # Calculate weights
+    weights = {}
+    n_classes = len(instruments_by_class)
+    class_weight = 1.0 / n_classes
+    
+    # Special handling for equities - combine US, EU, and Asia
+    equity_classes = ['US_Equity', 'EU_Equity', 'Asia_Equity']
+    total_equity_instruments = sum(len(instruments_by_class.get(ec, [])) for ec in equity_classes)
+    
+    print("\nPortfolio Weight Allocation:")
+    print(f"Number of asset classes: {n_classes}")
+    
+    for asset_class, instruments in instruments_by_class.items():
+        if asset_class in equity_classes:
+            # All equity instruments share the same class weight
+            instrument_weight = class_weight / total_equity_instruments if total_equity_instruments > 0 else 0
+        else:
+            # Normal weight calculation for non-equity classes
+            instrument_weight = class_weight / len(instruments)
+        
+        print(f"\n{asset_class} ({len(instruments)} instruments, {class_weight:.1%} class weight):")
+        for inst in instruments:
+            weights[inst] = instrument_weight
+            print(f"  {inst}: {weights[inst]:.2%}")
+    
+    return weights
+
+def calculate_portfolio_sr(selected_instruments: list,
+                         weights: dict,
+                         correlation_matrix: correlationEstimate,
+                         pre_cost_sr: float,
+                         position_turnover: float = 5.1) -> float:
+    """
+    Calculate the expected Sharpe ratio for a portfolio using the book's methodology.
+    """
+    if not selected_instruments:
+        return 0.0
+    
+    # Get the subset correlation matrix for selected instruments
+    subset_correlation = correlation_matrix.subset(selected_instruments)
+    
+    # Calculate portfolio variance using correlation matrix and weights
+    weight_array = np.array([weights[inst] for inst in selected_instruments])
+    portfolio_variance = weight_array.dot(subset_correlation.values).dot(weight_array)
+    portfolio_vol = np.sqrt(portfolio_variance)
+    
+    # Calculate expected return (pre-cost SR adjusted for costs)
+    costs = 0.0  # Temporarily set to 0 as per current implementation
+    portfolio_sr = pre_cost_sr - costs
+    
+    return portfolio_sr / portfolio_vol
+
+def select_instruments_v2(capital: float,
+                        risk_target: float,
+                        instrument_config: pd.DataFrame,
+                        correlation_matrix: correlationEstimate,
+                        pre_cost_sr: float = 0.3,
+                        position_turnover: float = 5.1) -> list:
+    """
+    Implement the book's instrument selection algorithm
+    """
+    print("\nStarting Portfolio Construction:")
+    print(f"Capital: ${capital:,.0f}")
+    print(f"Risk Target: {risk_target:.1%}")
+    print(f"Pre-cost SR: {pre_cost_sr:.2f}")
+    
+    selected_instruments = []
+    max_sr = 0.0
+    current_sr = 0.0
+    
+    # Get all available instruments
+    all_instruments = list(instrument_config.index)
+    
+    iteration = 0
+    while True:
+        iteration += 1
+        best_new_sr = current_sr
+        best_instrument = None
+        
+        # Try each remaining instrument
+        remaining = set(all_instruments) - set(selected_instruments)
+        for instrument in remaining:
+            test_portfolio = selected_instruments + [instrument]
+            test_weights = handcraft_portfolio_weights(test_portfolio, instrument_config)
+            
+            # Calculate SR for test portfolio
+            test_sr = calculate_portfolio_sr(
+                test_portfolio,
+                test_weights,
+                correlation_matrix,
+                pre_cost_sr,
+                position_turnover
+            )
+            
+            if test_sr > best_new_sr:
+                best_new_sr = test_sr
+                best_instrument = instrument
+        
+        # If we found an improvement
+        if best_instrument and best_new_sr > current_sr:
+            selected_instruments.append(best_instrument)
+            current_sr = best_new_sr
+            if current_sr > max_sr:
+                max_sr = current_sr
+            print(f"\nAdded {best_instrument} (SR: {current_sr:.3f})")
+        else:
+            print("\nNo further improvements found")
+            break
+        
+        # Check if SR has declined by more than 10% from maximum
+        if current_sr < 0.9 * max_sr:
+            print(f"\nStopping: SR ({current_sr:.3f}) has declined more than 10% from maximum ({max_sr:.3f})")
+            break
+    
+    print("\nFinal Portfolio Summary:")
+    print(f"Number of instruments: {len(selected_instruments)}")
+    print(f"Final SR: {current_sr:.3f}")
+    print(f"Maximum SR achieved: {max_sr:.3f}")
+    print("\nSelected Instruments by Asset Class:")
+    
+    # Group and display instruments by asset class
+    instruments_by_class = {}
+    for inst in selected_instruments:
+        asset_class = get_asset_class(inst, instrument_config)
+        if asset_class not in instruments_by_class:
+            instruments_by_class[asset_class] = []
+        instruments_by_class[asset_class].append(inst)
+    
+    for asset_class, instruments in instruments_by_class.items():
+        print(f"{asset_class}: {', '.join(instruments)}")
+    
+    return selected_instruments
+
+def load_all_instrument_data(instrument_config: pd.DataFrame) -> tuple:
+    """
+    Load price and return data for all instruments in the config.
+    
+    Returns:
+    - tuple: (price_data: pd.DataFrame, returns_data: pd.DataFrame, instruments_with_data: list)
+    """
+    print("\nLoading instrument data:")
+    price_data = {}
+    returns_data = {}
+    instruments_with_data = []
+    
+    for symbol in instrument_config.index:
+        try:
+            df = pd.read_csv(f'Data/{symbol}_daily_data.csv', parse_dates=['Time'])
+            df.set_index('Time', inplace=True)
+            
+            # Store price and calculate returns
+            price_data[symbol] = df['Last']
+            returns_data[symbol] = df['Last'].pct_change()
+            
+            instruments_with_data.append(symbol)
+            print(f"Loaded data for {symbol}: {len(df)} rows")
+            
+        except FileNotFoundError:
+            print(f"No data found for {symbol}")
+            continue
+        except Exception as e:
+            print(f"Error loading {symbol}: {str(e)}")
+            continue
+    
+    # Convert to DataFrames
+    price_df = pd.DataFrame(price_data)
+    returns_df = pd.DataFrame(returns_data)
+    
+    print(f"\nSuccessfully loaded data for {len(instruments_with_data)} instruments")
+    print(f"Date range: {price_df.index[0]} to {price_df.index[-1]}")
+    
+    return price_df, returns_df, instruments_with_data
+
+def calculate_position_sizes(capital: float,
+                           selected_instruments: list,
+                           weights: dict,
+                           idm: float,
+                           risk_target: float,
+                           price_data: pd.DataFrame,
+                           instrument_config: pd.DataFrame,
+                           volatility_data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate position sizes using the book's formula:
+    Ni = Capital × IDM × Weighti × τ ÷ (Multiplieri × Pricei,t × FX ratei,t × σ_%i,t)
+    
+    Returns DataFrame with positions for each instrument over time.
+    """
+    print("\nCalculating position sizes:")
+    positions = {}
+    
+    for instrument in selected_instruments:
+        print(f"\nProcessing {instrument}:")
+        
+        # Get instrument config
+        config = instrument_config.loc[instrument]
+        multiplier = config['Multiplier']
+        currency = config['Currency']
+        
+        # Get current FX rate (simplified - should be time series)
+        fx_rate = get_fx_rate(currency)
+        
+        # Get weight
+        weight = weights[instrument]
+        
+        # Calculate positions over time
+        price_series = price_data[instrument]
+        vol_series = volatility_data[instrument]
+        
+        positions[instrument] = (capital * idm * weight * risk_target / 
+                               (multiplier * price_series * fx_rate * vol_series))
+        
+        # Round to nearest whole number
+        positions[instrument] = positions[instrument].round()
+        
+        print(f"Average position size: {positions[instrument].mean():.1f}")
+        print(f"Max position size: {positions[instrument].max():.0f}")
+        print(f"Min position size: {positions[instrument].min():.0f}")
+    
+    positions_df = pd.DataFrame(positions)
+    return positions_df
+
+def calculate_portfolio_returns(positions: pd.DataFrame,
+                              returns: pd.DataFrame,
+                              price_data: pd.DataFrame,
+                              instrument_config: pd.DataFrame,
+                              capital: float) -> pd.DataFrame:
+    """
+    Calculate portfolio returns based on positions and instrument returns.
+    """
+    print("\nBacktest Results:")
+    
+    # Calculate returns for each instrument
+    instrument_returns = {}
+    for instrument in positions.columns:
+        config = instrument_config.loc[instrument]
+        multiplier = config['Multiplier']
+        currency = config['Currency']
+        fx_rate = get_fx_rate(currency)
+        
+        price_series = price_data[instrument]
+        pos_series = positions[instrument].shift(1)
+        returns_series = returns[instrument]
+        
+        pnl_series = pos_series * multiplier * price_series.shift(1) * fx_rate * returns_series
+        instrument_returns[instrument] = pnl_series / capital
+    
+    portfolio_returns = pd.DataFrame(instrument_returns)
+    portfolio_returns['total'] = portfolio_returns.sum(axis=1)
+    
+    # Calculate key statistics
+    ann_factor = np.sqrt(256)  # Annualization factor
+    mean_return = portfolio_returns['total'].mean() * 256
+    vol = portfolio_returns['total'].std() * ann_factor
+    sharpe = mean_return / vol if vol != 0 else 0
+    
+    # Calculate drawdown
+    cum_returns = (1 + portfolio_returns['total']).cumprod()
+    drawdown = 1 - cum_returns / cum_returns.cummax()
+    max_drawdown = drawdown.max()
+    
+    print(f"Annualized Return: {mean_return:.1%}")
+    print(f"Annualized Volatility: {vol:.1%}")
+    print(f"Sharpe Ratio: {sharpe:.2f}")
+    print(f"Maximum Drawdown: {max_drawdown:.1%}")
+    
+    return portfolio_returns
+
+def run_strategy(capital: float = 50_000_000,
+                risk_target: float = 0.20,
+                pre_cost_sr: float = 0.3,
+                position_turnover: float = 5.1):
+    """
+    Run the complete strategy as described in the book.
+    """
+    print(f"\nInitializing strategy with:")
+    print(f"Capital: ${capital:,.0f}")
+    print(f"Risk target: {risk_target:.1%}")
+    print(f"Pre-cost SR: {pre_cost_sr:.2f}")
+    print(f"Position turnover: {position_turnover:.1f}")
+    
+    # Load instrument configuration
+    instrument_config = pd.read_csv('Data/instruments.csv')
+    instrument_config.set_index('Symbol', inplace=True)
+    
+    # Load all instrument data
+    price_data, returns_data, available_instruments = load_all_instrument_data(instrument_config)
+    
+    # Filter instrument_config to only include instruments with data
+    instrument_config = instrument_config.loc[available_instruments]
+    
+    # Calculate correlation matrix
+    correlation_matrix = correlationEstimate(returns_data.corr())
+    
+    # Select instruments using the book's methodology
+    selected_instruments = select_instruments_v2(
         capital=capital,
         risk_target=risk_target,
-        approx_number_of_instruments=approx_number_of_instruments,
-        approx_idm=approx_idm,
-        position_turnover=position_turnover,
-        pre_cost_sr=pre_cost_sr
+        instrument_config=instrument_config,
+        correlation_matrix=correlation_matrix,
+        pre_cost_sr=pre_cost_sr,
+        position_turnover=position_turnover
     )
     
-    print("Selected instruments:", selected)
+    # Calculate portfolio weights using handcrafting method
+    weights = handcraft_portfolio_weights(selected_instruments, instrument_config)
+    
+    # Get IDM based on number of instruments
+    idm = get_idm_for_instrument_count(len(selected_instruments))
+    print(f"\nUsing IDM: {idm:.2f} for {len(selected_instruments)} instruments")
+    
+    # Calculate volatility for each instrument
+    volatility_data = pd.DataFrame()
+    for inst in selected_instruments:
+        volatility_data[inst] = calculate_variable_standard_deviation_for_risk_targeting(
+            adjusted_price=price_data[inst],
+            current_price=price_data[inst]
+        )
+    
+    # Calculate position sizes
+    positions = calculate_position_sizes(
+        capital=capital,
+        selected_instruments=selected_instruments,
+        weights=weights,
+        idm=idm,
+        risk_target=risk_target,
+        price_data=price_data,
+        instrument_config=instrument_config,
+        volatility_data=volatility_data
+    )
+    
+    # Calculate portfolio returns
+    portfolio_returns = calculate_portfolio_returns(
+        positions=positions,
+        returns=returns_data,
+        price_data=price_data,
+        instrument_config=instrument_config,
+        capital=capital
+    )
+    
+    # Calculate and plot equity curve
+    equity_curve = (1 + portfolio_returns['total']).cumprod()
+    
+    print("\nStrategy Performance:")
+    print(f"Final equity: {equity_curve.iloc[-1]:.2f}")
+    print(f"Max drawdown: {(1 - equity_curve / equity_curve.cummax()).max()*100:.1f}%")
+    
+    # Plot equity curve
+    plt.figure(figsize=(12, 6))
+    equity_curve.plot(title='Strategy Equity Curve')
+    plt.grid(True)
+    plt.show()
+    
+    return positions, portfolio_returns, equity_curve
+
+if __name__ == "__main__":
+    # Run the strategy with the book's parameters
+    positions, returns, equity = run_strategy(
+        capital=50_000_000,  # $50M as in the book's example
+        risk_target=0.20,    # 20% annual risk target
+        pre_cost_sr=0.3,     # Pre-cost Sharpe ratio assumption
+        position_turnover=5.1 # From the book's tables
+    )
 

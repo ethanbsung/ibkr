@@ -245,7 +245,7 @@ if __name__ == "__main__":
 
     print("\nCalculating position series with variable risk...")
     calculate_position_series_with_variable_risk(
-        csv_path="Data/es_daily_data.csv",
+        csv_path="Data/mes_daily_data.csv",
         capital=100000,
         multiplier=multiplier,
         fx_rate=1.0,
