@@ -1,3 +1,18 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Data files
 Data/es_5m_data.csv
 Data/es_1m_data.csv
 Data/es_15m_data.csv

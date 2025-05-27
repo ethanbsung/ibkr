@@ -94,7 +94,7 @@ def main():
     """
 
     # Read the dataset 'Data/es_daily_data.csv'
-    df = pd.read_csv('Data/es_daily_data.csv', parse_dates=['Time'])
+    df = pd.read_csv('Data/mes_daily_data.csv', parse_dates=['Time'])
     df.set_index('Time', inplace=True)
 
     # Calculate daily returns for standard deviation
