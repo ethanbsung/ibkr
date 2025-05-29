@@ -84,9 +84,9 @@ def get_current_day_data(ib, contract):
     Request current market data for the day using the ticker.
     Returns a simple object with attributes: open, high, low, close, date.
     """
-    ticker = ib.reqMktData(contract, '', False, False)
+    ticker = ib.reqMktData(contract, '', snapshot=True, regulatorySnapshot=False)
     # Allow time for market data to update
-    IB.sleep(1)
+    IB.sleep(2)
     
     # Create a simple bar-like object.
     class Bar:
@@ -100,7 +100,6 @@ def get_current_day_data(ib, contract):
     # If available, use ticker.open; otherwise fallback.
     bar.open = ticker.open if hasattr(ticker, 'open') and ticker.open is not None else bar.close
     bar.date = datetime.now(pytz.timezone('US/Eastern')).date()
-    ib.cancelMktData(ticker)
     return bar
 
 def compute_IBS(bar):
@@ -185,7 +184,7 @@ def run_daily_signals(ib):
     # Define micro Futures contracts for IBS instruments.
     mes_contract  = Future(symbol='MES', lastTradeDateOrContractMonth=DATA_EXPIRY, exchange=DATA_EXCHANGE, currency=CURRENCY)
     mym_contract  = Future(symbol='MYM', lastTradeDateOrContractMonth='202506', exchange='CBOT', currency=CURRENCY)
-    mgc_contract  = Future(symbol='MGC', lastTradeDateOrContractMonth='202504', exchange='COMEX', currency=CURRENCY)
+    mgc_contract  = Future(symbol='MGC', lastTradeDateOrContractMonth='202506', exchange='COMEX', currency=CURRENCY)
     mnq_contract  = Future(symbol='MNQ', lastTradeDateOrContractMonth='202506', exchange='CME', currency=CURRENCY)
 
     # Qualify all contracts.
@@ -281,17 +280,15 @@ def main():
     # On startup, print the daily OHLC data for the past 2 days for MES.
     print_recent_ohlc(ib)
 
-    # Main loop: run forever, evaluating signals once each day just before the futures market close
-    while True:
-        # 1) Wait until 5 seconds before the futures market close time (5 PM Eastern)
-        wait_until_close(target_hour=17, target_minute=0, timezone='US/Eastern', lead_seconds=5)
+    # Wait until 5 seconds before the futures market close time (5 PM Eastern)
+    wait_until_close(target_hour=17, target_minute=0, timezone='US/Eastern', lead_seconds=5)
 
-        # 2) Once we're at the target time, run the daily signal logic using the current market data
-        run_daily_signals(ib)
+    # Once we're at the target time, run the daily signal logic using the current market data
+    run_daily_signals(ib)
 
-        # 3) Sleep a bit to avoid hammering right around the close time repeatedly
-        logger.info("Finished running daily signals. Waiting for next trading day...")
-        IB.sleep(60 * 5)  # Sleep 5 minutes or adjust as needed
+    # Disconnect and end script
+    ib.disconnect()
+    logger.info("Finished running daily signals for the day. Exiting.")
 
 if __name__ == '__main__':
     main()

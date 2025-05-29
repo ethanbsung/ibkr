@@ -33,8 +33,8 @@ contract_multipliers = {
 
 # CSV file paths
 data_files = {
-    'es': 'Data/es_daily_data.csv',
-    'nq': 'Data/nq_daily_data.csv',
+    'es': 'Data/mes_daily_data.csv',
+    'nq': 'Data/mnq_daily_data.csv',
     'cl': 'Data/cl_daily_data.csv',
     'ng': 'Data/ng_daily_data.csv'
 }

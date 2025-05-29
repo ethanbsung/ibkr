@@ -1,254 +1,493 @@
 from chapter2 import *
+from chapter1 import *
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from chapter1 import calculate_standard_deviation, annualized_standard_deviation, calculate_fat_tails
 
-# Use the business days constant (256)
-business_days_in_year = 256
+#####   VARIABLE VOLATILITY FORECASTING   #####
 
-def calculate_variable_standard_deviation_for_risk_targeting(
-    adjusted_price: pd.Series,
-    current_price: pd.Series,
-    use_perc_returns: bool = True,
-    annualise_stdev: bool = True,
-) -> pd.Series:
+def calculate_ewma_volatility(returns, span=32, annualize=True):
     """
-    Calculate the variable (EWMA-based) standard deviation for risk targeting,
-    using the author's method:
+    Calculate Exponentially Weighted Moving Average volatility.
     
-      1. Compute daily percentage returns if use_perc_returns is True.
-      2. Compute the EWMA standard deviation over a 32-day span.
-      3. Annualise the EWMA standard deviation by multiplying by √(business_days_in_year).
-      4. Compute a 10-year rolling average of the annualised EWMA volatility.
-      5. Blend the long-run (10-year) vol and the short-run (annualised EWMA) vol.
-      
-    Returns a Series of weighted (blended) annual volatility estimates.
-    """
-    if use_perc_returns:
-        # Daily percentage returns: (Price_t - Price_{t-1}) / Price_{t-1}
-        daily_returns = adjusted_price.diff() / current_price.shift(1)
-    else:
-        daily_returns = adjusted_price.diff()
+    Formula from book:
+        σ_ewma(λ) = sqrt(λ(r_t - r̄)² + λ(1-λ)(r_{t-1} - r̄)² + λ(1-λ)²(r_{t-2} - r̄)² + ...)
     
-    # Compute the EWMA standard deviation over a 32-day span using pandas' built-in ewm
-    daily_exp_std_dev = daily_returns.ewm(span=32).std()
-    
-    if annualise_stdev:
-        annualisation_factor = business_days_in_year ** 0.5
-    else:
-        annualisation_factor = 1
-        
-    # Annualise the short-run EWMA volatility
-    annualised_std_dev = daily_exp_std_dev * annualisation_factor
-    
-    # Compute the 10-year average volatility using a rolling window
-    ten_year_vol = annualised_std_dev.rolling(business_days_in_year * 10, min_periods=1).mean()
-    
-    # Blend: 30% weight to long-run vol and 70% to short-run annualised EWMA vol
-    weighted_vol = 0.3 * ten_year_vol + 0.7 * annualised_std_dev
-    
-    return weighted_vol
-
-def calculate_position_size_with_variable_risk(capital, multiplier, price, fx_rate, risk_target, sigma_pct):
-    """
-    Calculate position size using the formula with variable risk.
-
-    N = (Capital × τ) ÷ (Multiplier × Price × FX × σ_%)
-
     Parameters:
-    - capital (float): Account capital.
-    - multiplier (float): Futures contract multiplier.
-    - price (float): Instrument price.
-    - fx_rate (float or pd.Series): FX conversion rate.
-    - risk_target (float): Target risk as a fraction (e.g. 0.2 for 20%).
-    - sigma_pct (float): Forecasted annual volatility (as a decimal, e.g. 0.25 for 25%).
-
+        returns (pd.Series): Daily returns series.
+        span (int): EWMA span in days (default 32 as per book).
+        annualize (bool): Whether to annualize the volatility.
+    
     Returns:
-    - float: Number of contracts (rounded).
+        pd.Series: EWMA volatility series.
     """
-    denominator = multiplier * price * fx_rate * sigma_pct
-    return round((capital * risk_target) / denominator)
+    # Calculate lambda from span: λ = 2 / (span + 1)
+    lambda_param = 2 / (span + 1)
+    
+    # Calculate EWMA volatility using pandas ewm
+    ewma_vol = returns.ewm(span=span, adjust=False).std()
+    
+    if annualize:
+        ewma_vol = ewma_vol * np.sqrt(business_days_per_year)
+    
+    return ewma_vol
 
-def calculate_annual_risk_adjusted_cost(price, multiplier, commission, spread_points, annualized_std_dev,
-                                        rolls_per_year, turnover):
+def calculate_blended_volatility(returns, short_span=32, long_years=10, short_weight=0.7, long_weight=0.3):
     """
-    Calculate the annual risk-adjusted cost.
-
+    Calculate blended volatility forecast using short-run EWMA and long-run average.
+    
+    From book:
+        σ_blend = 0.3 × (Ten year average of σ_t) + 0.7 × σ_t
+    
     Parameters:
-    - price (float): Current price of the instrument.
-    - multiplier (float): Futures contract multiplier.
-    - commission (float): Commission per contract in currency.
-    - spread_points (float): Bid-ask spread in price points.
-    - annualized_std_dev (float): Annualized standard deviation as a decimal (e.g., 0.16 for 16%).
-    - rolls_per_year (int): Number of times the position is rolled annually (default is 4).
-    - turnover (int): Number of other trades made per year (default is 6).
-
+        returns (pd.Series): Daily returns series.
+        short_span (int): EWMA span for short-run volatility.
+        long_years (int): Years for long-run rolling average.
+        short_weight (float): Weight for short-run volatility (0.7 in book).
+        long_weight (float): Weight for long-run volatility (0.3 in book).
+    
     Returns:
-    - float: Annual risk-adjusted cost in Sharpe Ratio units.
+        pd.Series: Blended volatility forecast.
     """
-    spread_cost_currency = multiplier * (spread_points / 2)
-    total_cost_per_trade_currency = spread_cost_currency + commission
-    total_cost_per_trade_percent = total_cost_per_trade_currency / (price * multiplier)
-    risk_adjusted_cost_per_trade = total_cost_per_trade_percent / annualized_std_dev
+    # Calculate short-run EWMA volatility
+    short_vol = calculate_ewma_volatility(returns, span=short_span, annualize=True)
+    
+    # Calculate long-run rolling average volatility
+    long_window = long_years * business_days_per_year
+    long_vol = short_vol.rolling(window=long_window, min_periods=1).mean()
+    
+    # Blend the two estimates
+    blended_vol = long_weight * long_vol + short_weight * short_vol
+    
+    return blended_vol
 
+def calculate_variable_position_size(capital, multiplier, price, blended_volatility, risk_target=0.2, fx_rate=1.0):
+    """
+    Calculate position size using variable volatility forecast.
+    
+    Formula:
+        N = (Capital × τ) ÷ (Multiplier × Price × FX × σ_blended)
+    
+    Parameters:
+        capital (float): Trading capital.
+        multiplier (float): Contract multiplier.
+        price (float): Current price.
+        blended_volatility (float): Blended volatility forecast.
+        risk_target (float): Target risk fraction.
+        fx_rate (float): FX rate for currency conversion.
+    
+    Returns:
+        float: Number of contracts (can be fractional).
+    """
+    if np.isnan(blended_volatility) or blended_volatility == 0:
+        return 0
+    
+    denominator = multiplier * price * fx_rate * blended_volatility
+    position_size = (capital * risk_target) / denominator
+    
+    return position_size
+
+#####   RISK-ADJUSTED TRADING COSTS   #####
+
+def calculate_spread_cost(spread_points, multiplier):
+    """
+    Calculate spread cost per trade.
+    
+    Formula:
+        Spread cost = (Bid-Offer spread ÷ 2) × Multiplier
+    
+    Parameters:
+        spread_points (float): Bid-ask spread in price points.
+        multiplier (float): Contract multiplier.
+    
+    Returns:
+        float: Spread cost in currency.
+    """
+    return (spread_points / 2) * multiplier
+
+def calculate_total_cost_per_trade(spread_points, multiplier, commission):
+    """
+    Calculate total cost per trade including spread and commission.
+    
+    Parameters:
+        spread_points (float): Bid-ask spread in price points.
+        multiplier (float): Contract multiplier.
+        commission (float): Commission per contract.
+    
+    Returns:
+        float: Total cost per trade in currency.
+    """
+    spread_cost = calculate_spread_cost(spread_points, multiplier)
+    return spread_cost + commission
+
+def calculate_cost_as_percentage(total_cost_currency, price, multiplier):
+    """
+    Calculate cost as percentage of notional exposure.
+    
+    Formula:
+        Cost % = Total cost ÷ (Price × Multiplier)
+    
+    Parameters:
+        total_cost_currency (float): Total cost in currency.
+        price (float): Instrument price.
+        multiplier (float): Contract multiplier.
+    
+    Returns:
+        float: Cost as percentage (decimal).
+    """
+    notional_exposure = price * multiplier
+    return total_cost_currency / notional_exposure
+
+def calculate_risk_adjusted_cost_per_trade(total_cost_percentage, annualized_volatility):
+    """
+    Calculate risk-adjusted cost per trade in Sharpe ratio units.
+    
+    Formula:
+        Risk adjusted cost = Cost % ÷ σ_annual
+    
+    Parameters:
+        total_cost_percentage (float): Total cost as percentage.
+        annualized_volatility (float): Annualized volatility.
+    
+    Returns:
+        float: Risk-adjusted cost in SR units.
+    """
+    if annualized_volatility == 0:
+        return float('inf')
+    return total_cost_percentage / annualized_volatility
+
+def calculate_annual_risk_adjusted_cost(price, multiplier, commission, spread_points, 
+                                      annualized_std_dev, rolls_per_year=4, turnover=6):
+    """
+    Calculate total annual risk-adjusted trading costs.
+    
+    Parameters:
+        price (float): Current price.
+        multiplier (float): Contract multiplier.
+        commission (float): Commission per trade.
+        spread_points (float): Bid-ask spread in points.
+        annualized_std_dev (float): Annualized standard deviation.
+        rolls_per_year (int): Contract rolls per year.
+        turnover (int): Other trades per year.
+    
+    Returns:
+        float: Annual risk-adjusted cost in SR units.
+    """
+    # Calculate cost per trade
+    total_cost_currency = calculate_total_cost_per_trade(spread_points, multiplier, commission)
+    cost_percentage = calculate_cost_as_percentage(total_cost_currency, price, multiplier)
+    risk_adjusted_cost_per_trade = calculate_risk_adjusted_cost_per_trade(cost_percentage, annualized_std_dev)
+    
+    # Calculate holding costs (rolling costs - 2 trades per roll)
     holding_cost = risk_adjusted_cost_per_trade * rolls_per_year * 2
+    
+    # Calculate transaction costs (other trading)
     transaction_cost = risk_adjusted_cost_per_trade * turnover
-    annual_risk_adjusted_cost = holding_cost + transaction_cost
+    
+    return holding_cost + transaction_cost
 
-    return annual_risk_adjusted_cost
+#####   INSTRUMENT SELECTION CRITERIA   #####
 
-def calculate_position_series_with_variable_risk(csv_path, capital, multiplier, fx_rate=1.0, risk_target=0.2, lambda_=0.060061):
+def calculate_minimum_capital_for_instrument(symbol, instruments_df, price, volatility, risk_target=0.2, min_contracts=4):
     """
-    Calculate and visualize position sizes using the EWMA-based variable risk forecast.
+    Calculate minimum capital required to trade an instrument.
     
-    This version uses the author's method to compute variable volatility:
-      - It computes daily percentage returns,
-      - Uses a 32-day EWMA to get short-run volatility,
-      - Annualises it,
-      - Then computes a 10-year rolling average,
-      - And blends them (30% long-run, 70% short-run) to obtain the final annual volatility estimate.
+    Parameters:
+        symbol (str): Instrument symbol.
+        instruments_df (pd.DataFrame): Instruments data.
+        price (float): Current price.
+        volatility (float): Annualized volatility.
+        risk_target (float): Target risk fraction.
+        min_contracts (int): Minimum contracts to trade.
     
-    Position size is computed as:
-      N = (Capital × τ) ÷ (Multiplier × Price × FX × σ_annual)
-    where Price is the previous day's close.
-    
-    It then computes strategy returns (using the notional exposure) and prints performance metrics,
-    and plots both the position size series and the equity curve.
-    
-    Returns the position on the second last trading day.
+    Returns:
+        float: Minimum capital required.
     """
-    df = pd.read_csv(csv_path, parse_dates=['Time'])
-    df.set_index('Time', inplace=True)
-    df = df.iloc[:-1]  # Drop last row (incomplete)
+    specs = get_instrument_specs(symbol, instruments_df)
+    multiplier = specs['multiplier']
     
-    # Compute daily returns from 'Last' price.
-    df['returns'] = df['Last'].pct_change()
-    df.dropna(inplace=True)
-    
-    # Compute the variable (EWMA-based) annual volatility series using the author's method.
-    # Here we use the 'Last' column as both adjusted and current price.
-    weighted_vol_series = calculate_variable_standard_deviation_for_risk_targeting(
-        adjusted_price=df['Last'],
-        current_price=df['Last'],
-        use_perc_returns=True,
-        annualise_stdev=True,
+    # Calculate minimum capital for minimum contracts
+    min_capital = calculate_min_capital_n_contracts(
+        min_contracts, multiplier, price, volatility, risk_target
     )
     
-    # For each day (starting after sufficient data), compute position size using previous day's price and volatility.
-    position_sizes = []
-    # For day i, use i-1 values:
+    return min_capital
+
+def calculate_liquidity_threshold(price, multiplier, volatility, fx_rate=1.0, min_daily_volume_usd=1250000):
+    """
+    Calculate minimum daily volume required for liquidity.
+    
+    Formula from book:
+        Average daily volume in USD risk = FX rate × Average daily volume × σ_% × Price × Multiplier
+    
+    Parameters:
+        price (float): Instrument price.
+        multiplier (float): Contract multiplier.
+        volatility (float): Annualized volatility.
+        fx_rate (float): FX rate to USD.
+        min_daily_volume_usd (float): Minimum daily volume in USD risk.
+    
+    Returns:
+        float: Required minimum daily volume in contracts.
+    """
+    risk_per_contract = price * multiplier * volatility
+    volume_usd_risk_per_contract = fx_rate * risk_per_contract
+    
+    return min_daily_volume_usd / volume_usd_risk_per_contract
+
+def evaluate_instrument_suitability(symbol, instruments_df, price, volatility, 
+                                  capital, risk_target=0.2, max_cost_sr=0.10):
+    """
+    Evaluate if an instrument is suitable for trading based on multiple criteria.
+    
+    Parameters:
+        symbol (str): Instrument symbol.
+        instruments_df (pd.DataFrame): Instruments data.
+        price (float): Current price.
+        volatility (float): Annualized volatility.
+        capital (float): Available capital.
+        risk_target (float): Target risk fraction.
+        max_cost_sr (float): Maximum acceptable cost in SR units.
+    
+    Returns:
+        dict: Evaluation results.
+    """
+    try:
+        specs = get_instrument_specs(symbol, instruments_df)
+        multiplier = specs['multiplier']
+        sr_cost = specs['sr_cost']
+        
+        # Check minimum capital requirement
+        min_capital = calculate_minimum_capital_for_instrument(symbol, instruments_df, price, volatility, risk_target)
+        capital_ok = capital >= min_capital
+        
+        # Check cost efficiency
+        cost_ok = sr_cost <= max_cost_sr
+        
+        # Calculate theoretical position size
+        position_size = calculate_variable_position_size(
+            capital, multiplier, price, volatility, risk_target
+        )
+        
+        # Calculate liquidity requirement
+        min_volume_contracts = calculate_liquidity_threshold(price, multiplier, volatility)
+        
+        return {
+            'symbol': symbol,
+            'name': specs['name'],
+            'multiplier': multiplier,
+            'sr_cost': sr_cost,
+            'min_capital': min_capital,
+            'capital_ok': capital_ok,
+            'cost_ok': cost_ok,
+            'position_size': position_size,
+            'min_volume_contracts': min_volume_contracts,
+            'suitable': capital_ok and cost_ok
+        }
+        
+    except Exception as e:
+        return {
+            'symbol': symbol,
+            'error': str(e),
+            'suitable': False
+        }
+
+#####   STRATEGY IMPLEMENTATION   #####
+
+def backtest_variable_risk_strategy(csv_path, capital, risk_target=0.2, 
+                                   short_span=32, long_years=10):
+    """
+    Backtest buy-and-hold strategy with variable risk scaling.
+    
+    Parameters:
+        csv_path (str): Path to price data CSV.
+        capital (float): Initial capital.
+        risk_target (float): Target risk fraction.
+        short_span (int): EWMA span for short-run volatility.
+        long_years (int): Years for long-run volatility average.
+    
+    Returns:
+        dict: Backtest results and performance metrics.
+    """
+    # Load data
+    df = pd.read_csv(csv_path, parse_dates=['Time'])
+    df.set_index('Time', inplace=True)
+    df = df.dropna()
+    
+    # Calculate returns
+    df['returns'] = df['Last'].pct_change()
+    df = df.dropna()
+    
+    # Calculate blended volatility forecast
+    df['blended_vol'] = calculate_blended_volatility(
+        df['returns'], short_span=short_span, long_years=long_years
+    )
+    
+    # Get instrument specs (assuming MES)
+    instruments_df = load_instrument_data()
+    mes_specs = get_instrument_specs('MES', instruments_df)
+    multiplier = mes_specs['multiplier']
+    
+    # Calculate position sizes (using previous day's price and volatility)
+    positions = []
     for i in range(len(df)):
-        if i < 1:
-            position_sizes.append(0)
-            continue
-        price_prev = df['Last'].iloc[i-1]
-        vol_prev = weighted_vol_series.iloc[i-1]
-        # If volatility is NaN, set position to 0 to avoid error.
-        if np.isnan(vol_prev):
-            pos = 0
+        if i == 0:
+            positions.append(0)  # No position on first day
         else:
-            pos = calculate_position_size_with_variable_risk(
-                capital=capital,
-                multiplier=multiplier,
-                price=price_prev,
-                fx_rate=fx_rate,
-                risk_target=risk_target,
-                sigma_pct=vol_prev
-            )
-        position_sizes.append(pos)
+            prev_price = df['Last'].iloc[i-1]
+            prev_vol = df['blended_vol'].iloc[i-1]
+            
+            if np.isnan(prev_vol) or prev_vol <= 0:
+                position = 0
+            else:
+                position = calculate_variable_position_size(
+                    capital, multiplier, prev_price, prev_vol, risk_target
+                )
+            positions.append(position)
     
-    df['position'] = position_sizes
-    df['position'].plot(title="Position Size Over Time", figsize=(12, 5))
-    plt.xlabel("Date")
-    plt.ylabel("Contracts")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
+    df['position'] = positions
+    df['position_discrete'] = df['position'].round()
     
-    # Compute daily strategy PnL and returns.
-    # Use previous day's position and previous day's price to compute notional change.
-    df['position_shifted'] = df['position'].shift(1)
-    df['strategy_pnl'] = df['position_shifted'] * multiplier * df['returns'] * df['Last'].shift(1)
-    # Strategy return as a percentage of capital.
+    # Calculate strategy returns
+    df['position_lag'] = df['position'].shift(1)
+    df['notional_exposure'] = df['position_lag'] * multiplier * df['Last'].shift(1)
+    df['strategy_pnl'] = df['position_lag'] * multiplier * df['returns'] * df['Last'].shift(1)
     df['strategy_returns'] = df['strategy_pnl'] / capital
-    df.dropna(subset=['strategy_returns'], inplace=True)
     
-    # Plot equity curve.
-    cum_returns = (1 + df['strategy_returns']).cumprod()
-    cum_returns.plot(title="Equity Curve", figsize=(12, 5))
-    plt.xlabel("Date")
-    plt.ylabel("Cumulative Return")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
+    # Remove NaN values
+    df = df.dropna()
     
-    # Compute performance metrics.
-    daily_returns_array = df['strategy_returns'].values
-    daily_mean_return = np.mean(daily_returns_array)
-    daily_std_dev = calculate_standard_deviation(daily_returns_array)
-    ann_mean_return = daily_mean_return * business_days_in_year
-    ann_std_dev = annualized_standard_deviation(daily_std_dev, business_days_in_year)
-    sharpe_ratio = ann_mean_return / ann_std_dev if ann_std_dev != 0 else 0.0
+    # Calculate performance metrics
+    performance = calculate_comprehensive_performance(
+        build_account_curve(df['strategy_returns'], capital),
+        df['strategy_returns']
+    )
     
-    # Average drawdown: compute running cumulative returns, then drawdowns.
-    cum_returns_series = (1 + df['strategy_returns']).cumprod()
-    running_max = cum_returns_series.cummax()
-    drawdown = (cum_returns_series - running_max) / running_max
-    avg_drawdown = drawdown.mean()
+    # Add strategy-specific metrics
+    performance['avg_position'] = df['position'].mean()
+    performance['max_position'] = df['position'].max()
+    performance['min_position'] = df['position'].min()
+    performance['avg_volatility'] = df['blended_vol'].mean()
+    performance['vol_min'] = df['blended_vol'].min()
+    performance['vol_max'] = df['blended_vol'].max()
     
-    # Skew and tail statistics.
-    skewness = pd.Series(daily_returns_array).skew()
-    fat_tail_stats = calculate_fat_tails(df[['Last']].copy())
-    
-    print("\n----- Strategy Metrics -----")
-    print("Mean Annual Return:", round(ann_mean_return, 6))
-    print("Annualized Std Dev:", round(ann_std_dev, 6))
-    print("Sharpe Ratio:", round(sharpe_ratio, 6))
-    print("Skew:", round(skewness, 6))
-    print("Average Drawdown:", round(avg_drawdown, 6))
-    print("\n----- Fat Tail Statistics -----")
-    for k, v in fat_tail_stats.items():
-        print(f"  {k}: {v}")
-    
-    print("\nPosition on second last day:", df['position'].iloc[-2])
-    return df['position'].iloc[-2]
+    return {
+        'data': df,
+        'performance': performance,
+        'final_position': df['position'].iloc[-1]
+    }
 
-def min_liquidity_met(avg_vol, annualized_std_percentage, price, multiplier, fx=1):
-    return (fx * avg_vol * annualized_std_percentage * price * multiplier) > 1250000
-
-# Example usage with S&P 500 micro futures values.
-if __name__ == "__main__":
+def main():
+    """
+    Test Chapter 3 variable risk scaling implementation.
+    """
+    print("=" * 60)
+    print("CHAPTER 3: BUY AND HOLD WITH VARIABLE RISK SCALING")
+    print("=" * 60)
+    
+    # Load instruments data
+    instruments_df = load_instrument_data()
+    
+    # Test risk-adjusted cost calculations
+    print("\n----- Risk-Adjusted Cost Analysis -----")
+    
+    # MES example from book
     price = 4500
     multiplier = 5
     commission = 0.62
     spread_points = 0.25
-    annualized_std_dev_val = 0.16
-
-    spread_cost_currency = multiplier * (spread_points / 2)
-    total_cost_per_trade_currency = spread_cost_currency + commission
-
-    print("Spread Cost (Currency):", round(spread_cost_currency, 4))
-    print("Total Cost per Trade (Currency):", round(total_cost_per_trade_currency, 4))
-
-    # Restore the risk-adjusted cost function call if needed.
-    result = calculate_annual_risk_adjusted_cost(
-        price=price,
-        multiplier=multiplier,
-        commission=0.62,
-        spread_points=0.25,
-        annualized_std_dev=0.16,
-        rolls_per_year=4,
-        turnover=6
+    volatility = 0.16
+    
+    total_cost = calculate_total_cost_per_trade(spread_points, multiplier, commission)
+    cost_pct = calculate_cost_as_percentage(total_cost, price, multiplier)
+    risk_adj_cost = calculate_risk_adjusted_cost_per_trade(cost_pct, volatility)
+    annual_cost = calculate_annual_risk_adjusted_cost(
+        price, multiplier, commission, spread_points, volatility, 4, 6
     )
-    print("Annual Risk Adjusted Cost (S&P 500 Micro):", round(result, 6))  # Should be ~0.0034
+    
+    print(f"MES Risk-Adjusted Cost Analysis:")
+    print(f"  Total Cost per Trade: ${total_cost:.4f}")
+    print(f"  Cost as %: {cost_pct:.6f}")
+    print(f"  Risk-Adjusted Cost per Trade: {risk_adj_cost:.6f} SR units")
+    print(f"  Annual Risk-Adjusted Cost: {annual_cost:.6f} SR units")
+    
+    # Compare with book's value (should be ~0.0034)
+    expected_book_value = 0.0034
+    print(f"  Book Expected Value: {expected_book_value:.6f}")
+    print(f"  Difference: {abs(annual_cost - expected_book_value):.6f}")
+    
+    # Test instrument evaluation
+    print("\n----- Instrument Suitability Analysis -----")
+    
+    capital = 100000
+    test_instruments = ['MES', 'MYM', 'MNQ', 'ZN', 'VIX']
+    
+    for symbol in test_instruments:
+        # Use different price/vol estimates for different instruments
+        if symbol == 'VIX':
+            test_price, test_vol = 20, 0.80  # High volatility
+        elif symbol == 'ZN':
+            test_price, test_vol = 110, 0.08  # Low volatility bond
+        else:
+            test_price, test_vol = 4000, 0.20  # Equity index
+        
+        evaluation = evaluate_instrument_suitability(
+            symbol, instruments_df, test_price, test_vol, capital
+        )
+        
+        if 'error' not in evaluation:
+            print(f"\n{symbol} ({evaluation['name'][:40]}):")
+            print(f"  Multiplier: {evaluation['multiplier']}")
+            print(f"  SR Cost: {evaluation['sr_cost']:.6f}")
+            print(f"  Min Capital: ${evaluation['min_capital']:,.0f}")
+            print(f"  Position Size: {evaluation['position_size']:.2f}")
+            print(f"  Capital OK: {evaluation['capital_ok']}")
+            print(f"  Cost OK: {evaluation['cost_ok']}")
+            print(f"  Suitable: {evaluation['suitable']}")
+        else:
+            print(f"\n{symbol}: Error - {evaluation['error']}")
+    
+    # Test variable risk strategy
+    print("\n----- Variable Risk Strategy Backtest -----")
+    
+    try:
+        results = backtest_variable_risk_strategy(
+            'Data/mes_daily_data.csv', 
+            capital=100000, 
+            risk_target=0.2
+        )
+        
+        perf = results['performance']
+        
+        print(f"Performance Summary:")
+        print(f"  Total Return: {perf['total_return']:.2%}")
+        print(f"  Annualized Return: {perf['annualized_return']:.2%}")
+        print(f"  Volatility: {perf['annualized_volatility']:.2%}")
+        print(f"  Sharpe Ratio: {perf['sharpe_ratio']:.3f}")
+        print(f"  Max Drawdown: {perf['max_drawdown_pct']:.1f}%")
+        print(f"  Skewness: {perf['skewness']:.3f}")
+        
+        print(f"\nPosition Statistics:")
+        print(f"  Average Position: {perf['avg_position']:.2f} contracts")
+        print(f"  Max Position: {perf['max_position']:.2f} contracts")
+        print(f"  Min Position: {perf['min_position']:.2f} contracts")
+        
+        print(f"\nVolatility Statistics:")
+        print(f"  Average Volatility: {perf['avg_volatility']:.2%}")
+        print(f"  Min Volatility: {perf['vol_min']:.2%}")
+        print(f"  Max Volatility: {perf['vol_max']:.2%}")
+        
+        # Compare with fixed risk strategy from Chapter 2
+        print(f"\n----- Comparison with Fixed Risk (Chapter 2) -----")
+        
+        # Calculate fixed risk strategy performance for comparison
+        fixed_position = calculate_variable_position_size(100000, 5, 4500, 0.16, 0.2)
+        print(f"Fixed Risk Position: {fixed_position:.2f} contracts")
+        print(f"Variable Risk Final Position: {results['final_position']:.2f} contracts")
+        
+    except Exception as e:
+        print(f"Error in backtest: {e}")
+        import traceback
+        traceback.print_exc()
 
-    print("\nCalculating position series with variable risk...")
-    calculate_position_series_with_variable_risk(
-        csv_path="Data/mes_daily_data.csv",
-        capital=100000,
-        multiplier=multiplier,
-        fx_rate=1.0,
-        risk_target=0.2,
-        lambda_=0.060061
-    )
+if __name__ == "__main__":
+    main() 

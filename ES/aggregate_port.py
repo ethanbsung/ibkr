@@ -35,22 +35,22 @@ capital_Williams = initial_capital / 2
 
 # IBS settings:
 # ES: 1 contract, multiplier 5, file:
-ibs_es_file = "Data/es_daily_data.csv"
+ibs_es_file = "Data/mes_daily_data.csv"
 ibs_es_contracts = 1
 multiplier_es = 5
 
 # YM: 2 contracts, multiplier 0.50, file:
-ibs_ym_file = "Data/ym_daily_data.csv"
+ibs_ym_file = "Data/mym_daily_data.csv"
 ibs_ym_contracts = 2
 multiplier_ym = 0.50
 
 # GC: 1 contract, multiplier 10, file:
-ibs_gc_file = "Data/gc_daily_data.csv"
+ibs_gc_file = "Data/mgc_daily_data.csv"
 ibs_gc_contracts = 1
 multiplier_gc = 10
 
 # NQ: 1 contract, multiplier 2, file:
-ibs_nq_file = "Data/nq_daily_data.csv"
+ibs_nq_file = "Data/mnq_daily_data.csv"
 ibs_nq_contracts = 1
 multiplier_nq = 2
 
