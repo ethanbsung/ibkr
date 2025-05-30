@@ -31,7 +31,7 @@ def calculate_ewma_volatility(returns, span=32, annualize=True):
     
     return ewma_vol
 
-def calculate_blended_volatility(returns, short_span=32, long_years=10, short_weight=0.7, long_weight=0.3):
+def calculate_blended_volatility(returns, short_span=32, long_years=10, short_weight=0.7, long_weight=0.3, min_vol_floor=0.05):
     """
     Calculate blended volatility forecast using short-run EWMA and long-run average.
     
@@ -44,6 +44,7 @@ def calculate_blended_volatility(returns, short_span=32, long_years=10, short_we
         long_years (int): Years for long-run rolling average.
         short_weight (float): Weight for short-run volatility (0.7 in book).
         long_weight (float): Weight for long-run volatility (0.3 in book).
+        min_vol_floor (float): Minimum volatility floor (0.05 = 5% annually).
     
     Returns:
         pd.Series: Blended volatility forecast.
@@ -57,6 +58,9 @@ def calculate_blended_volatility(returns, short_span=32, long_years=10, short_we
     
     # Blend the two estimates
     blended_vol = long_weight * long_vol + short_weight * short_vol
+    
+    # Apply minimum volatility floor to prevent position size explosions
+    blended_vol = blended_vol.clip(lower=min_vol_floor)
     
     return blended_vol
 
@@ -418,7 +422,7 @@ def main():
     # Test instrument evaluation
     print("\n----- Instrument Suitability Analysis -----")
     
-    capital = 100000
+    capital = 50000000
     test_instruments = ['MES', 'MYM', 'MNQ', 'ZN', 'VIX']
     
     for symbol in test_instruments:
@@ -452,7 +456,7 @@ def main():
     try:
         results = backtest_variable_risk_strategy(
             'Data/mes_daily_data.csv', 
-            capital=100000, 
+            capital=50000000, 
             risk_target=0.2
         )
         
@@ -480,7 +484,7 @@ def main():
         print(f"\n----- Comparison with Fixed Risk (Chapter 2) -----")
         
         # Calculate fixed risk strategy performance for comparison
-        fixed_position = calculate_variable_position_size(100000, 5, 4500, 0.16, 0.2)
+        fixed_position = calculate_variable_position_size(50000000, 5, 4500, 0.16, 0.2)
         print(f"Fixed Risk Position: {fixed_position:.2f} contracts")
         print(f"Variable Risk Final Position: {results['final_position']:.2f} contracts")
         

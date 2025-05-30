@@ -204,7 +204,7 @@ def estimate_portfolio_volatility(weights, volatilities, correlation_matrix):
 
 #####   PORTFOLIO CONSTRUCTION FUNCTIONS   #####
 
-def calculate_position_size_with_idm(capital, weight, idm, multiplier, price, fx_rate, sigma_pct, risk_target=0.2):
+def calculate_position_size_with_idm(capital, weight, idm, multiplier, price, fx_rate, sigma_pct, risk_target=0.2, max_leverage=3.0, min_vol_floor=0.05):
     """
     Calculate position size for an instrument considering IDM.
 
@@ -217,10 +217,15 @@ def calculate_position_size_with_idm(capital, weight, idm, multiplier, price, fx
         fx_rate (float): FX rate (relevant for non-USD instruments, 1.0 for USD).
         sigma_pct (float): Volatility (as a percentage, e.g., 0.2 for 20%).
         risk_target (float): Overall portfolio risk target (e.g., 0.2 for 20% annual vol).
+        max_leverage (float): Maximum leverage cap (3.0 = 3x gross notional).
+        min_vol_floor (float): Minimum volatility floor (0.05 = 5% annually).
 
     Returns:
         float: Number of contracts (can be fractional).
     """
+    # Apply volatility floor to prevent near-zero denominators
+    sigma_pct = max(sigma_pct, min_vol_floor)
+    
     # Ensure sigma_pct and price are valid positive numbers to avoid division by zero or nonsensical results
     if sigma_pct <= 0 or pd.isna(sigma_pct) or price <= 0 or pd.isna(price) or multiplier <= 0 or pd.isna(multiplier):
         # print(f"DEBUG calc_pos_size_idm: Invalid input for position calc. Price: {price}, Sigma: {sigma_pct}, Mult: {multiplier}. Returning 0 contracts.")
@@ -237,206 +242,51 @@ def calculate_position_size_with_idm(capital, weight, idm, multiplier, price, fx
     if denominator == 0: # Should be caught by above checks, but as a safeguard
         # print(f"DEBUG calc_pos_size_idm: Denominator is zero. Price: {price}, Sigma: {sigma_pct}, Mult: {multiplier}. Returning 0 contracts.")
         return 0
-        
-    return numerator / denominator
+    
+    position = numerator / denominator
+    
+    return position
 
-def select_instruments_by_criteria(instruments_df, available_instruments, capital, 
-                                 max_cost_sr=0.01, min_volume_usd=1000000):
+def create_jumbo_portfolio(instruments_df, data, min_instruments=50, max_instruments=100):
     """
-    Select suitable instruments based on cost, liquidity, and data availability.
+    Create a jumbo portfolio with many instruments as described in the book.
     
     Parameters:
         instruments_df (pd.DataFrame): Instruments data.
-        available_instruments (list): Instruments with available data.
-        capital (float): Available capital.
-        max_cost_sr (float): Maximum acceptable SR cost.
-        min_volume_usd (float): Minimum daily volume requirement.
+        data (dict): Individual instrument data.
+        min_instruments (int): Minimum number of instruments.
+        max_instruments (int): Maximum number of instruments.
     
     Returns:
-        list: List of suitable instrument symbols.
+        dict: Jumbo portfolio weights.
     """
-    suitable_instruments = []
+    # Get all instruments with data
+    available_instruments = list(data.keys())
     
+    # Filter by cost efficiency (SR cost <= 0.01)
+    cost_efficient = []
     for symbol in available_instruments:
         try:
-            instrument = instruments_df[instruments_df['Symbol'] == symbol].iloc[0]
-            sr_cost = instrument['SR_cost']
-            
-            # Skip instruments with missing SR cost
-            if pd.isna(sr_cost):
-                continue
-                
-            # Check cost criterion
-            if sr_cost <= max_cost_sr:
-                suitable_instruments.append(symbol)
-                
-        except Exception:
-            continue
-    
-    return suitable_instruments
-
-def create_asset_class_groups(instruments_df, suitable_instruments):
-    """
-    Create asset class groupings based on instrument names and characteristics.
-    
-    Parameters:
-        instruments_df (pd.DataFrame): Instruments data.
-        suitable_instruments (list): List of suitable instrument symbols.
-    
-    Returns:
-        dict: Asset class groupings.
-    """
-    asset_classes = {
-        'equity': [],
-        'bonds': [],
-        'commodities': [],
-        'fx': [],
-        'volatility': []
-    }
-    
-    for symbol in suitable_instruments:
-        try:
-            instrument = instruments_df[instruments_df['Symbol'] == symbol].iloc[0]
-            name = instrument['Name'].lower()
-            
-            # Classify instruments based on name patterns - CORRECTED LOGIC
-            # Check volatility first (most specific)
-            if 'vix' in name or 'volatility' in name or 'vstoxx' in name:
-                asset_classes['volatility'].append(symbol)
-            # Check bonds
-            elif any(term in name for term in ['treasury', 'bond', 'note', 'bund', 'btp', 'schatz', 'bobl', 'buxl', 'bono', 'eurodollar']):
-                asset_classes['bonds'].append(symbol)
-            # Check equity (be more specific with oil - only EU Oil, not heating oil or soybean oil)
-            elif any(term in name for term in ['s&p', 'dow', 'nasdaq', 'russell', 'nikkei', 'dax', 'stoxx', 'kospi', 'aex', 'cac', 'smi', 'china', 'singapore', 'taiwan', 'auto', 'basic materials', 'health', 'insurance', 'technology', 'travel', 'utilities']) or ('eu oil' in name):
-                asset_classes['equity'].append(symbol)
-            # Check FX (exclude eurodollar which is bonds)
-            elif any(term in name for term in ['usd', 'eur', 'gbp', 'jpy', 'aud', 'cad', 'chf', 'nok', 'nzd', 'sek', 'cnh', 'inr', 'mxp', 'rur', 'sgd']) and not any(term in name for term in ['eurodollar']):
-                asset_classes['fx'].append(symbol)
-            else:
-                # Default to commodities for metals, energy, agriculture
-                asset_classes['commodities'].append(symbol)
-                
-        except Exception:
-            continue
-    
-    # Remove empty asset classes
-    asset_classes = {k: v for k, v in asset_classes.items() if v}
-    
-    return asset_classes
-
-def create_risk_parity_weights(asset_classes):
-    """
-    Create risk parity portfolio weights with equal risk allocation across asset classes.
-    
-    Parameters:
-        asset_classes (dict): Asset class groupings.
-    
-    Returns:
-        dict: Portfolio weights by instrument.
-    """
-    portfolio_weights = {}
-    num_asset_classes = len(asset_classes)
-    
-    if num_asset_classes == 0:
-        return portfolio_weights
-    
-    # Equal risk allocation across asset classes
-    risk_per_asset_class = 1.0 / num_asset_classes
-    
-    for asset_class, instruments in asset_classes.items():
-        num_instruments = len(instruments)
-        if num_instruments > 0:
-            weight_per_instrument = risk_per_asset_class / num_instruments
-            for instrument in instruments:
-                portfolio_weights[instrument] = weight_per_instrument
-    
-    return portfolio_weights
-
-def create_all_weather_weights(asset_classes):
-    """
-    Create All Weather style portfolio based on book's methodology.
-    
-    Target allocations:
-    - 25% Equities  
-    - 25% Bonds
-    - 25% Commodities
-    - 25% Other (FX, Volatility)
-    
-    Parameters:
-        asset_classes (dict): Asset class groupings.
-    
-    Returns:
-        dict: Portfolio weights by instrument.
-    """
-    portfolio_weights = {}
-    
-    # Define target allocations per asset class
-    target_allocations = {
-        'equity': 0.25,
-        'bonds': 0.25,
-        'commodities': 0.25,
-        'fx': 0.125,
-        'volatility': 0.125
-    }
-    
-    # Calculate total available allocation
-    available_classes = set(asset_classes.keys())
-    total_target = sum(target_allocations.get(ac, 0) for ac in available_classes)
-    
-    if total_target == 0:
-        return portfolio_weights
-    
-    # Normalize and allocate
-    for asset_class, instruments in asset_classes.items():
-        if asset_class in target_allocations and len(instruments) > 0:
-            allocation = target_allocations[asset_class] / total_target
-            weight_per_instrument = allocation / len(instruments)
-            
-            for instrument in instruments:
-                portfolio_weights[instrument] = weight_per_instrument
-    
-    return portfolio_weights
-
-def optimize_instrument_selection(instruments_df, suitable_instruments, target_instruments=10):
-    """
-    Select optimal instruments based on cost efficiency and diversification.
-    
-    Parameters:
-        instruments_df (pd.DataFrame): Instruments data.
-        suitable_instruments (list): Pre-filtered suitable instruments.
-        target_instruments (int): Target number of instruments.
-    
-    Returns:
-        dict: Selected instruments with equal weights.
-    """
-    if len(suitable_instruments) == 0:
-        return {}
-    
-    # Sort by SR cost (ascending)
-    instrument_costs = []
-    for symbol in suitable_instruments:
-        try:
-            instrument = instruments_df[instruments_df['Symbol'] == symbol].iloc[0]
-            sr_cost = instrument['SR_cost']
-            if not pd.isna(sr_cost):
-                instrument_costs.append((symbol, sr_cost))
+            specs = get_instrument_specs(symbol, instruments_df)
+            if specs['sr_cost'] <= 0.01:
+                cost_efficient.append(symbol)
         except:
             continue
     
-    # Sort by cost and select top instruments
-    instrument_costs.sort(key=lambda x: x[1])
-    selected_instruments = [symbol for symbol, _ in instrument_costs[:target_instruments]]
+    # Select instruments up to max_instruments limit
+    selected_instruments = cost_efficient[:max_instruments]
     
-    # Equal weights
+    if len(selected_instruments) < min_instruments:
+        print(f"Warning: Only {len(selected_instruments)} instruments available (minimum {min_instruments} requested)")
+    
+    # Equal weights for all selected instruments
     if selected_instruments:
         weight = 1.0 / len(selected_instruments)
         return {symbol: weight for symbol in selected_instruments}
     else:
         return {}
 
-#####   PORTFOLIO BACKTESTING   #####
-
-def backtest_portfolio_with_individual_data(portfolio_weights, data, instruments_df, capital=1000000, 
+def backtest_portfolio_with_individual_data(portfolio_weights, data, instruments_df, capital=50000000, 
                                            risk_target=0.2, start_date='2000-01-01', end_date='2025-01-01'):
     """
     Backtest portfolio strategy using individual instrument data with improved logic for date handling.
@@ -498,19 +348,23 @@ def backtest_portfolio_with_individual_data(portfolio_weights, data, instruments
             print(f"Note: Only one instrument ({symbol}) in common data for IDM. IDM set to 1.0.")
         else:
             try:
-                # Weights for IDM should be for instruments present in common_returns_matrix
-                weights_for_idm_series = pd.Series(normalized_weights).reindex(common_returns_matrix.columns).fillna(0)
-                # Re-normalize these weights if some were dropped or became zero
-                final_idm_weights_sum = weights_for_idm_series.sum()
-                if final_idm_weights_sum > 0 :
-                    weights_for_idm_series = weights_for_idm_series / final_idm_weights_sum
-                else: # Fallback if all weights zero out (should be rare if common_returns_matrix is not empty)
-                    raise ValueError("Sum of weights for IDM calculation is zero.")
-
+                # Calculate IDM using actual portfolio weights (not equal weights)
                 correlation_matrix_calculated = calculate_correlation_matrix(common_returns_matrix)
+                # Use actual portfolio weights for IDM calculation
+                weights_for_idm_series = pd.Series(normalized_weights).reindex(correlation_matrix_calculated.index).fillna(0)
+                # Re-normalize these weights if some instruments were dropped
+                if weights_for_idm_series.sum() > 0:
+                    weights_for_idm_series = weights_for_idm_series / weights_for_idm_series.sum()
+                else:
+                    # Fallback to equal weights if all weights are zero (shouldn't happen)
+                    weights_for_idm_series = pd.Series({symbol: 1.0/len(normalized_weights) for symbol in normalized_weights.keys()})
+                    weights_for_idm_series = weights_for_idm_series.reindex(correlation_matrix_calculated.index).fillna(0)
+                    weights_for_idm_series = weights_for_idm_series / weights_for_idm_series.sum()
+                
                 idm_calculated = calculate_idm_from_correlations(weights_for_idm_series, correlation_matrix_calculated)
                 idm = idm_calculated
                 correlation_matrix = correlation_matrix_calculated
+                print(f"Calculated IDM for no-trend strategy using portfolio weights: {idm:.2f}")
             except Exception as e_idm:
                 print(f"Error calculating IDM from correlations: {e_idm}. Using IDM=1.0.")
                 # correlation_matrix remains empty or becomes dummy if symbols_for_dummy_corr was set
@@ -549,16 +403,39 @@ def backtest_portfolio_with_individual_data(portfolio_weights, data, instruments
 
     # Pre-calculate volatilities for each instrument over the full aligned_dates
     volatilities = {}
+    vol_diagnostics = {}  # Track volatility statistics for debugging
+    
     for symbol in normalized_weights.keys():
         symbol_data_df = data[symbol]
         symbol_returns = symbol_data_df['returns'] 
         # Reindex to ensure it covers all aligned_dates, ffill for missing vol at start
         blended_vol_series = calculate_blended_volatility(symbol_returns).reindex(aligned_dates, method='ffill')
         volatilities[symbol] = blended_vol_series
+        
+        # Track volatility statistics for debugging
+        vol_stats = blended_vol_series.describe()
+        vol_diagnostics[symbol] = {
+            'min': vol_stats['min'],
+            'max': vol_stats['max'],
+            'mean': vol_stats['mean'],
+            'count_below_5pct': (blended_vol_series < 0.05).sum(),
+            'count_below_1pct': (blended_vol_series < 0.01).sum()
+        }
+    
+    # Print volatility diagnostics
+    print(f"\n=== VOLATILITY DIAGNOSTICS ===")
+    for symbol, stats in vol_diagnostics.items():
+        print(f"{symbol}: min={stats['min']:.6f}, max={stats['max']:.3f}, mean={stats['mean']:.3f}, <5%={stats['count_below_5pct']}, <1%={stats['count_below_1pct']}")
+    
+    min_vol_across_all = min(stats['min'] for stats in vol_diagnostics.values())
+    print(f"Minimum volatility across all instruments: {min_vol_across_all:.8e}")
+    if min_vol_across_all < 0.01:
+        print(f"WARNING: Extremely low volatilities detected! This will cause position size explosions.")
     
     # Initialize tracking arrays
     portfolio_returns = []
     positions_data = {symbol: [] for symbol in normalized_weights.keys()}
+    position_diagnostics = {symbol: [] for symbol in normalized_weights.keys()}  # Track position sizes
     
     for i, date_val in enumerate(aligned_dates):
         if i == 0:
@@ -605,11 +482,37 @@ def backtest_portfolio_with_individual_data(portfolio_weights, data, instruments
                         )
                     
                     positions_data[symbol].append(position)
+                    position_diagnostics[symbol].append(position)  # Track for diagnostics
                     
-                    price_change = current_return * prev_price 
-                    instrument_pnl = position * multiplier * price_change
-                    instrument_return_contrib = instrument_pnl / capital # Renamed from instrument_return
-                    daily_portfolio_return += instrument_return_contrib
+                    if not pd.isna(current_return) and position != 0:
+                        specs = get_instrument_specs(symbol, instruments_df)
+                        multiplier = specs['multiplier']
+                        
+                        # Calculate P&L: position * multiplier * percentage_return * previous_price
+                        if prev_date in symbol_data_df.index:
+                            prev_price = symbol_data_df.loc[prev_date, 'Last']
+                            if not pd.isna(prev_price):
+                                # current_return is already a percentage, so multiply by notional to get P&L
+                                notional_exposure = position * multiplier * prev_price
+                                instrument_pnl = notional_exposure * current_return
+                                instrument_return_contrib = instrument_pnl / capital
+                                
+                                # Check for overflow/extreme values before adding to portfolio return
+                                if np.isinf(instrument_return_contrib) or np.isnan(instrument_return_contrib):
+                                    print(f"OVERFLOW DETECTED on {current_date}: {symbol} pos={position} mult={multiplier} price={prev_price:.2f} return={current_return:.6f}")
+                                    print(f"  notional={notional_exposure:.2e} pnl={instrument_pnl:.2e} contrib={instrument_return_contrib}")
+                                    raise ValueError(f"Overflow detected in P&L calculation for {symbol} on {current_date}")
+                                
+                                # Debug output for extreme values (>50% daily return is suspicious)
+                                if abs(instrument_return_contrib) > 0.50:
+                                    print(f"EXTREME RETURN {current_date}: {symbol} pos={position} mult={multiplier} price={prev_price:.2f} return={current_return:.6f}")
+                                    print(f"  notional={notional_exposure:.2e} pnl={instrument_pnl:.2e} contrib={instrument_return_contrib:.6f}")
+                                
+                                # Debug output for large positions (previous threshold was 10%)
+                                if abs(instrument_return_contrib) > 0.1:  # Return > 10% in a day
+                                    print(f"DEBUG PnL: {symbol} pos={position} mult={multiplier} price={prev_price:.2f} return={current_return:.4f} pnl={instrument_pnl:.2f} contrib={instrument_return_contrib:.4f}")
+                                
+                                daily_portfolio_return += instrument_return_contrib
                 else:
                     positions_data[symbol].append(0) # No position or no data to calc P&L
                     
@@ -648,8 +551,20 @@ def backtest_portfolio_with_individual_data(portfolio_weights, data, instruments
     if results_df.empty: # If all data was before start_date or after end_date or only one row of zeros
          return {'error': 'No valid backtest data after date filtering and initial zero removal'}
     
+    # Print position diagnostics summary
+    print(f"\n=== POSITION SIZE DIAGNOSTICS ===")
+    for symbol in normalized_weights.keys():
+        if position_diagnostics[symbol]:
+            pos_series = pd.Series(position_diagnostics[symbol])
+            pos_stats = pos_series.describe()
+            max_notional = abs(pos_stats['max']) * get_instrument_specs(symbol, instruments_df)['multiplier'] * data[symbol]['Last'].iloc[-1] if len(data[symbol]) > 0 else 0
+            print(f"{symbol}: min={pos_stats['min']:.2f}, max={pos_stats['max']:.2f}, mean={pos_stats['mean']:.2f}, max_notional=${max_notional:.0f}")
+            
+            # Check for extreme positions
+            if abs(pos_stats['max']) > 1000:
+                print(f"  WARNING: Extremely large position detected for {symbol}!")
+    
     # Calculate performance metrics
-    # Ensure equity_curve starts from the actual first date of P&L
     equity_curve_series = build_account_curve(results_df['portfolio_returns'], capital)
     
     performance = calculate_comprehensive_performance(
@@ -674,7 +589,7 @@ def backtest_portfolio_with_individual_data(portfolio_weights, data, instruments
 
 #####   DYNAMIC OPTIMIZATION BACKTESTING   #####
 
-def backtest_portfolio_with_dynamic_optimization(portfolio_weights, data, instruments_df, capital=1000000, 
+def backtest_portfolio_with_dynamic_optimization(portfolio_weights, data, instruments_df, capital=50000000, 
                                                 risk_target=0.2, start_date='2000-01-01', end_date='2025-01-01',
                                                 cost_multiplier=50, use_buffering=True, buffer_fraction=0.05,
                                                 rebalance_frequency='daily'):
@@ -777,6 +692,7 @@ def backtest_portfolio_with_dynamic_optimization(portfolio_weights, data, instru
     # 5. Initialize tracking variables
     portfolio_returns = []
     positions_data = {symbol: [] for symbol in normalized_weights.keys()}
+    position_diagnostics = {symbol: [] for symbol in normalized_weights.keys()}  # Track position sizes for diagnostics
     current_positions = {symbol: 0 for symbol in normalized_weights.keys()}
     optimization_metrics = []
     
@@ -907,20 +823,39 @@ def backtest_portfolio_with_dynamic_optimization(portfolio_weights, data, instru
                         specs = get_instrument_specs(symbol, instruments_df)
                         multiplier = specs['multiplier']
                         
-                        # Calculate P&L: position * multiplier * return * previous_price
+                        # Calculate P&L: position * multiplier * percentage_return * previous_price
                         if prev_date in symbol_data_df.index:
                             prev_price = symbol_data_df.loc[prev_date, 'Last']
                             if not pd.isna(prev_price):
-                                price_change = current_return * prev_price
-                                instrument_pnl = position * multiplier * price_change
+                                # current_return is already a percentage, so multiply by notional to get P&L
+                                notional_exposure = position * multiplier * prev_price
+                                instrument_pnl = notional_exposure * current_return
                                 instrument_return_contrib = instrument_pnl / capital
+                                
+                                # Check for overflow/extreme values before adding to portfolio return
+                                if np.isinf(instrument_return_contrib) or np.isnan(instrument_return_contrib):
+                                    print(f"DYNAMIC OVERFLOW DETECTED on {current_date}: {symbol} pos={position} mult={multiplier} price={prev_price:.2f} return={current_return:.6f}")
+                                    print(f"  notional={notional_exposure:.2e} pnl={instrument_pnl:.2e} contrib={instrument_return_contrib}")
+                                    raise ValueError(f"Dynamic optimization overflow detected in P&L calculation for {symbol} on {current_date}")
+                                
+                                # Debug output for extreme values (>50% daily return is suspicious)
+                                if abs(instrument_return_contrib) > 0.50:
+                                    print(f"DYNAMIC EXTREME RETURN {current_date}: {symbol} pos={position} mult={multiplier} price={prev_price:.2f} return={current_return:.6f}")
+                                    print(f"  notional={notional_exposure:.2e} pnl={instrument_pnl:.2e} contrib={instrument_return_contrib:.6f}")
+                                
+                                # Debug output for problematic values
+                                if abs(instrument_return_contrib) > 0.1:  # Return > 10% in a day
+                                    print(f"DEBUG PnL: {symbol} pos={position} mult={multiplier} price={prev_price:.2f} return={current_return:.4f} pnl={instrument_pnl:.2f} contrib={instrument_return_contrib:.4f}")
+                                
                                 daily_portfolio_return += instrument_return_contrib
                 
                 # Store position data
                 positions_data[symbol].append(current_positions.get(symbol, 0))
+                position_diagnostics[symbol].append(current_positions.get(symbol, 0))  # Track for diagnostics
                     
             except Exception as e:
                 positions_data[symbol].append(0)
+                position_diagnostics[symbol].append(0)  # Track zeros for diagnostics too
         
         portfolio_returns.append(daily_portfolio_return)
     
@@ -944,8 +879,28 @@ def backtest_portfolio_with_dynamic_optimization(portfolio_weights, data, instru
     if results_df.empty:
         return {'error': 'No valid backtest data after processing'}
     
+    # Print position diagnostics summary
+    print(f"\n=== POSITION SIZE DIAGNOSTICS ===")
+    for symbol in normalized_weights.keys():
+        if position_diagnostics[symbol]:
+            pos_series = pd.Series(position_diagnostics[symbol])
+            pos_stats = pos_series.describe()
+            max_notional = abs(pos_stats['max']) * get_instrument_specs(symbol, instruments_df)['multiplier'] * data[symbol]['Last'].iloc[-1] if len(data[symbol]) > 0 else 0
+            print(f"{symbol}: min={pos_stats['min']:.2f}, max={pos_stats['max']:.2f}, mean={pos_stats['mean']:.2f}, max_notional=${max_notional:.0f}")
+            
+            # Check for extreme positions
+            if abs(pos_stats['max']) > 1000:
+                print(f"  WARNING: Extremely large position detected for {symbol}!")
+    
     # Calculate performance metrics
     equity_curve_series = build_account_curve(results_df['portfolio_returns'], capital)
+    
+    # Debug: Check for problematic values in dynamic optimization
+    print(f"DEBUG: Portfolio returns stats - Min: {results_df['portfolio_returns'].min():.6f}, Max: {results_df['portfolio_returns'].max():.6f}")
+    print(f"DEBUG: Portfolio returns NaN count: {results_df['portfolio_returns'].isna().sum()}")
+    print(f"DEBUG: Portfolio returns inf count: {np.isinf(results_df['portfolio_returns']).sum()}")
+    print(f"DEBUG: Final positions: {current_positions}")
+    
     performance = calculate_comprehensive_performance(
         equity_curve_series,
         results_df['portfolio_returns']
@@ -972,71 +927,7 @@ def backtest_portfolio_with_dynamic_optimization(portfolio_weights, data, instru
 
 #####   JUMBO PORTFOLIO FUNCTIONS   #####
 
-def create_jumbo_portfolio(instruments_df, data, min_instruments=50, max_instruments=100):
-    """
-    Create a jumbo portfolio with many instruments as described in the book.
-    
-    Parameters:
-        instruments_df (pd.DataFrame): Instruments data.
-        data (dict): Individual instrument data.
-        min_instruments (int): Minimum number of instruments.
-        max_instruments (int): Maximum number of instruments.
-    
-    Returns:
-        dict: Jumbo portfolio weights.
-    """
-    # Get all instruments with data
-    available_instruments = list(data.keys())
-    
-    # Filter by cost efficiency (SR cost <= 0.01)
-    cost_efficient = []
-    for symbol in available_instruments:
-        try:
-            specs = get_instrument_specs(symbol, instruments_df)
-            if specs['sr_cost'] <= 0.01:
-                cost_efficient.append(symbol)
-        except:
-            continue
-    
-    # Select instruments up to max_instruments limit
-    selected_instruments = cost_efficient[:max_instruments]
-    
-    if len(selected_instruments) < min_instruments:
-        print(f"Warning: Only {len(selected_instruments)} instruments available (minimum {min_instruments} requested)")
-    
-    # Equal weights for all selected instruments
-    if selected_instruments:
-        weight = 1.0 / len(selected_instruments)
-        return {symbol: weight for symbol in selected_instruments}
-    else:
-        return {}
-
-def plot_portfolio_equity_curves(results_dict, initial_capital=1000000, title="Portfolio Strategy Comparison"):
-    """
-    Plot equity curves for multiple portfolio strategies.
-    
-    Parameters:
-        results_dict (dict): Dictionary with strategy_name -> backtest results.
-        initial_capital (float): Initial capital amount.
-        title (str): Plot title.
-    """
-    plt.figure(figsize=(14, 8))
-    
-    for strategy_name, result in results_dict.items():
-        if 'error' not in result:
-            equity_curve = build_account_curve(result['data']['portfolio_returns'], initial_capital)
-            plt.plot(equity_curve.index, equity_curve.values, label=f"{strategy_name} (SR: {result['performance']['sharpe_ratio']:.3f})")
-    
-    plt.title(title)
-    plt.xlabel('Date')
-    plt.ylabel('Portfolio Value ($)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')  # Log scale to better show different performance levels
-    plt.tight_layout()
-    plt.show()
-
-def test_jumbo_portfolio(instruments_df, data, capital=1000000):
+def test_jumbo_portfolio(instruments_df, data, capital=50000000):
     """
     Test the jumbo portfolio strategy as described in the book.
     
@@ -1048,19 +939,11 @@ def test_jumbo_portfolio(instruments_df, data, capital=1000000):
     Returns:
         dict: Jumbo portfolio backtest results.
     """
-    print("\n" + "="*60)
-    print("JUMBO PORTFOLIO STRATEGY TEST")
-    print("="*60)
-    
     # Create jumbo portfolio
     jumbo_weights = create_jumbo_portfolio(instruments_df, data)
     
     if not jumbo_weights:
-        print("Error: Could not create jumbo portfolio")
         return None
-    
-    print(f"Jumbo Portfolio created with {len(jumbo_weights)} instruments")
-    print(f"Top 10 instruments: {list(jumbo_weights.keys())[:10]}")
     
     # Backtest the jumbo portfolio
     results = backtest_portfolio_with_individual_data(
@@ -1068,110 +951,45 @@ def test_jumbo_portfolio(instruments_df, data, capital=1000000):
     )
     
     if 'error' in results:
-        print(f"Error in backtest: {results['error']}")
         return None
-    
-    # Display results
-    perf = results['performance']
-    print(f"\nJumbo Portfolio Performance:")
-    print(f"  Instruments: {len(jumbo_weights)}")
-    print(f"  Annual Return: {perf['annualized_return']:.2%}")
-    print(f"  Volatility: {perf['annualized_volatility']:.2%}")
-    print(f"  Sharpe Ratio: {perf['sharpe_ratio']:.3f}")
-    print(f"  Max Drawdown: {perf['max_drawdown_pct']:.1f}%")
-    print(f"  IDM: {results['idm']:.2f}")
-    
-    # Plot equity curve
-    plt.figure(figsize=(12, 6))
-    equity_curve = build_account_curve(results['data']['portfolio_returns'], capital)
-    plt.plot(equity_curve.index, equity_curve.values, linewidth=2, label=f"Jumbo Portfolio ({len(jumbo_weights)} instruments)")
-    plt.title("Jumbo Portfolio Equity Curve")
-    plt.xlabel('Date')
-    plt.ylabel('Portfolio Value ($)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
     
     return results
 
-#####   MAIN COMPARISON FUNCTION   #####
-
-def run_portfolio_comparison(capital=1000000, risk_target=0.2, max_instruments=20):
+def run_portfolio_comparison(capital=50000000, risk_target=0.2, max_instruments=100):
     """
-    Run comprehensive portfolio strategy comparison using real data.
+    Run jumbo portfolio strategy using real data.
     
     Parameters:
         capital (float): Initial capital.
         risk_target (float): Target risk fraction.
-        max_instruments (int): Maximum instruments for optimized selection.
+        max_instruments (int): Maximum instruments for jumbo portfolio.
     
     Returns:
-        dict: Comparison results.
+        dict: Portfolio results.
     """
-    print("Loading instruments and data...")
-    
     # Load instruments data
     instruments_df = load_instrument_data()
     
     # Get available instruments with data files
     available_instruments = get_available_instruments(instruments_df)
-    print(f"Found {len(available_instruments)} instruments with data files")
     
-    # Select suitable instruments
-    suitable_instruments = select_instruments_by_criteria(
-        instruments_df, available_instruments, capital
-    )
-    print(f"Selected {len(suitable_instruments)} suitable instruments")
-    
-    if len(suitable_instruments) == 0:
-        print("No suitable instruments found!")
+    if len(available_instruments) == 0:
         return {}
     
-    # Load data for suitable instruments
-    print("Loading individual instrument data...")
-    data = load_instrument_data_files(suitable_instruments)
-    print(f"Successfully loaded data for {len(data)} instruments")
+    # Load data for available instruments
+    data = load_instrument_data_files(available_instruments)
     
     if len(data) == 0:
-        print("No data loaded!")
         return {}
     
-    # Create asset class groups
-    asset_classes = create_asset_class_groups(instruments_df, list(data.keys()))
+    # Create jumbo portfolio strategy
+    jumbo_weights = create_jumbo_portfolio(instruments_df, data, max_instruments=max_instruments)
     
-    print("\nAsset class distribution:")
-    for asset_class, instruments in asset_classes.items():
-        print(f"  {asset_class}: {len(instruments)} instruments")
-    
-    # Create portfolio strategies
     strategies = {}
+    if jumbo_weights:
+        strategies['Jumbo Portfolio'] = jumbo_weights
     
-    # 1. Risk Parity Portfolio
-    if asset_classes:
-        risk_parity_weights = create_risk_parity_weights(asset_classes)
-        if risk_parity_weights:
-            strategies['Risk Parity'] = risk_parity_weights
-    
-    # 2. All Weather Portfolio
-    if asset_classes:
-        all_weather_weights = create_all_weather_weights(asset_classes)
-        if all_weather_weights:
-            strategies['All Weather'] = all_weather_weights
-    
-    # 3. Optimized Selection
-    optimized_weights = optimize_instrument_selection(
-        instruments_df, list(data.keys()), target_instruments=min(max_instruments, len(data))
-    )
-    if optimized_weights:
-        strategies['Optimized Selection'] = optimized_weights
-    
-    # 4. Single Best Instrument (lowest cost)
-    if len(data) > 0:
-        best_instrument = min(data.keys(), key=lambda x: get_instrument_specs(x, instruments_df)['sr_cost'])
-        strategies['Single Best'] = {best_instrument: 1.0}
-    
-    return strategies, data, instruments_df, asset_classes
+    return strategies, data, instruments_df, {}
 
 #####   UTILITY FUNCTIONS FOR FUTURE CHAPTERS   #####
 
@@ -1346,192 +1164,36 @@ def calculate_strategy_turnover(positions_df, multipliers_dict):
         'avg_daily_trades': len(position_cols) * daily_turnover
     }
 
-def compare_static_vs_dynamic_optimization(capital=1000000, risk_target=0.2, max_instruments=15, 
-                                          cost_multiplier=50, use_buffering=True):
-    """
-    Compare static portfolio optimization (Chapter 4) vs dynamic optimization (Chapter 25).
-    
-    Parameters:
-        capital (float): Initial capital.
-        risk_target (float): Target risk fraction.
-        max_instruments (int): Maximum instruments for comparison.
-        cost_multiplier (float): Cost penalty multiplier for dynamic optimization.
-        use_buffering (bool): Whether to use buffering in dynamic optimization.
-    
-    Returns:
-        dict: Comparison results.
-    """
-    print("=" * 80)
-    print("STATIC vs DYNAMIC OPTIMIZATION COMPARISON")
-    print("=" * 80)
-    
-    # Get the basic setup
-    strategies, data, instruments_df, asset_classes = run_portfolio_comparison(capital, risk_target, max_instruments)
-    
-    if not strategies:
-        print("No strategies to compare!")
-        return {}
-    
-    print(f"\n----- Comparing Static vs Dynamic Optimization -----")
-    print(f"Capital: ${capital:,.0f}")
-    print(f"Risk Target: {risk_target:.1%}")
-    print(f"Max Instruments: {max_instruments}")
-    print(f"Available Instruments: {len(data)}")
-    
-    comparison_results = {}
-    
-    # Test each strategy with both static and dynamic optimization
-    for strategy_name, weights in strategies.items():
-        print(f"\n--- Testing Strategy: {strategy_name} ---")
-        print(f"Instruments: {len(weights)} - {list(weights.keys())[:5]}{'...' if len(weights) > 5 else ''}")
-        
-        # Static optimization (original Chapter 4 approach)
-        static_result = backtest_portfolio_with_individual_data(
-            weights, data, instruments_df, capital, risk_target
-        )
-        
-        # Dynamic optimization (Chapter 25 approach)
-        # Test with weekly rebalancing to reduce computational load while demonstrating benefits
-        dynamic_result = backtest_portfolio_with_dynamic_optimization(
-            weights, data, instruments_df, capital, risk_target,
-            cost_multiplier=cost_multiplier, use_buffering=use_buffering,
-            rebalance_frequency='weekly'  # Weekly rebalancing for practical implementation
-        )
-        
-        comparison_results[strategy_name] = {
-            'static': static_result,
-            'dynamic': dynamic_result
-        }
-        
-        # Display comparison
-        if 'error' not in static_result and 'error' not in dynamic_result:
-            static_perf = static_result['performance']
-            dynamic_perf = dynamic_result['performance']
-            
-            print(f"\nPerformance Comparison:")
-            print(f"{'Metric':<25} {'Static':<12} {'Dynamic':<12} {'Improvement':<12}")
-            print("-" * 65)
-            
-            # Compare key metrics
-            metrics = [
-                ('Annual Return', 'annualized_return', '%'),
-                ('Volatility', 'annualized_volatility', '%'),
-                ('Sharpe Ratio', 'sharpe_ratio', ''),
-                ('Max Drawdown', 'max_drawdown_pct', '%')
-            ]
-            
-            for metric_name, metric_key, suffix in metrics:
-                static_val = static_perf[metric_key]
-                dynamic_val = dynamic_perf[metric_key]
-                
-                if metric_key == 'max_drawdown_pct':
-                    improvement = static_val - dynamic_val  # Lower is better for drawdown
-                    improvement_str = f"{improvement:+.1f}pp" if suffix == '%' else f"{improvement:+.3f}"
-                else:
-                    improvement = dynamic_val - static_val
-                    improvement_str = f"{improvement:+.1f}pp" if suffix == '%' else f"{improvement:+.3f}"
-                
-                static_str = f"{static_val:.1%}" if suffix == '%' else f"{static_val:.3f}"
-                dynamic_str = f"{dynamic_val:.1%}" if suffix == '%' else f"{dynamic_val:.3f}"
-                
-                print(f"{metric_name:<25} {static_str:<12} {dynamic_str:<12} {improvement_str:<12}")
-            
-            # Dynamic optimization specific metrics
-            print(f"\nDynamic Optimization Metrics:")
-            print(f"  Average Tracking Error: {dynamic_perf.get('avg_tracking_error', 0):.6f}")
-            print(f"  Average Adjustment Factor: {dynamic_perf.get('avg_adjustment_factor', 1):.3f}")
-            print(f"  Annual Turnover: {dynamic_perf.get('annual_turnover', 0):.1f} contracts")
-            print(f"  Rebalance Frequency: {dynamic_perf.get('rebalance_frequency', 'N/A')}")
-            print(f"  Cost Multiplier: {dynamic_perf.get('cost_multiplier', 0)}")
-            print(f"  Buffering Enabled: {dynamic_perf.get('use_buffering', False)}")
-            
-        elif 'error' in static_result:
-            print(f"Static optimization error: {static_result['error']}")
-        elif 'error' in dynamic_result:
-            print(f"Dynamic optimization error: {dynamic_result['error']}")
-    
-    # Overall comparison summary
-    if comparison_results:
-        print(f"\n" + "="*80)
-        print("OPTIMIZATION COMPARISON SUMMARY")
-        print("="*80)
-        
-        print(f"\n{'Strategy':<20} {'Type':<10} {'Return':<10} {'Sharpe':<8} {'MaxDD':<8} {'Turnover':<10}")
-        print("-" * 80)
-        
-        for strategy_name, results in comparison_results.items():
-            for opt_type, result in results.items():
-                if 'error' not in result:
-                    perf = result['performance']
-                    turnover = perf.get('annual_turnover', 0) if opt_type == 'dynamic' else 0
-                    
-                    print(f"{strategy_name:<20} {opt_type:<10} {perf['annualized_return']:<10.1%} "
-                          f"{perf['sharpe_ratio']:<8.3f} {perf['max_drawdown_pct']:<8.1f}% "
-                          f"{turnover:<10.0f}")
-        
-        # Key insights
-        '''
-        print(f"\n----- Key Insights -----")
-        print("1. Dynamic Optimization Benefits:")
-        print("   - Better capital utilization through optimal integer positions")
-        print("   - Cost-aware position sizing reduces transaction costs")
-        print("   - Buffering mechanism reduces unnecessary turnover")
-        print("   - Adapts to changing market conditions and correlations")
-        
-        print("\n2. Implementation Considerations:")
-        print("   - Higher computational requirements")
-        print("   - More sophisticated monitoring needed")
-        print("   - Benefits increase with portfolio size and diversity")
-        print("   - Weekly/monthly rebalancing often sufficient")
-        
-        print("\n3. When to Use Dynamic Optimization:")
-        print("   - Large portfolios (>$500k capital)")
-        print("   - Many instruments (>20)")
-        print("   - When minimizing tracking error is crucial")
-        print("   - Professional trading operations")
-        '''
-    
-    return comparison_results
-
 def main():
     """
-    Run optimized selection portfolio strategy only.
+    Run jumbo portfolio strategy only.
     """
     print("=" * 70)
-    print("CHAPTER 4: OPTIMIZED SELECTION PORTFOLIO STRATEGY")
+    print("CHAPTER 4: JUMBO PORTFOLIO STRATEGY")
     print("=" * 70)
     
     # Run portfolio comparison to get the setup
     try:
-        strategies, data, instruments_df, asset_classes = run_portfolio_comparison()
+        strategies, data, instruments_df, _ = run_portfolio_comparison(capital=50000000)
         
         if not strategies:
             print("No strategies to test!")
             return
         
-        # Print universe statistics
-        universe_stats = get_instrument_universe_stats(instruments_df, data)
-        print(f"\n----- Instrument Universe Statistics -----")
-        print(f"Total instruments with data: {universe_stats['total_instruments_available']}")
-        print(f"Asset class distribution:")
-        for asset_class, count in universe_stats['asset_classes'].items():
-            print(f"  {asset_class}: {count} instruments")
+        # Only run Jumbo Portfolio strategy
+        print(f"\n----- Testing Jumbo Portfolio Strategy -----")
         
-        # Only run Optimized Selection strategy
-        print(f"\n----- Testing Optimized Selection Portfolio Strategy -----")
-        
-        if 'Optimized Selection' in strategies:
-            strategy_name = 'Optimized Selection'
+        if 'Jumbo Portfolio' in strategies:
+            strategy_name = 'Jumbo Portfolio'
             weights = strategies[strategy_name]
             
             print(f"\n--- {strategy_name} ---")
             print(f"Number of instruments being traded: {len(weights)}")
             print(f"Instruments: {list(weights.keys())}")
-            print(f"Weights: {[f'{w:.3f}' for w in weights.values()]}")
             
             # Backtest the strategy
             result = backtest_portfolio_with_individual_data(
-                weights, data, instruments_df, capital=1000000
+                weights, data, instruments_df, capital=50000000
             )
             
             if 'error' in result:
@@ -1546,44 +1208,11 @@ def main():
             print(f"  Sharpe Ratio: {perf['sharpe_ratio']:.3f}")
             print(f"  Max Drawdown: {perf['max_drawdown_pct']:.1f}%")
             print(f"  IDM: {result['idm']:.2f}")
-            
-            # Test with dynamic optimization as well
-            print(f"\n----- Testing with Dynamic Optimization -----")
-            
-            dynamic_result = backtest_portfolio_with_dynamic_optimization(
-                weights, data, instruments_df, capital=1000000,
-                rebalance_frequency='weekly',
-                cost_multiplier=50,
-                use_buffering=True
-            )
-            
-            if 'error' not in dynamic_result:
-                dynamic_perf = dynamic_result['performance']
-                
-                print(f"\nDynamic Optimization Performance:")
-                print(f"  Annual Return: {dynamic_perf['annualized_return']:.2%}")
-                print(f"  Volatility: {dynamic_perf['annualized_volatility']:.2%}")
-                print(f"  Sharpe Ratio: {dynamic_perf['sharpe_ratio']:.3f}")
-                print(f"  Max Drawdown: {dynamic_perf['max_drawdown_pct']:.1f}%")
-                print(f"  Average Tracking Error: {dynamic_perf.get('avg_tracking_error', 0):.6f}")
-                print(f"  Annual Turnover: {dynamic_perf.get('annual_turnover', 0):.1f} contracts")
-                
-                # Comparison
-                print(f"\n----- Static vs Dynamic Comparison -----")
-                print(f"{'Metric':<20} {'Static':<12} {'Dynamic':<12} {'Improvement':<12}")
-                print("-" * 60)
-                print(f"{'Annual Return':<20} {perf['annualized_return']:<12.1%} {dynamic_perf['annualized_return']:<12.1%} {dynamic_perf['annualized_return']-perf['annualized_return']:+.1%}")
-                print(f"{'Sharpe Ratio':<20} {perf['sharpe_ratio']:<12.3f} {dynamic_perf['sharpe_ratio']:<12.3f} {dynamic_perf['sharpe_ratio']-perf['sharpe_ratio']:+.3f}")
-                print(f"{'Max Drawdown':<20} {perf['max_drawdown_pct']:<12.1f}% {dynamic_perf['max_drawdown_pct']:<12.1f}% {perf['max_drawdown_pct']-dynamic_perf['max_drawdown_pct']:+.1f}pp")
-            else:
-                print(f"Dynamic optimization error: {dynamic_result['error']}")
         else:
-            print("Optimized Selection strategy not available!")
+            print("Jumbo Portfolio strategy not available!")
         
     except Exception as e:
         print(f"Error in portfolio analysis: {e}")
-        import traceback
-        traceback.print_exc()
 
 if __name__ == "__main__":
     main()

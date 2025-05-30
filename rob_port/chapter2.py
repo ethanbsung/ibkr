@@ -329,7 +329,7 @@ def main():
     print("\n----- Example: S&P 500 Micro Future (MES) -----")
     price = 4500  # Current S&P 500 price
     annualized_std_pct = 0.16  # 16% annual volatility (book example)
-    capital = 100000  # $100,000 capital
+    capital = 50000000  # $50,000,000 capital
     risk_target = 0.20  # 20% risk target
     
     print(f"Instrument: {mes_specs['name']}")
@@ -383,7 +383,7 @@ def main():
     
     # Test with different capital amounts
     print("\n----- Position Sizing for Different Capital Levels -----")
-    capital_levels = [5000, 25000, 50000, 100000, 250000]
+    capital_levels = [5000000, 25000000, 50000000, 100000000, 250000000]
     
     for cap in capital_levels:
         pos_size = calculate_position_size(cap, multiplier, price, annualized_std_pct, risk_target)

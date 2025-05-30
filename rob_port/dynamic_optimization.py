@@ -44,7 +44,7 @@ except ImportError:
 #####   DYNAMIC OPTIMIZATION CORE FUNCTIONS   #####
 
 def calculate_optimal_unrounded_position(capital, combined_forecast, idm, weight, sigma_pct, 
-                                       multiplier, price, fx_rate=1.0, risk_target=0.2):
+                                       multiplier, price, fx_rate=1.0, risk_target=0.2, max_leverage=3.0, min_vol_floor=0.05):
     """
     Calculate optimal unrounded position for an instrument.
     
@@ -61,10 +61,15 @@ def calculate_optimal_unrounded_position(capital, combined_forecast, idm, weight
         price (float): Current price
         fx_rate (float): FX rate to base currency
         risk_target (float): Target risk fraction
+        max_leverage (float): Maximum leverage cap (3.0 = 3x gross notional)
+        min_vol_floor (float): Minimum volatility floor (0.05 = 5% annually)
     
     Returns:
         float: Optimal unrounded position
     """
+    # Apply volatility floor to prevent near-zero denominators
+    sigma_pct = max(sigma_pct, min_vol_floor)
+    
     if sigma_pct <= 0 or np.isnan(sigma_pct) or price <= 0:
         return 0.0
     
@@ -72,9 +77,19 @@ def calculate_optimal_unrounded_position(capital, combined_forecast, idm, weight
     capped_forecast = max(-20, min(20, combined_forecast))
     
     numerator = capped_forecast * capital * idm * weight * risk_target
-    denominator = multiplier * price * fx_rate * sigma_pct
+    denominator = 10 * multiplier * price * fx_rate * sigma_pct
     
-    return numerator / denominator
+    position = numerator / denominator
+    
+    # Apply notional exposure cap to prevent excessive leverage
+    max_notional = max_leverage * capital
+    notional_exposure = abs(position) * multiplier * price * fx_rate
+    
+    if notional_exposure > max_notional:
+        # Scale down position to stay within leverage limit
+        position = np.sign(position) * max_notional / (multiplier * price * fx_rate)
+    
+    return position
 
 def calculate_weight_per_contract(multiplier, price, fx_rate, capital):
     """
@@ -526,7 +541,7 @@ def calculate_dynamic_portfolio_positions(instruments_data, capital, current_pos
         # Scale risk target if total weight exceeds 100% to prevent excessive leverage
         if total_target_weight > 1.0:
             risk_scaling_factor = 1.0 / total_target_weight
-            print(f"DEBUG: Scaling risk target by {risk_scaling_factor:.3f} to prevent leverage (total weight: {total_target_weight:.1%})")
+            # print(f"DEBUG: Scaling risk target by {risk_scaling_factor:.3f} to prevent leverage (total weight: {total_target_weight:.1%})")
             # Recalculate positions with scaled risk target
             scaled_risk_target = risk_target * risk_scaling_factor
             for symbol in optimal_positions.keys():

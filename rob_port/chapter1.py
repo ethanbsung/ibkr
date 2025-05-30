@@ -425,7 +425,7 @@ def main():
     fat_tail_stats = calculate_fat_tails(df.copy())
 
     # Create a simple equity curve for demonstration
-    initial_capital = 10000
+    initial_capital = 50000000
     equity_curve = build_account_curve(df['daily_returns'], initial_capital)
 
     # Calculate comprehensive performance metrics
