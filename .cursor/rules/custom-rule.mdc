@@ -4,9 +4,101 @@ globs:
 alwaysApply: true
 ---
 ---
-description: Enforce exact implementation of strategies as described in the specified book.
+description: Enforce exact implementation of strategies as described in the specified book with mandatory real data requirements.
 ---
+
+## Core Implementation Requirements
+
 - Follow the implementation in the book exactly. Do not make assumptions, simplifications, or optimizations unless they are explicitly stated in the book.
 - All strategies must be implemented line-by-line as described in the source material. Preserve all variable names, formulas, data handling logic, and structure unless the book specifies a variation.
 - Never add extra functionality, reword variable names, or 'modernize' the code unless the user requests it explicitly. Prioritize fidelity to the book above all else.
 - Do not explain or justify changes unless asked. Your default behavior should be to assume the user wants faithful reproduction, not creative interpretation.
+## Mandatory Real Data Implementation Standards
+
+### 1. Real Market Data Usage
+- **ALWAYS use actual market data from CSV files** (e.g., `mes_daily_data.csv`)
+- **NEVER use artificial/demo data** or hardcoded example prices from the book
+- Use the actual first price from the dataset (e.g., MES starts at $1,882.50, not book's demo $4,500)
+- Calculate initial volatility using the actual first year of data from the dataset
+
+### 2. Lookahead Bias Prevention
+- **Volatility calculations must use only past data** available at the time of position sizing
+- For day T position sizing, use volatility calculated from data up to day T-1
+- Initial volatility must be calculated using only the first 256 days (or available data if less)
+- **Never use future data** for current day position sizing decisions
+
+### 3. Rolling Volatility Implementation
+- Implement proper rolling volatility windows (typically 256-day for annual)
+- For insufficient data periods (< window size):
+  - Days 1: Use initial period volatility as fallback
+  - Days 2-255: Use expanding window of all available past returns
+  - Day 256+: Use proper rolling window (e.g., 256-day sliding window)
+- Apply minimum volatility floor (typically 5%) to prevent position size explosions
+
+### 4. Daily Position Updates (Dynamic Positioning)
+- **Position sizes must be recalculated daily** based on:
+  - Current equity (not fixed initial capital)
+  - Previous day's closing price for sizing
+  - Current day's volatility forecast (made from past data)
+  - Current risk target
+- Update equity daily: `new_equity = previous_equity * (1 + daily_percentage_return)`
+- Calculate P&L using: `num_contracts * multiplier * daily_price_change * previous_price`
+
+### 5. Data Structure Requirements
+- Create analysis DataFrame starting from first valid return (after pct_change())
+- Align volatility forecasts properly with return data using reindexing
+- Handle NaN values gracefully with appropriate fallbacks
+- Ensure price data for sizing comes from previous trading day
+
+### 6. Blended Volatility (Chapter 3+)
+- Combine short-term EWMA (32-day span) with long-term average (10-year)
+- Use 70% weight for EWMA, 30% weight for long-term average
+- Formula: `σ_blend = 0.3 × (Ten year average of σ_t) + 0.7 × σ_t`
+- Apply minimum volatility floor consistently
+
+### 7. Multi-Instrument Requirements (Chapter 4+)
+- Load real data for all available instruments from CSV files
+- Implement proper date alignment across multiple instruments
+- Allow instruments to phase in as data becomes available
+- Use actual instrument specifications (multipliers, costs) from instruments.csv
+- Calculate Instrument Diversification Multiplier (IDM) based on actual instrument count
+
+### 8. Performance Calculation Standards
+- Use 256 business days per year consistently
+- Calculate comprehensive performance metrics (Sharpe, drawdown, skewness)
+- Ensure returns series starts from actual trading data, not initialization
+- Debug zero returns by checking P&L calculation chain
+
+### 9. Position Sizing Formulas
+**Strategy 2 (Chapter 2):**
+```
+N = (Current_Equity × τ) ÷ (Multiplier × Price × Rolling_Volatility)
+```
+
+**Strategy 3 (Chapter 3):**
+```
+N = (Current_Equity × τ) ÷ (Multiplier × Price × Blended_Volatility)
+```
+
+**Strategy 4 (Chapter 4):**
+```
+N = (Capital × IDM × Weight × τ) ÷ (Multiplier × Price × Blended_Volatility)
+```
+
+### 10. Error Prevention Checklist
+- [ ] Using real market data, not demo data
+- [ ] No lookahead bias in volatility calculations
+- [ ] Rolling volatility with proper fallbacks
+- [ ] Daily position updates based on current equity
+- [ ] Proper date alignment and NaN handling
+- [ ] Minimum volatility floor applied
+- [ ] P&L calculated with correct price references
+- [ ] Returns series properly constructed and non-zero
+
+## Implementation Priority Order
+1. Load and validate real market data
+2. Implement proper volatility calculation (no lookahead)
+3. Set up daily position sizing loop
+4. Calculate P&L and equity updates
+5. Verify non-zero returns and performance metrics
+6. Add comprehensive debugging and validation 

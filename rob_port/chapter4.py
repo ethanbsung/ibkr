@@ -318,7 +318,7 @@ def calculate_portfolio_position_size(symbol, capital, weight, idm, price, volat
         fx_rate (float): FX rate for currency conversion.
     
     Returns:
-        float: Number of contracts for this instrument.
+        int: Number of contracts for this instrument (rounded to nearest integer).
     """
     if np.isnan(volatility) or volatility <= 0:
         return 0
@@ -332,7 +332,8 @@ def calculate_portfolio_position_size(symbol, capital, weight, idm, price, volat
     if np.isinf(position_size) or position_size > 100000:
         return 0
     
-    return position_size
+    # Round to nearest integer since you can only hold whole contracts
+    return round(position_size)
 
 def backtest_multi_instrument_strategy(data_dir='Data', capital=50000000, risk_target=0.2,
                                      short_span=32, long_years=10, min_vol_floor=0.05,
@@ -772,9 +773,10 @@ def test_position_size_calculation():
         symbol='MES', capital=50000000, weight=0.02, idm=2.5, 
         price=4500, volatility=0.16, multiplier=5, risk_target=0.2
     )
-    expected = (50000000 * 2.5 * 0.02 * 0.2) / (5 * 4500 * 1.0 * 0.16)
-    print(f"Normal case: position={position:.2f}, expected={expected:.2f}")
-    assert abs(position - expected) < 0.01, f"Position calculation failed: {position} != {expected}"
+    expected_raw = (50000000 * 2.5 * 0.02 * 0.2) / (5 * 4500 * 1.0 * 0.16)
+    expected_rounded = round(expected_raw)
+    print(f"Normal case: position={position}, expected_raw={expected_raw:.2f}, expected_rounded={expected_rounded}")
+    assert position == expected_rounded, f"Position calculation failed: {position} != {expected_rounded}"
     
     # Test zero volatility
     position_zero = calculate_portfolio_position_size(
