@@ -370,6 +370,11 @@ def calculate_comprehensive_performance(equity_curve, returns, risk_free_rate=0.
     # Fat tails (if we have price data)
     # Note: This would need actual price data, not just returns
     
+    # DEBUG PRINT
+    print(f"[DEBUG calculate_comprehensive_performance] Input returns mean: {returns.mean():.8f}, std: {returns.std():.8f}")
+    print(f"[DEBUG calculate_comprehensive_performance] Calculated daily_vol: {daily_vol:.8f}, excess_returns.mean(): {excess_returns.mean():.8f}")
+    print(f"[DEBUG calculate_comprehensive_performance] Calculated sharpe_ratio (annualized): {sharpe_ratio:.6f}")
+
     return {
         'total_return': total_return,
         'annualized_return': annualized_return,

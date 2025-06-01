@@ -300,17 +300,19 @@ def evaluate_instrument_suitability(symbol, instruments_df, price, volatility,
 
 #####   STRATEGY IMPLEMENTATION   #####
 
-def backtest_variable_risk_strategy(csv_path, capital, risk_target=0.2, 
-                                   short_span=32, long_years=10):
+def backtest_variable_risk_strategy(csv_path, initial_capital, risk_target=0.2, 
+                                   short_span=32, long_years=10, min_vol_floor=0.05):
     """
-    Backtest buy-and-hold strategy with variable risk scaling.
+    Backtest buy-and-hold strategy with variable risk scaling, with daily position resizing
+    based on current equity and blended volatility forecast.
     
     Parameters:
         csv_path (str): Path to price data CSV.
-        capital (float): Initial capital.
+        initial_capital (float): Initial capital.
         risk_target (float): Target risk fraction.
         short_span (int): EWMA span for short-run volatility.
         long_years (int): Years for long-run volatility average.
+        min_vol_floor (float): Minimum annualized volatility floor for blended vol.
     
     Returns:
         dict: Backtest results and performance metrics.
@@ -318,103 +320,154 @@ def backtest_variable_risk_strategy(csv_path, capital, risk_target=0.2,
     # Load data
     df = pd.read_csv(csv_path, parse_dates=['Time'])
     df.set_index('Time', inplace=True)
-    df = df.dropna()
+    df['price'] = df['Last']
+    df['daily_price_change_pct'] = df['price'].pct_change()
     
-    # Calculate returns
-    df['returns'] = df['Last'].pct_change()
-    df = df.dropna()
-    
-    # Calculate blended volatility forecast
-    df['blended_vol'] = calculate_blended_volatility(
-        df['returns'], short_span=short_span, long_years=long_years
+    # blended_vol needs to be calculated based on returns from the original df
+    # to have a forecast available for the very first day of trading in df_analysis
+    raw_returns_for_vol_calc = df['daily_price_change_pct'].dropna()
+    blended_vol_full_series = calculate_blended_volatility(
+        raw_returns_for_vol_calc, 
+        short_span=short_span, long_years=long_years, min_vol_floor=min_vol_floor
     )
-    
-    # Get instrument specs (assuming MES)
+
+    # df_analysis is our main trading DataFrame, starts from first valid return
+    df_analysis = df.dropna(subset=['daily_price_change_pct']).copy()
+    # Align blended_vol to df_analysis. For days in df_analysis that don't have a prior day in blended_vol_full_series
+    # (e.g. first day of df_analysis, its vol should be from df.index[0]), we need to map carefully or ffill.
+    # Simplest: get the blended_vol for the day *prior* to df_analysis.index[0]
+    # df_analysis.index[0] is df.index[1]. We need vol from df.index[0].    
+    df_analysis['blended_vol_forecast_for_day'] = blended_vol_full_series.shift(1).reindex(df_analysis.index).ffill().fillna(min_vol_floor)
+
     instruments_df = load_instrument_data()
     mes_specs = get_instrument_specs('MES', instruments_df)
     multiplier = mes_specs['multiplier']
-    
-    # Calculate position sizes (using previous day's price and volatility)
-    positions = []
-    for i in range(len(df)):
+
+    # Initialize series for equity, positions, and returns, all indexed like df_analysis
+    equity = pd.Series(index=df_analysis.index, dtype=float)
+    positions_held = pd.Series(index=df_analysis.index, dtype=float)
+    daily_percentage_returns = pd.Series(index=df_analysis.index, dtype=float)
+
+    # Initial state for the day *before* the first trade in df_analysis
+    current_equity = initial_capital
+    # Price on the day before df_analysis.index[0] (i.e., df.index[0])
+    price_for_sizing_prev_day = df['price'].iloc[0] 
+    # Vol forecast for df_analysis.index[0] is based on data up to df.index[0]
+    # blended_vol_full_series is indexed like raw_returns (starts df.index[1]), so blended_vol_full_series.iloc[0] is for df.index[1]
+    # We need a vol forecast *for* df_analysis.index[0] (which is df.index[1]), made using data *up to* df.index[0]
+    # The df_analysis['blended_vol_forecast_for_day'] should handle this via shift(1)
+
+    for i in range(len(df_analysis)):
+        current_date = df_analysis.index[i]
+        
+        # Determine capital, price, and vol for sizing for *today's* (current_date's) position
+        # These are based on *yesterday's* close or forecast available at start of today.
+        capital_for_sizing = current_equity # Equity at end of *previous* day / start of current
         if i == 0:
-            positions.append(0)  # No position on first day
+            # For the very first day of trading (df_analysis.index[0]), 
+            # use price from df.index[0] and vol forecast available for df_analysis.index[0]
+            price_for_sizing = df['price'].iloc[0] 
         else:
-            prev_price = df['Last'].iloc[i-1]
-            prev_vol = df['blended_vol'].iloc[i-1]
-            
-            if np.isnan(prev_vol) or prev_vol <= 0:
-                position = 0
-            else:
-                position = calculate_variable_position_size(
-                    capital, multiplier, prev_price, prev_vol, risk_target
-                )
-            positions.append(position)
-    
-    df['position'] = positions
-    df['position_discrete'] = df['position'].round()
-    
-    # Calculate strategy returns
-    df['position_lag'] = df['position'].shift(1)
-    df['notional_exposure'] = df['position_lag'] * multiplier * df['Last'].shift(1)
-    df['strategy_pnl'] = df['position_lag'] * multiplier * df['returns'] * df['Last'].shift(1)
-    df['strategy_returns'] = df['strategy_pnl'] / capital
-    
-    # Remove NaN values
-    df = df.dropna()
-    
-    # Calculate performance metrics
+            price_for_sizing = df_analysis['price'].loc[df_analysis.index[i-1]] # Previous day's close price
+        
+        vol_for_sizing = df_analysis['blended_vol_forecast_for_day'].loc[current_date]
+        vol_for_sizing = vol_for_sizing if pd.notna(vol_for_sizing) and vol_for_sizing > 0 else min_vol_floor
+
+        num_contracts = calculate_variable_position_size(
+            capital_for_sizing, multiplier, price_for_sizing, 
+            vol_for_sizing, risk_target
+        )
+        positions_held.loc[current_date] = num_contracts
+        
+        # Calculate P&L for current_date based on position set using prev day's info
+        # Actual price change for current_date
+        price_change_pct_today = df_analysis['daily_price_change_pct'].loc[current_date]
+        # Price at start of current_date (which is prev_day_close_price)
+        price_at_start_today = df_analysis['price'].shift(1).loc[current_date] 
+        
+        if pd.isna(price_at_start_today): # Should only be for the very first record if not handled by df_analysis start
+            dollar_pnl = 0.0
+        else:
+            dollar_pnl = num_contracts * multiplier * price_change_pct_today * price_at_start_today
+        
+        current_daily_pct_return = dollar_pnl / capital_for_sizing if capital_for_sizing > 0 and not pd.isna(capital_for_sizing) else 0.0
+        daily_percentage_returns.loc[current_date] = current_daily_pct_return
+        
+        # Update equity for end of current_date
+        current_equity = capital_for_sizing * (1 + current_daily_pct_return)
+        equity.loc[current_date] = current_equity
+        
+        # Debug prints 
+        if i < 5 or i > len(df_analysis) - 5: 
+            print(f"--- Loop Day {i}, Date {current_date.date()} ---")
+            print(f"  Sizing input -> Cap: {capital_for_sizing:,.2f}, Px: {price_for_sizing:,.2f}, Vol: {vol_for_sizing:.4f}")
+            print(f"  Num Contracts CALCD: {num_contracts:.4f}")
+            print(f"  Market Pct Chg Today: {price_change_pct_today:.6f}, Px Start Today: {price_at_start_today:.2f}")
+            print(f"  Dollar PNL: {dollar_pnl:,.2f}")
+            print(f"  Daily % Ret: {current_daily_pct_return:.6f}")
+            print(f"  Equity EOD: {current_equity:,.2f}")
+
+    df_analysis['position'] = positions_held
+    df_analysis['strategy_returns'] = daily_percentage_returns
+    final_equity_curve = build_account_curve(df_analysis['strategy_returns'].dropna(), initial_capital)
+    final_returns_series = df_analysis['strategy_returns'].dropna()
+
+    # Check if still all zeros
+    if final_returns_series.std() == 0:
+        print("Warning: Strategy returns standard deviation is zero. P&L might not be calculated correctly.")
+
     performance = calculate_comprehensive_performance(
-        build_account_curve(df['strategy_returns'], capital),
-        df['strategy_returns']
+        final_equity_curve,
+        final_returns_series
     )
     
-    # Add strategy-specific metrics
-    performance['avg_position'] = df['position'].mean()
-    performance['max_position'] = df['position'].max()
-    performance['min_position'] = df['position'].min()
-    performance['avg_volatility'] = df['blended_vol'].mean()
-    performance['vol_min'] = df['blended_vol'].min()
-    performance['vol_max'] = df['blended_vol'].max()
+    # Add strategy-specific metrics to performance dict
+    performance['avg_position'] = df_analysis['position'].mean()
+    performance['max_position'] = df_analysis['position'].max()
+    performance['min_position'] = df_analysis['position'].min()
+    performance['avg_volatility_forecast'] = df_analysis['blended_vol_forecast_for_day'].mean()
+    performance['vol_forecast_min'] = df_analysis['blended_vol_forecast_for_day'].min()
+    performance['vol_forecast_max'] = df_analysis['blended_vol_forecast_for_day'].max()
     
     return {
-        'data': df,
+        'data': df_analysis, 
         'performance': performance,
-        'final_position': df['position'].iloc[-1]
+        'final_equity_value': final_equity_curve.iloc[-1] if not final_equity_curve.empty else initial_capital
     }
 
-def plot_chapter3_variable_risk_results(results, save_path='results/chapter3_variable_risk.png'):
+def plot_chapter3_variable_risk_results(results, initial_capital_arg, save_path='results/chapter3_variable_risk.png'):
     """
     Plot Chapter 3 variable risk strategy results including volatility and position size evolution.
     
     Parameters:
         results (dict): Results from backtest_variable_risk_strategy.
+        initial_capital_arg (float): Initial capital used, for plot title.
         save_path (str): Path to save the plot.
     """
     try:
-        # Create results directory if it doesn't exist
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         
-        df = results['data']
+        df_plot = results['data'] # df_analysis from backtest function
         performance = results['performance']
         
-        # Build equity curve
-        equity_curve = build_account_curve(df['strategy_returns'], 50000000)
+        # Equity curve is now directly from performance if build_account_curve is robust
+        # or reconstruct if needed. The backtest now returns final_equity_curve. 
+        # Let's assume it's accessible or build_account_curve is called here.
+        # For simplicity, let's use the initial_capital_arg and strategy_returns from df_plot
+        equity_curve_plot = build_account_curve(df_plot['strategy_returns'].dropna(), initial_capital_arg)
         
-        # Create the plot
         plt.figure(figsize=(15, 12))
         
-        # Plot 1: Equity curve
         plt.subplot(4, 1, 1)
-        plt.plot(equity_curve.index, equity_curve.values/1e6, 'b-', linewidth=1.5, label='Variable Risk Strategy')
-        plt.title('Chapter 3: Variable Risk Scaling Strategy', fontsize=14, fontweight='bold')
+        plt.plot(equity_curve_plot.index, equity_curve_plot.values/1e6, 'b-', linewidth=1.5, label=f'Variable Risk Strategy (${initial_capital_arg/1e6:.1f}M capital)')
+        plt.title(f'Chapter 3: Variable Risk Scaling Strategy (${initial_capital_arg/1e6:.1f}M capital)', fontsize=14, fontweight='bold')
         plt.ylabel('Portfolio Value ($M)', fontsize=12)
         plt.grid(True, alpha=0.3)
         plt.legend()
         
         # Plot 2: Volatility evolution
         plt.subplot(4, 1, 2)
-        plt.plot(df.index, df['blended_vol'] * 100, 'r-', linewidth=1, label='Blended Volatility Forecast')
+        plt.plot(df_plot.index, df_plot['blended_vol_forecast_for_day'] * 100, 'r-', linewidth=1, label='Blended Volatility Forecast')
         plt.ylabel('Volatility (%)', fontsize=12)
         plt.title('Volatility Forecast Evolution', fontsize=12, fontweight='bold')
         plt.grid(True, alpha=0.3)
@@ -422,8 +475,8 @@ def plot_chapter3_variable_risk_results(results, save_path='results/chapter3_var
         
         # Plot 3: Position size evolution
         plt.subplot(4, 1, 3)
-        plt.plot(df.index, df['position'], 'g-', linewidth=1, label='Position Size (Contracts)')
-        plt.plot(df.index, df['position_discrete'], 'g--', linewidth=1, alpha=0.7, label='Discrete Position')
+        plt.plot(df_plot.index, df_plot['position'], 'g-', linewidth=1, label='Position Size (Contracts)')
+        plt.plot(df_plot.index, df_plot['position'].round(), 'g--', linewidth=1, alpha=0.7, label='Discrete Position')
         plt.ylabel('Contracts', fontsize=12)
         plt.title('Position Size Evolution', fontsize=12, fontweight='bold')
         plt.grid(True, alpha=0.3)
@@ -431,7 +484,7 @@ def plot_chapter3_variable_risk_results(results, save_path='results/chapter3_var
         
         # Plot 4: Drawdown
         plt.subplot(4, 1, 4)
-        drawdown_stats = calculate_maximum_drawdown(equity_curve)
+        drawdown_stats = calculate_maximum_drawdown(equity_curve_plot)
         drawdown_series = drawdown_stats['drawdown_series'] * 100
         
         plt.fill_between(drawdown_series.index, drawdown_series.values, 0, 
@@ -450,17 +503,17 @@ def plot_chapter3_variable_risk_results(results, save_path='results/chapter3_var
             plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
         
         # Add performance metrics as text
-        start_date = df.index[0].strftime('%Y-%m-%d')
-        end_date = df.index[-1].strftime('%Y-%m-%d')
+        start_date = df_plot.index[0].strftime('%Y-%m-%d')
+        end_date = df_plot.index[-1].strftime('%Y-%m-%d')
         
-        textstr = f'''Performance Summary:
+        textstr = f'''Performance Summary (${initial_capital_arg/1e3:.0f}K Initial Capital):
 Total Return: {performance['total_return']:.1%}
 Annualized Return: {performance['annualized_return']:.1%}
-Volatility: {performance['annualized_volatility']:.1%}
+Strategy Volatility: {performance['annualized_volatility']:.1%}
 Sharpe Ratio: {performance['sharpe_ratio']:.3f}
 Max Drawdown: {performance['max_drawdown_pct']:.1f}%
-Avg Position: {performance['avg_position']:.1f} contracts
-Avg Volatility: {performance['avg_volatility']:.1%}
+Avg Position: {performance.get('avg_position', float('nan')):.1f} contracts
+Avg Vol Forecast: {performance.get('avg_volatility_forecast', float('nan')):.1%}
 Period: {start_date} to {end_date}'''
         
         plt.figtext(0.02, 0.02, textstr, fontsize=9, verticalalignment='bottom',
@@ -554,10 +607,15 @@ def main():
     print("\n----- Variable Risk Strategy Backtest -----")
     
     try:
+        # <<< CHOOSE YOUR CAPITAL FOR CHAPTER 3 TEST >>>
+        ch3_initial_capital = 100000.0 # Example: $100k
+        # ch3_initial_capital = 50000000.0 # As currently in your main
+        
         results = backtest_variable_risk_strategy(
             'Data/mes_daily_data.csv', 
-            capital=50000000, 
-            risk_target=0.2
+            initial_capital=ch3_initial_capital, 
+            risk_target=0.2,
+            # min_vol_floor=0.05 # Default is 0.05, can specify if needed
         )
         
         perf = results['performance']
@@ -565,31 +623,29 @@ def main():
         print(f"Performance Summary:")
         print(f"  Total Return: {perf['total_return']:.2%}")
         print(f"  Annualized Return: {perf['annualized_return']:.2%}")
-        print(f"  Volatility: {perf['annualized_volatility']:.2%}")
+        print(f"  Volatility: {perf['annualized_volatility']:.2%}") # This is Strategy Volatility
         print(f"  Sharpe Ratio: {perf['sharpe_ratio']:.3f}")
         print(f"  Max Drawdown: {perf['max_drawdown_pct']:.1f}%")
-        print(f"  Skewness: {perf['skewness']:.3f}")
+        print(f"  Skewness: {perf.get('skewness', float('nan')):.3f}")
         
         print(f"\nPosition Statistics:")
-        print(f"  Average Position: {perf['avg_position']:.2f} contracts")
-        print(f"  Max Position: {perf['max_position']:.2f} contracts")
-        print(f"  Min Position: {perf['min_position']:.2f} contracts")
+        print(f"  Average Position: {perf.get('avg_position', float('nan')):.2f} contracts")
+        print(f"  Max Position: {perf.get('max_position', float('nan')):.2f} contracts")
+        print(f"  Min Position: {perf.get('min_position', float('nan')):.2f} contracts")
         
-        print(f"\nVolatility Statistics:")
-        print(f"  Average Volatility: {perf['avg_volatility']:.2%}")
-        print(f"  Min Volatility: {perf['vol_min']:.2%}")
-        print(f"  Max Volatility: {perf['vol_max']:.2%}")
+        print(f"\nVolatility Forecast Statistics:") # Updated label
+        print(f"  Average Volatility Forecast: {perf.get('avg_volatility_forecast', float('nan')):.2%}")
+        print(f"  Min Volatility Forecast: {perf.get('vol_forecast_min', float('nan')):.2%}")
+        print(f"  Max Volatility Forecast: {perf.get('vol_forecast_max', float('nan')):.2%}")
         
-        # Compare with fixed risk strategy from Chapter 2
-        print(f"\n----- Comparison with Fixed Risk (Chapter 2) -----")
-        
-        # Calculate fixed risk strategy performance for comparison
-        fixed_position = calculate_variable_position_size(50000000, 5, 4500, 0.16, 0.2)
-        print(f"Fixed Risk Position: {fixed_position:.2f} contracts")
-        print(f"Variable Risk Final Position: {results['final_position']:.2f} contracts")
+        # Compare with fixed risk strategy from Chapter 2 - This comparison might need rethinking
+        # For now, let's focus on Chapter 3's own results.
+        # fixed_position = calculate_variable_position_size(ch3_initial_capital, 5, 4500, 0.16, 0.2) # Example fixed sizing
+        # print(f"Example Fixed Risk Position (16% vol): {fixed_position:.2f} contracts")
+        print(f"Variable Risk Final Equity: ${results['final_equity_value']:,.2f}") # Changed from final_position
         
         # Plot the results
-        plot_chapter3_variable_risk_results(results)
+        plot_chapter3_variable_risk_results(results, initial_capital_arg=ch3_initial_capital)
         
     except Exception as e:
         print(f"Error in backtest: {e}")

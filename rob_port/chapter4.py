@@ -85,7 +85,7 @@ def calculate_idm_from_count(num_instruments):
     else:
         return 3.5
 
-def calculate_instrument_weights(instrument_data, method='equal', instruments_df=None):
+def calculate_instrument_weights(instrument_data, method='equal', instruments_df=None, common_hypothetical_SR=0.3, annual_turnover_T=7.0, risk_target=0.2):
     """
     Calculate weights for each instrument in the portfolio.
     
@@ -93,6 +93,9 @@ def calculate_instrument_weights(instrument_data, method='equal', instruments_df
         instrument_data (dict): Dictionary of instrument DataFrames.
         method (str): Weighting method ('equal', 'vol_inverse', 'handcrafted').
         instruments_df (pd.DataFrame): Instrument specifications for handcrafted method.
+        common_hypothetical_SR (float): Common hypothetical SR for SR' calculation.
+        annual_turnover_T (float): Annual turnover T for SR' calculation.
+        risk_target (float): Target risk fraction.
     
     Returns:
         dict: Dictionary of weights for each instrument.
@@ -121,14 +124,14 @@ def calculate_instrument_weights(instrument_data, method='equal', instruments_df
     
     elif method == 'handcrafted':
         # Sophisticated handcrafted weighting algorithm
-        return calculate_handcrafted_weights(instrument_data, instruments_df)
+        return calculate_handcrafted_weights(instrument_data, instruments_df, common_hypothetical_SR, annual_turnover_T, risk_target)
     
     else:
         # Default to equal weights
         weight = 1.0 / num_instruments
         return {symbol: weight for symbol in symbols}
 
-def calculate_handcrafted_weights(instrument_data, instruments_df):
+def calculate_handcrafted_weights(instrument_data, instruments_df, common_hypothetical_SR, annual_turnover_T, risk_target):
     """
     Calculate handcrafted instrument weights based on multiple factors.
     
@@ -141,11 +144,14 @@ def calculate_handcrafted_weights(instrument_data, instruments_df):
     Parameters:
         instrument_data (dict): Dictionary of instrument DataFrames.
         instruments_df (pd.DataFrame): Instrument specifications.
+        common_hypothetical_SR (float): Common hypothetical SR for SR' calculation.
+        annual_turnover_T (float): Annual turnover T for SR' calculation.
+        risk_target (float): Target risk fraction.
     
     Returns:
         dict: Dictionary of optimized weights.
     """
-    print(f"\n--- Calculating Handcrafted Weights ---")
+    print(f"\n--- Calculating Handcrafted Weights (SR': {common_hypothetical_SR:.2f}, T: {annual_turnover_T:.1f}) ---")
     
     # Asset class groupings for diversification
     asset_classes = {
@@ -181,15 +187,30 @@ def calculate_handcrafted_weights(instrument_data, instruments_df):
             # 1. Volatility (for inverse vol weighting component)
             vol = returns.std() * np.sqrt(business_days_per_year)
             
-            # 2. Performance metrics
-            sharpe_ratio = returns.mean() / returns.std() * np.sqrt(business_days_per_year) if returns.std() > 0 else 0
+            # 2. Performance metrics (Original historical Sharpe and Skew)
+            # sharpe_ratio = returns.mean() / returns.std() * np.sqrt(business_days_per_year) if returns.std() > 0 else 0
             skewness = returns.skew() if len(returns) > 10 else 0
             
-            # 3. Cost efficiency (lower SR cost is better)
-            cost_efficiency = 1.0 / (sr_cost + 0.001)  # Add small constant to avoid division by zero
-            
-            # 4. Risk-adjusted performance
-            risk_adj_performance = sharpe_ratio * 0.5 + max(0, skewness) * 0.1  # Prefer positive skew
+            # ---- New SR' Calculation (Book's method) ----
+            cost_percentage_per_trade = specs.get('sr_cost', 0.01) # e.g., 0.00028 for MES
+            if pd.isna(cost_percentage_per_trade) or cost_percentage_per_trade < 0:
+                cost_percentage_per_trade = 0.01 # Default for invalid values
+
+            if vol > 0.001: # Avoid division by zero or extremely low vol
+                risk_adjusted_cost_per_trade = cost_percentage_per_trade / vol
+            else:
+                risk_adjusted_cost_per_trade = float('inf') # Effectively makes SR' very low or negative
+
+            estimated_sr_prime = common_hypothetical_SR - (annual_turnover_T * risk_adjusted_cost_per_trade)
+            # ---- End New SR' Calculation ----
+
+            # 3. Cost efficiency (lower SR cost is better - this is raw cost_percentage_per_trade)
+            cost_efficiency = 1.0 / (cost_percentage_per_trade + 0.00001) # Add small constant
+
+
+            # 4. Risk-adjusted performance (using estimated_sr_prime)
+            # Prefer positive skew, ensure estimated_sr_prime contributes positively if it's positive
+            risk_adj_performance = estimated_sr_prime * 0.5 + max(0, skewness) * 0.1  # Prefer positive skew
             
             # 5. Volatility scaling factor (inverse vol component)
             vol_scaling = 1.0 / vol if vol > 0.01 else 0
@@ -205,9 +226,10 @@ def calculate_handcrafted_weights(instrument_data, instruments_df):
             symbol_scores[symbol] = {
                 'base_score': base_score,
                 'vol': vol,
-                'sharpe': sharpe_ratio,
+                # 'sharpe': sharpe_ratio, # Store original historical Sharpe for info if needed, but use estimated_sr_prime for scoring
+                'estimated_sr_prime': estimated_sr_prime,
                 'skewness': skewness,
-                'sr_cost': sr_cost,
+                'sr_cost': cost_percentage_per_trade, # This is cost_percentage_per_trade
                 'cost_efficiency': cost_efficiency,
                 'asset_class': None
             }
@@ -266,12 +288,12 @@ def calculate_handcrafted_weights(instrument_data, instruments_df):
     # Display top allocations
     sorted_weights = sorted(final_weights.items(), key=lambda x: x[1], reverse=True)
     print(f"\nTop 10 Weighted Instruments:")
-    print(f"{'Symbol':<8} {'Weight':<8} {'AssetClass':<12} {'Sharpe':<8} {'Vol':<8} {'Cost':<8}")
+    print(f"{'Symbol':<8} {'Weight':<8} {'AssetClass':<12} {'SR_prime':<8} {'Vol':<8} {'Cost%':<8}")
     print("-" * 65)
     
     for symbol, weight in sorted_weights[:10]:
         data = symbol_scores[symbol]
-        print(f"{symbol:<8} {weight:<8.3f} {data['asset_class']:<12} {data['sharpe']:<8.3f} "
+        print(f"{symbol:<8} {weight:<8.3f} {data['asset_class']:<12} {data['estimated_sr_prime']:<8.3f} "
               f"{data['vol']:<8.2%} {data['sr_cost']:<8.4f}")
     
     return final_weights
@@ -313,221 +335,284 @@ def calculate_portfolio_position_size(symbol, capital, weight, idm, price, volat
     return position_size
 
 def backtest_multi_instrument_strategy(data_dir='Data', capital=50000000, risk_target=0.2,
-                                     short_span=32, long_years=10, weight_method='equal',
+                                     short_span=32, long_years=10, min_vol_floor=0.05,
+                                     weight_method='equal',
+                                     common_hypothetical_SR=0.3, annual_turnover_T=7.0,
                                      start_date=None, end_date=None):
     """
-    Backtest Strategy 4: Multi-instrument portfolio with variable risk scaling.
-    
-    Parameters:
-        data_dir (str): Directory containing price data files.
-        capital (float): Initial capital.
-        risk_target (float): Target risk fraction.
-        short_span (int): EWMA span for short-run volatility.
-        long_years (int): Years for long-run volatility average.
-        weight_method (str): Method for calculating instrument weights.
-        start_date (str): Start date for backtest (YYYY-MM-DD).
-        end_date (str): End date for backtest (YYYY-MM-DD).
-    
-    Returns:
-        dict: Comprehensive backtest results.
+    Backtest Strategy 4: Multi-instrument portfolio with variable risk scaling and daily dynamic rebalancing.
     """
     print("=" * 60)
-    print("STRATEGY 4: MULTI-INSTRUMENT VARIABLE RISK PORTFOLIO")
+    print("STRATEGY 4: MULTI-INSTRUMENT VARIABLE RISK PORTFOLIO (Daily Rebalance)")
     print("=" * 60)
     
-    # Load all instrument data
-    instrument_data = load_all_instrument_data(data_dir)
+    all_instruments_specs_df = load_instrument_data() # For multipliers etc.
+    raw_instrument_data = load_all_instrument_data(data_dir) # Loads DFs with 'Last', 'returns'
     
-    if len(instrument_data) == 0:
+    if not raw_instrument_data:
         raise ValueError("No instrument data loaded successfully")
     
-    # Load instrument specifications
-    instruments_df = load_instrument_data()
-    
     print(f"\nPortfolio Configuration:")
-    print(f"  Instruments: {len(instrument_data)}")
+    print(f"  Instruments initially loaded: {len(raw_instrument_data)}")
     print(f"  Capital: ${capital:,.0f}")
     print(f"  Risk Target: {risk_target:.1%}")
     print(f"  Weight Method: {weight_method}")
-    
-    # Calculate IDM
-    idm = calculate_idm_from_count(len(instrument_data))
-    print(f"  IDM: {idm:.2f}")
-    
-    # Calculate instrument weights
-    weights = calculate_instrument_weights(instrument_data, weight_method, instruments_df)
-    
-    # Determine the full date range for backtest
-    all_start_dates = [df.index.min() for df in instrument_data.values()]
-    all_end_dates = [df.index.max() for df in instrument_data.values()]
-    
-    # Use the earliest available data to latest available data
-    backtest_start = start_date if start_date else min(all_start_dates)
-    backtest_end = end_date if end_date else max(all_end_dates)
-    
-    if isinstance(backtest_start, str):
-        backtest_start = pd.to_datetime(backtest_start)
-    if isinstance(backtest_end, str):
-        backtest_end = pd.to_datetime(backtest_end)
-    
-    print(f"\nBacktest Period:")
-    print(f"  Start: {backtest_start.date()}")
-    print(f"  End: {backtest_end.date()}")
-    print(f"  Duration: {(backtest_end - backtest_start).days} days")
-    
-    # Create full date range for backtest
-    full_date_range = pd.date_range(backtest_start, backtest_end, freq='D')
-    full_date_range = full_date_range[full_date_range.weekday < 5]  # Business days only
-    
-    # Process each instrument and calculate volatility forecasts
-    processed_data = {}
-    
-    for symbol, df in instrument_data.items():
-        # Get instrument specs
-        try:
-            specs = get_instrument_specs(symbol, instruments_df)
-            multiplier = specs['multiplier']
-        except:
+    print(f"  Common Hypothetical SR for SR': {common_hypothetical_SR}")
+    print(f"  Annual Turnover T for SR': {annual_turnover_T}")
+
+    # Preprocess: Calculate returns and vol forecasts for each instrument
+    processed_instrument_data = {}
+    for symbol, df_orig in raw_instrument_data.items():
+        df = df_orig.copy()
+        if 'Last' not in df.columns:
+            print(f"Skipping {symbol}: 'Last' column missing.")
             continue
         
-        # Filter data to backtest period
-        df_filtered = df[(df.index >= backtest_start) & (df.index <= backtest_end)].copy()
+        df['daily_price_change_pct'] = df['Last'].pct_change()
         
-        if len(df_filtered) < 50:  # Need minimum data
+        # Volatility forecast for day D is made using data up to D-1
+        raw_returns_for_vol = df['daily_price_change_pct'].dropna()
+        if len(raw_returns_for_vol) < short_span: # Need enough data for EWMA
+            print(f"Skipping {symbol}: Insufficient data for vol forecast ({len(raw_returns_for_vol)} days).")
+            continue
+
+        blended_vol_series = calculate_blended_volatility(
+            raw_returns_for_vol, short_span=short_span, long_years=long_years, min_vol_floor=min_vol_floor
+        )
+        # The forecast for df.index[t] (today) uses vol calculated up to df.index[t-1] (yesterday)
+        df['vol_forecast'] = blended_vol_series.shift(1).reindex(df.index).ffill().fillna(min_vol_floor)
+        
+        # Ensure 'Last' and 'vol_forecast' are present for all relevant dates by reindexing to a common range later if needed
+        # For now, keep as is, filtering will happen in the main loop.
+        df.dropna(subset=['Last', 'vol_forecast', 'daily_price_change_pct'], inplace=True) # Ensure critical data is present
+        if df.empty:
+            print(f"Skipping {symbol}: Empty after dropping NaNs in critical columns.")
+            continue
+
+        processed_instrument_data[symbol] = df
+
+    if not processed_instrument_data:
+        raise ValueError("No instruments remaining after preprocessing and volatility calculation.")
+    
+    print(f"  Instruments after preprocessing: {len(processed_instrument_data)}")
+
+    # Determine common date range for backtest
+    # Ensure all_indices uses processed_instrument_data directly
+    all_indices = [df.index for df in processed_instrument_data.values() if not df.empty]
+    if not all_indices: # Add a check in case processed_instrument_data is empty or all DFs are empty
+        raise ValueError("No valid instrument data in processed_instrument_data to determine date range.")
+
+    # Use global min/max dates to allow instruments to phase in
+    all_available_start_dates = [idx.min() for idx in all_indices]
+    all_available_end_dates = [idx.max() for idx in all_indices]
+
+    global_min_date = min(all_available_start_dates) if all_available_start_dates else pd.Timestamp.min # Fallback for safety
+    global_max_date = max(all_available_end_dates) if all_available_end_dates else pd.Timestamp.max   # Fallback for safety
+    
+    backtest_start_dt = pd.to_datetime(start_date) if start_date else global_min_date
+    backtest_end_dt = pd.to_datetime(end_date) if end_date else global_max_date
+    
+    # Clamp user-defined dates to the absolute earliest/latest possible dates from data
+    backtest_start_dt = max(backtest_start_dt, global_min_date)
+    backtest_end_dt = min(backtest_end_dt, global_max_date)
+
+    if backtest_start_dt >= backtest_end_dt:
+        raise ValueError(f"Invalid backtest period: Start {backtest_start_dt}, End {backtest_end_dt}. Check data alignment and date inputs.")
+
+    # Use a common business day index
+    trading_days_range = pd.bdate_range(start=backtest_start_dt, end=backtest_end_dt)
+    
+    print(f"\nBacktest Period (effective, common across instruments):")
+    print(f"  Start: {trading_days_range.min().date()}")
+    print(f"  End: {trading_days_range.max().date()}")
+    print(f"  Duration: {len(trading_days_range)} trading days")
+
+    # Initialize portfolio tracking
+    current_portfolio_equity = capital
+    portfolio_daily_records = []
+    known_eligible_instruments = set()
+    weights = {} 
+    idm = 1.0 # Default IDM
+
+    # Main time-stepping loop
+    for idx, current_date in enumerate(trading_days_range):
+        if idx == 0: # First day, no previous trading day in our loop range to get price for sizing yet
+            # For the first day, P&L is effectively zero as positions are established.
+            # We can log initial state if needed but skip P&L calculation based on a "previous" day within this range.
+            # Positions will be determined based on data *prior* to trading_days_range[0] if available.
+            # This part needs careful handling to ensure initial positions are set correctly.
+            # For now, let's assume P&L starts accumulating from the second day of trading_days_range.
+            # The sizing for the first day *will* use data from the day before trading_days_range[0].
+
+            # Log initial equity state
+            record = {'date': current_date, 'total_pnl': 0.0, 'portfolio_return': 0.0, 
+                      'equity_sod': current_portfolio_equity, 'equity_eod': current_portfolio_equity}
+            for symbol_k in processed_instrument_data.keys(): record[f'{symbol_k}_contracts'] = 0.0 # Placeholder
+            portfolio_daily_records.append(record)
             continue
         
-        # Calculate blended volatility forecast
-        df_filtered['blended_vol'] = calculate_blended_volatility(
-            df_filtered['returns'], short_span=short_span, long_years=long_years
-        )
+        previous_trading_date = trading_days_range[idx-1]
+        capital_at_start_of_day = current_portfolio_equity # From previous day's EOD
+        daily_total_pnl = 0.0
+        current_day_positions = {}
+
+        effective_data_cutoff_date = previous_trading_date if idx > 0 else current_date - pd.tseries.offsets.BDay(1)
+
+        # Determine current period eligible instruments based on data up to cutoff
+        current_iteration_eligible_instruments = set()
+        for s, df_full in processed_instrument_data.items():
+            df_upto_cutoff = df_full[df_full.index <= effective_data_cutoff_date]
+            if not df_upto_cutoff.empty and len(df_upto_cutoff) > short_span:
+                current_iteration_eligible_instruments.add(s)
         
-        # Calculate position sizes
-        positions = []
-        for i in range(len(df_filtered)):
-            if i == 0:
-                positions.append(0)  # No position on first day
-            else:
-                prev_price = df_filtered['Last'].iloc[i-1]
-                prev_vol = df_filtered['blended_vol'].iloc[i-1]
-                
-                if np.isnan(prev_vol) or prev_vol <= 0:
-                    position = 0
-                else:
-                    position = calculate_portfolio_position_size(
-                        symbol, capital, weights[symbol], idm, 
-                        prev_price, prev_vol, multiplier, risk_target
-                    )
-                positions.append(position)
+        if idx == 0: # Always print initial state
+            print(f"Initial processed instruments count: {len(processed_instrument_data)}")
+            print(f"Initial eligible instruments for weighting (day 0): {len(current_iteration_eligible_instruments)}")
+
+
+        perform_reweight = False
+        if idx == 0:
+            perform_reweight = True
+            print(f"Performing initial re-weighting for date: {current_date.date()}")
+        elif len(current_iteration_eligible_instruments) > len(known_eligible_instruments):
+            newly_added = current_iteration_eligible_instruments - known_eligible_instruments
+            perform_reweight = True
+            print(f"Performing re-weighting for date: {current_date.date()} due to new eligible instruments: {newly_added}")
         
-        df_filtered['position'] = positions
-        df_filtered['position_lag'] = df_filtered['position'].shift(1)
-        df_filtered['multiplier'] = multiplier
-        df_filtered['weight'] = weights[symbol]
-        
-        # Calculate P&L for this instrument
-        df_filtered['instrument_pnl'] = (
-            df_filtered['position_lag'] * 
-            multiplier * 
-            df_filtered['returns'] * 
-            df_filtered['Last'].shift(1)
-        )
-        
-        processed_data[symbol] = df_filtered
-    
-    print(f"\nCombining portfolio...")
-    print(f"Successfully processed {len(processed_data)} instruments")
-    
-    # Create portfolio DataFrame with full date range
-    portfolio_df = pd.DataFrame(index=full_date_range)
-    portfolio_df['total_pnl'] = 0.0
-    portfolio_df['num_active_instruments'] = 0
-    
-    # Aggregate P&L across all instruments for each day
-    for symbol, df in processed_data.items():
-        # Reindex to match portfolio dates, forward fill for missing business days
-        symbol_data = df.reindex(full_date_range, method='ffill')
-        
-        # Only include P&L where we actually have data (not forward filled)
-        actual_dates = df.index.intersection(full_date_range)
-        
-        # Initialize columns if they don't exist
-        portfolio_df[f'{symbol}_position'] = 0.0
-        portfolio_df[f'{symbol}_pnl'] = 0.0
-        
-        # Add P&L only for dates where we have actual data
-        for date in actual_dates:
-            if date in symbol_data.index and not pd.isna(symbol_data.loc[date, 'instrument_pnl']):
-                portfolio_df.loc[date, 'total_pnl'] += symbol_data.loc[date, 'instrument_pnl']
-                portfolio_df.loc[date, f'{symbol}_pnl'] = symbol_data.loc[date, 'instrument_pnl']
-                portfolio_df.loc[date, f'{symbol}_position'] = symbol_data.loc[date, 'position_lag']
-                
-                if abs(symbol_data.loc[date, 'position_lag']) > 0.01:
-                    portfolio_df.loc[date, 'num_active_instruments'] += 1
-    
-    # Calculate portfolio returns
-    portfolio_df['strategy_returns'] = portfolio_df['total_pnl'] / capital
-    
-    # Remove rows with no activity (weekends, holidays)
-    portfolio_df = portfolio_df[portfolio_df.index.weekday < 5]  # Business days only
-    portfolio_df = portfolio_df.dropna(subset=['strategy_returns'])
-    
-    print(f"Final portfolio data: {len(portfolio_df)} observations")
-    print(f"Average active instruments: {portfolio_df['num_active_instruments'].mean():.1f}")
-    
-    # Calculate performance metrics
-    account_curve = build_account_curve(portfolio_df['strategy_returns'], capital)
-    performance = calculate_comprehensive_performance(account_curve, portfolio_df['strategy_returns'])
-    
-    # Add portfolio-specific metrics
-    performance['num_instruments'] = len(processed_data)
-    performance['idm'] = idm
-    performance['avg_active_instruments'] = portfolio_df['num_active_instruments'].mean()
-    performance['weight_method'] = weight_method
-    performance['backtest_start'] = backtest_start
-    performance['backtest_end'] = backtest_end
-    
-    # Calculate per-instrument statistics
-    instrument_stats = {}
-    for symbol in processed_data.keys():
-        pnl_col = f'{symbol}_pnl'
-        pos_col = f'{symbol}_position'
-        
-        if pnl_col in portfolio_df.columns:
-            # Get only non-zero P&L periods for this instrument
-            inst_pnl = portfolio_df[pnl_col][portfolio_df[pnl_col] != 0]
+        if perform_reweight:
+            known_eligible_instruments = current_iteration_eligible_instruments.copy()
             
-            if len(inst_pnl) > 10:  # Need minimum observations
-                inst_returns = inst_pnl / capital
-                inst_performance = calculate_comprehensive_performance(
-                    build_account_curve(inst_returns, capital), inst_returns
+            data_for_reweighting = {}
+            for s_eligible in known_eligible_instruments:
+                # Use the full historical data from processed_instrument_data up to the cutoff for this reweighting
+                df_historical_slice = processed_instrument_data[s_eligible][processed_instrument_data[s_eligible].index <= effective_data_cutoff_date]
+                if not df_historical_slice.empty: # Should be true due to eligibility check, but double check
+                     data_for_reweighting[s_eligible] = df_historical_slice
+            
+            if data_for_reweighting:
+                weights = calculate_instrument_weights(
+                    data_for_reweighting, 
+                    weight_method, 
+                    all_instruments_specs_df,
+                    common_hypothetical_SR, # Pass new param
+                    annual_turnover_T,      # Pass new param
+                    risk_target             # Pass risk_target
                 )
                 
+                num_weighted_instruments = sum(1 for w_val in weights.values() if w_val > 1e-6) # Count instruments with meaningful weight
+                idm = calculate_idm_from_count(num_weighted_instruments)
+                print(f"  New IDM: {idm:.2f} based on {num_weighted_instruments} instruments with weight > 0.")
+                # print(f"  Top 5 new weights: {sorted(weights.items(), key=lambda item: item[1], reverse=True)[:5]}") # Already printed in calculate_handcrafted_weights
+            else:
+                # This case should ideally not be hit if known_eligible_instruments is populated
+                # and processed_instrument_data is consistent.
+                print(f"Warning: No data available for reweighting on {current_date.date()} despite eligibility signal. Using previous weights (if any).")
+
+
+        if idx == 0: # First day, P&L is effectively zero as positions are established.
+            # Log initial equity state
+            record = {'date': current_date, 'total_pnl': 0.0, 'portfolio_return': 0.0, 
+                      'equity_sod': current_portfolio_equity, 'equity_eod': current_portfolio_equity}
+            for symbol_k in processed_instrument_data.keys(): record[f'{symbol_k}_contracts'] = 0.0 # Placeholder
+            portfolio_daily_records.append(record)
+            continue
+
+        for symbol, df_instrument in processed_instrument_data.items():
+            instrument_multiplier = all_instruments_specs_df[all_instruments_specs_df['Symbol'] == symbol]['Multiplier'].iloc[0]
+            instrument_weight = weights.get(symbol, 0.0)
+
+            if instrument_weight == 0.0:
+                current_day_positions[symbol] = 0.0
+                continue
+
+            # Get data for sizing (from previous_trading_date) and P&L (current_date)
+            try:
+                # Sizing based on previous day's close price and current day's vol forecast (made from prev day's data)
+                price_for_sizing = df_instrument.loc[previous_trading_date, 'Last']
+                vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast']
+                
+                # Data for P&L calculation for current_date
+                price_at_start_of_trading = df_instrument.loc[previous_trading_date, 'Last'] # Same as price_for_sizing
+                price_at_end_of_trading = df_instrument.loc[current_date, 'Last']
+                
+                if pd.isna(price_for_sizing) or pd.isna(vol_for_sizing) or pd.isna(price_at_start_of_trading) or pd.isna(price_at_end_of_trading):
+                    num_contracts = 0.0
+                    instrument_pnl_today = 0.0
+                else:
+                    vol_for_sizing = vol_for_sizing if vol_for_sizing > 0 else min_vol_floor
+                    num_contracts = calculate_portfolio_position_size(
+                        symbol=symbol, capital=capital_at_start_of_day, weight=instrument_weight, idm=idm,
+                        price=price_for_sizing, volatility=vol_for_sizing, multiplier=instrument_multiplier,
+                        risk_target=risk_target
+                    )
+                    instrument_pnl_today = num_contracts * instrument_multiplier * (price_at_end_of_trading - price_at_start_of_trading)
+            
+            except KeyError: # Date not found for this instrument
+                num_contracts = 0.0
+                instrument_pnl_today = 0.0
+            
+            current_day_positions[symbol] = num_contracts
+            daily_total_pnl += instrument_pnl_today
+
+        portfolio_daily_percentage_return = daily_total_pnl / capital_at_start_of_day if capital_at_start_of_day > 0 else 0.0
+        current_portfolio_equity = capital_at_start_of_day * (1 + portfolio_daily_percentage_return)
+
+        record = {'date': current_date, 'total_pnl': daily_total_pnl, 
+                  'portfolio_return': portfolio_daily_percentage_return, 
+                  'equity_sod': capital_at_start_of_day, 
+                  'equity_eod': current_portfolio_equity}
+        for symbol_k, contracts_k in current_day_positions.items(): record[f'{symbol_k}_contracts'] = contracts_k
+        portfolio_daily_records.append(record)
+
+    # Post-loop processing
+    if not portfolio_daily_records:
+        raise ValueError("No daily records generated during backtest. Check date ranges and data availability.")
+        
+    portfolio_df = pd.DataFrame(portfolio_daily_records)
+    portfolio_df.set_index('date', inplace=True)
+    
+    print(f"Portfolio backtest loop completed. {len(portfolio_df)} daily records.")
+    if portfolio_df.empty or 'portfolio_return' not in portfolio_df.columns or portfolio_df['portfolio_return'].std() == 0 :
+        print("Warning: Portfolio returns are zero or constant. P&L might not be calculated as expected.")
+    
+    # Calculate performance metrics
+    # Ensure account_curve starts with initial capital on the day before the first return.
+    # If portfolio_df['portfolio_return'] starts from the first actual P&L day, build_account_curve will handle it.
+    account_curve = build_account_curve(portfolio_df['portfolio_return'], capital)
+    performance = calculate_comprehensive_performance(account_curve, portfolio_df['portfolio_return'])
+    
+    performance['num_instruments'] = len(processed_instrument_data)
+    performance['idm'] = idm
+    # performance['avg_active_instruments'] = portfolio_df['num_active_instruments'].mean() # Need to compute this if desired
+    performance['weight_method'] = weight_method
+    performance['backtest_start'] = trading_days_range.min()
+    performance['backtest_end'] = trading_days_range.max()
+
+    instrument_stats = {} # Simplified for now, can be expanded
+    for symbol in processed_instrument_data.keys():
+        pnl_col = f'{symbol}_pnl' # This column is not directly in portfolio_df with this new structure
+                                  # Need to reconstruct if detailed per-instrument P&L series is needed
+        pos_col = f'{symbol}_contracts'
+        if pos_col in portfolio_df.columns:
                 instrument_stats[symbol] = {
-                    'total_return': inst_performance['total_return'],
-                    'sharpe_ratio': inst_performance['sharpe_ratio'],
-                    'volatility': inst_performance['annualized_volatility'],
-                    'max_drawdown': inst_performance['max_drawdown_pct'],
                     'avg_position': portfolio_df[pos_col][portfolio_df[pos_col] != 0].mean(),
-                    'weight': weights[symbol],
-                    'active_days': len(inst_pnl),
-                    'total_pnl': inst_pnl.sum()
+                'weight': weights.get(symbol,0)
                 }
     
     return {
         'portfolio_data': portfolio_df,
-        'instrument_data': processed_data,
+        # 'instrument_data': processed_instrument_data, # This contains full DFs, maybe too large
         'performance': performance,
         'instrument_stats': instrument_stats,
         'weights': weights,
         'idm': idm,
         'config': {
-            'capital': capital,
-            'risk_target': risk_target,
-            'short_span': short_span,
-            'long_years': long_years,
-            'weight_method': weight_method,
-            'backtest_start': backtest_start,
-            'backtest_end': backtest_end
+            'capital': capital, 'risk_target': risk_target, 'short_span': short_span, 
+            'long_years': long_years, 'min_vol_floor': min_vol_floor, 
+            'weight_method': weight_method, 'backtest_start': trading_days_range.min(), 
+            'backtest_end': trading_days_range.max(),
+            'common_hypothetical_SR': common_hypothetical_SR, # Add to config
+            'annual_turnover_T': annual_turnover_T             # Add to config
         }
     }
 
@@ -540,21 +625,16 @@ def plot_strategy4_equity_curve(results, save_path='results/strategy4_equity_cur
         save_path (str): Path to save the plot.
     """
     try:
-        # Create results directory if it doesn't exist
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         
-        # Get portfolio data
         portfolio_df = results['portfolio_data']
         config = results['config']
         performance = results['performance']
         
-        # Build equity curve
-        equity_curve = build_account_curve(portfolio_df['strategy_returns'], config['capital'])
+        equity_curve = build_account_curve(portfolio_df['portfolio_return'], config['capital'])
         
-        # Create the plot
         plt.figure(figsize=(12, 8))
         
-        # Plot equity curve
         plt.subplot(2, 1, 1)
         plt.plot(equity_curve.index, equity_curve.values, 'b-', linewidth=1.5, label='Strategy 4: Multi-Instrument Portfolio')
         plt.title('Strategy 4: Multi-Instrument Portfolio Equity Curve', fontsize=14, fontweight='bold')
@@ -562,10 +642,8 @@ def plot_strategy4_equity_curve(results, save_path='results/strategy4_equity_cur
         plt.grid(True, alpha=0.3)
         plt.legend()
         
-        # Format y-axis for millions
         plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x/1e6:.1f}M'))
         
-        # Plot drawdown
         plt.subplot(2, 1, 2)
         drawdown_stats = calculate_maximum_drawdown(equity_curve)
         drawdown_series = drawdown_stats['drawdown_series'] * 100
@@ -579,29 +657,26 @@ def plot_strategy4_equity_curve(results, save_path='results/strategy4_equity_cur
         plt.grid(True, alpha=0.3)
         plt.legend()
         
-        # Format x-axis dates for both subplots
         for ax in plt.gcf().get_axes():
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
             ax.xaxis.set_major_locator(mdates.YearLocator(2))
             plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
         
-        # Add performance metrics as text
         textstr = f'''Performance Summary:
 Total Return: {performance['total_return']:.1%}
 Annualized Return: {performance['annualized_return']:.1%}
 Volatility: {performance['annualized_volatility']:.1%}
 Sharpe Ratio: {performance['sharpe_ratio']:.3f}
 Max Drawdown: {performance['max_drawdown_pct']:.1f}%
-Instruments: {performance['num_instruments']}
+Instruments: {performance.get('num_instruments', 'N/A')} 
 Period: {config['backtest_start'].strftime('%Y-%m-%d')} to {config['backtest_end'].strftime('%Y-%m-%d')}'''
         
         plt.figtext(0.02, 0.02, textstr, fontsize=9, verticalalignment='bottom',
                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
         
         plt.tight_layout()
-        plt.subplots_adjust(bottom=0.25)  # Make room for performance text
+        plt.subplots_adjust(bottom=0.25)
         
-        # Save the plot
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.show()
         
@@ -622,56 +697,69 @@ def analyze_portfolio_results(results):
     performance = results['performance']
     instrument_stats = results['instrument_stats']
     config = results['config']
+    portfolio_df = results['portfolio_data'] # Added for avg_active_instruments
     
     print("\n" + "=" * 60)
     print("PORTFOLIO PERFORMANCE ANALYSIS")
     print("=" * 60)
     
-    # Overall performance
     print(f"\n--- Overall Portfolio Performance ---")
     print(f"Total Return: {performance['total_return']:.2%}")
     print(f"Annualized Return: {performance['annualized_return']:.2%}")
     print(f"Annualized Volatility: {performance['annualized_volatility']:.2%}")
     print(f"Sharpe Ratio: {performance['sharpe_ratio']:.3f}")
     print(f"Max Drawdown: {performance['max_drawdown_pct']:.1f}%")
-    print(f"Skewness: {performance['skewness']:.3f}")
+    print(f"Skewness: {performance.get('skewness', float('nan')):.3f}") # Use .get for safety
     if 'kurtosis' in performance:
         print(f"Kurtosis: {performance['kurtosis']:.3f}")
     
-    # Portfolio characteristics
     print(f"\n--- Portfolio Characteristics ---")
-    print(f"Number of Instruments: {performance['num_instruments']}")
-    print(f"IDM: {performance['idm']:.2f}")
-    print(f"Average Active Instruments: {performance['avg_active_instruments']:.1f}")
+    print(f"Number of Instruments: {performance.get('num_instruments', 'N/A')}")
+    print(f"IDM: {performance.get('idm', float('nan')):.2f}")
+    
+    # Calculate avg_active_instruments if relevant columns exist
+    active_cols = [col for col in portfolio_df.columns if col.endswith('_contracts')]
+    if active_cols:
+        portfolio_df['num_active_instruments'] = portfolio_df[active_cols].gt(0.001).sum(axis=1)
+        avg_active = portfolio_df['num_active_instruments'].mean()
+        print(f"Average Active Instruments: {avg_active:.1f}")
+    else:
+        print(f"Average Active Instruments: N/A (no contract columns found for calculation)")
+
     print(f"Capital: ${config['capital']:,.0f}")
     print(f"Risk Target: {config['risk_target']:.1%}")
     print(f"Backtest Period: {config['backtest_start'].date()} to {config['backtest_end'].date()}")
     
     # Top performing instruments
-    print(f"\n--- Top 10 Performing Instruments (by Total P&L) ---")
-    sorted_instruments = sorted(
-        instrument_stats.items(), 
-        key=lambda x: x[1]['total_pnl'], 
-        reverse=True
-    )
+    print(f"\n--- Top 10 Weighted Instruments (with Avg Position if available) ---")
+    sorted_weights = sorted(results['weights'].items(), key=lambda x: x[1], reverse=True)
+
+    print(f"{'Symbol':<8} {'Weight':<8} {'AvgPos':<10}")
+    print("-" * 30)
+    for symbol, weight in sorted_weights[:10]:
+        avg_pos_str = "N/A"
+        if symbol in instrument_stats and 'avg_position' in instrument_stats[symbol]:
+            avg_pos = instrument_stats[symbol]['avg_position']
+            avg_pos_str = f"{avg_pos:.2f}" if pd.notna(avg_pos) else "N/A"
+        print(f"{symbol:<8} {weight:<8.3f} {avg_pos_str:<10}")
+
+    # Bottom 5 Weighted Instruments (changed from P&L based)
+    print(f"\n--- Bottom 5 Weighted Instruments ---")
+    # sorted_instruments was already sorted by weight for Top 10, so take from the end for smallest weights
+    # Ensure we have at least 5 instruments to show, or adjust if fewer
+    num_to_show_bottom = min(5, len(sorted_weights))
+    bottom_instruments = sorted_weights[-num_to_show_bottom:]
     
-    print(f"{'Symbol':<8} {'Weight':<8} {'Return':<10} {'Sharpe':<8} {'Vol':<8} {'MaxDD':<8} {'TotalPnL':<12} {'Days':<6}")
-    print("-" * 85)
-    
-    for symbol, stats in sorted_instruments[:10]:
-        print(f"{symbol:<8} {stats['weight']:<8.3f} {stats['total_return']:<10.2%} "
-              f"{stats['sharpe_ratio']:<8.3f} {stats['volatility']:<8.2%} "
-              f"{stats['max_drawdown']:<8.1f}% ${stats['total_pnl']:<11,.0f} {stats['active_days']:<6}")
-    
-    # Worst performing instruments
-    print(f"\n--- Bottom 5 Performing Instruments (by Total P&L) ---")
-    print(f"{'Symbol':<8} {'Weight':<8} {'Return':<10} {'Sharpe':<8} {'Vol':<8} {'MaxDD':<8} {'TotalPnL':<12} {'Days':<6}")
-    print("-" * 85)
-    
-    for symbol, stats in sorted_instruments[-5:]:
-        print(f"{symbol:<8} {stats['weight']:<8.3f} {stats['total_return']:<10.2%} "
-              f"{stats['sharpe_ratio']:<8.3f} {stats['volatility']:<8.2%} "
-              f"{stats['max_drawdown']:<8.1f}% ${stats['total_pnl']:<11,.0f} {stats['active_days']:<6}")
+    print(f"{'Symbol':<8} {'Weight':<8} {'AvgPos':<10}")
+    print("-" * 30)
+
+    # Print in ascending order of weight for "bottom"
+    for symbol, weight in reversed(bottom_instruments): # reversed to show smallest first
+        avg_pos_str = "N/A"
+        if symbol in instrument_stats and 'avg_position' in instrument_stats[symbol]:
+            avg_pos = instrument_stats[symbol]['avg_position']
+            avg_pos_str = f"{avg_pos:.2f}" if pd.notna(avg_pos) else "N/A"
+        print(f"{symbol:<8} {weight:<8.3f} {avg_pos_str:<10}")
 
 #####   UNIT TESTS   #####
 
@@ -819,7 +907,9 @@ def compare_weighting_methods():
                 data_dir='Data',
                 capital=50000000,
                 risk_target=0.2,
-                weight_method=method
+                weight_method=method,
+                common_hypothetical_SR=0.3, # Add example value
+                annual_turnover_T=7.0       # Add example value
             )
             results_by_method[method] = results
             
@@ -883,78 +973,86 @@ def main():
         return
     
     try:
-        # Compare weighting methods
-        results_by_method = compare_weighting_methods()
-        
-        # Use handcrafted results for detailed analysis
-        if 'handcrafted' in results_by_method and results_by_method['handcrafted']:
-            results = results_by_method['handcrafted']
-            
+        # results_by_method = compare_weighting_methods() # This also calls backtest_multi_instrument_strategy
+        # For a single run with handcrafted, call directly:
+        print(f"\n" + "=" * 60)
+        print("RUNNING HANDCRAFTED STRATEGY (DEFAULT)")
+        print("=" * 60)
+        results = backtest_multi_instrument_strategy(
+            data_dir='Data',
+            capital=50000000, # Example capital
+            risk_target=0.2,
+            short_span=32, # Default from Chapter 3
+            long_years=10, # Default from Chapter 3
+            min_vol_floor=0.05, # Consistent with Chapter 3
+            weight_method='handcrafted', # or 'equal'
+            common_hypothetical_SR=0.3, # Example: Pass new SR parameters
+            annual_turnover_T=7.0,      # Example: Pass new SR parameters
+            # start_date='YYYY-MM-DD', # Optional
+            # end_date='YYYY-MM-DD'   # Optional
+        )
+
+        if results:
             print(f"\n" + "=" * 60)
             print("DETAILED HANDCRAFTED STRATEGY ANALYSIS")
             print("=" * 60)
-            
-            # Analyze results
             analyze_portfolio_results(results)
-            
-            # Plot equity curve
             plot_strategy4_equity_curve(results)
+        else:
+            print("Handcrafted strategy backtest did not produce results.")
         
-        # Compare with single instrument strategy (Chapter 3)
-        print(f"\n" + "=" * 60)
-        print("COMPARISON WITH SINGLE INSTRUMENT STRATEGY")
+        # ... (Comparison with MES single instrument strategy from Chapter 3, needs careful date alignment) ...
+        # This part requires results to be non-None from the handcrafted run
+        if results and results['config']:
+            print(f"\n" + "=" * 60)
+        print("COMPARISON WITH SINGLE INSTRUMENT STRATEGY (MES from Chapter 3)")
         print("=" * 60)
-        
         try:
-            # Run MES-only strategy for comparison using same date range
-            backtest_start = results['config']['backtest_start']
-            backtest_end = results['config']['backtest_end']
+            backtest_start_ch4 = results['config']['backtest_start']
+            backtest_end_ch4 = results['config']['backtest_end']
+
+            # Create a temporary filtered MES data file for Chapter 3 backtest
+            mes_full_df = pd.read_csv('Data/mes_daily_data.csv', parse_dates=['Time'])
+            mes_full_df.set_index('Time', inplace=True)
+            # Filter MES data to match the chapter 4 backtest period EXACTLY
+            mes_filtered_for_comp = mes_full_df[(mes_full_df.index >= backtest_start_ch4) & (mes_full_df.index <= backtest_end_ch4)]
             
-            # Load MES data for the same period
-            mes_df = pd.read_csv('Data/mes_daily_data.csv', parse_dates=['Time'])
-            mes_df.set_index('Time', inplace=True)
-            mes_df = mes_df[(mes_df.index >= backtest_start) & (mes_df.index <= backtest_end)]
-            
-            # Save temporary file for comparison
-            mes_df.to_csv('Data/mes_temp_comparison.csv')
-            
-            mes_results = backtest_variable_risk_strategy(
-                'Data/mes_temp_comparison.csv', 
-                capital=50000000, 
-                risk_target=0.2
-            )
-            
-            # Clean up temp file
-            os.remove('Data/mes_temp_comparison.csv')
-            
-            mes_perf = mes_results['performance']
-            multi_perf = results['performance']
-            
-            print(f"\nPerformance Comparison (Same Time Period):")
-            print(f"{'Metric':<25} {'MES Only':<12} {'Multi-Inst':<12} {'Difference':<12}")
-            print("-" * 65)
-            print(f"{'Total Return':<25} {mes_perf['total_return']:<12.2%} {multi_perf['total_return']:<12.2%} "
-                  f"{multi_perf['total_return'] - mes_perf['total_return']:<12.2%}")
-            print(f"{'Annualized Return':<25} {mes_perf['annualized_return']:<12.2%} {multi_perf['annualized_return']:<12.2%} "
-                  f"{multi_perf['annualized_return'] - mes_perf['annualized_return']:<12.2%}")
-            print(f"{'Volatility':<25} {mes_perf['annualized_volatility']:<12.2%} {multi_perf['annualized_volatility']:<12.2%} "
-                  f"{multi_perf['annualized_volatility'] - mes_perf['annualized_volatility']:<12.2%}")
-            print(f"{'Sharpe Ratio':<25} {mes_perf['sharpe_ratio']:<12.3f} {multi_perf['sharpe_ratio']:<12.3f} "
-                  f"{multi_perf['sharpe_ratio'] - mes_perf['sharpe_ratio']:<12.3f}")
-            print(f"{'Max Drawdown':<25} {mes_perf['max_drawdown_pct']:<12.1f}% {multi_perf['max_drawdown_pct']:<12.1f}% "
-                  f"{multi_perf['max_drawdown_pct'] - mes_perf['max_drawdown_pct']:<12.1f}%")
-            
+            if mes_filtered_for_comp.empty:
+                print("MES data for comparison period is empty. Skipping comparison.")
+            else:
+                temp_mes_path = 'Data/mes_temp_comparison_ch4.csv'
+                mes_filtered_for_comp.to_csv(temp_mes_path)
+
+                # Run Chapter 3 strategy with the same capital and date range
+                ch3_results_for_comp = backtest_variable_risk_strategy(
+                    temp_mes_path, 
+                    initial_capital=results['config']['capital'], 
+                    risk_target=results['config']['risk_target'],
+                    short_span=results['config']['short_span'],
+                    long_years=results['config']['long_years'],
+                    min_vol_floor=results['config']['min_vol_floor']
+                )
+                os.remove(temp_mes_path)
+
+                mes_perf_comp = ch3_results_for_comp['performance']
+                multi_perf_comp = results['performance']
+                # ... (print comparison table as before) ...
+                print(f"\nPerformance Comparison (Same Time Period: {backtest_start_ch4.date()} to {backtest_end_ch4.date()}):")
+                print(f"{'Metric':<25} {'MES Only (Ch3)':<15} {'Multi-Inst (Ch4)':<18} {'Difference':<12}")
+                print("-" * 75)
+                print(f"{'Total Return':<25} {mes_perf_comp['total_return']:.2%} {multi_perf_comp['total_return']:.2%} {multi_perf_comp['total_return'] - mes_perf_comp['total_return']:.2%}")
+                print(f"{'Annualized Return':<25} {mes_perf_comp['annualized_return']:.2%} {multi_perf_comp['annualized_return']:.2%} {multi_perf_comp['annualized_return'] - mes_perf_comp['annualized_return']:.2%}")
+                print(f"{'Volatility':<25} {mes_perf_comp['annualized_volatility']:.2%} {multi_perf_comp['annualized_volatility']:.2%} {multi_perf_comp['annualized_volatility'] - mes_perf_comp['annualized_volatility']:.2%}")
+                print(f"{'Sharpe Ratio':<25} {mes_perf_comp['sharpe_ratio']:.3f} {multi_perf_comp['sharpe_ratio']:.3f} {multi_perf_comp['sharpe_ratio'] - mes_perf_comp['sharpe_ratio']:.3f}")
+                print(f"{'Max Drawdown':<25} {mes_perf_comp['max_drawdown_pct']:.1f}% {multi_perf_comp['max_drawdown_pct']:.1f}% {multi_perf_comp['max_drawdown_pct'] - mes_perf_comp['max_drawdown_pct']:.1f}%")
         except Exception as e:
-            print(f"Could not run comparison with MES: {e}")
-        
-        print(f"\nStrategy 4 backtest completed successfully!")
-        return results
-        
+            print(f"Could not run comparison with MES (Chapter 3 based): {e}")
+            # import traceback; traceback.print_exc()
     except Exception as e:
-        print(f"Error in Strategy 4 backtest: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+        print(f"Error in main: {e}")
+        import traceback; traceback.print_exc()
+    print(f"\nStrategy 4 processing completed!")
+    return results # Return results from the direct handcrafted run
 
 if __name__ == "__main__":
     main()
