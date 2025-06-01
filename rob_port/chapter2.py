@@ -530,6 +530,9 @@ def main():
             
         except Exception as e:
             print(f"{symbol}: Error - {e}")
+    
+    # Plot Chapter 2 risk scaling demonstration
+    plot_chapter2_risk_scaling_demo(capital)
 
 if __name__ == "__main__":
     main()

@@ -2,6 +2,9 @@ from chapter2 import *
 from chapter1 import *
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import os
 
 #####   VARIABLE VOLATILITY FORECASTING   #####
 
@@ -380,6 +383,103 @@ def backtest_variable_risk_strategy(csv_path, capital, risk_target=0.2,
         'final_position': df['position'].iloc[-1]
     }
 
+def plot_chapter3_variable_risk_results(results, save_path='results/chapter3_variable_risk.png'):
+    """
+    Plot Chapter 3 variable risk strategy results including volatility and position size evolution.
+    
+    Parameters:
+        results (dict): Results from backtest_variable_risk_strategy.
+        save_path (str): Path to save the plot.
+    """
+    try:
+        # Create results directory if it doesn't exist
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        df = results['data']
+        performance = results['performance']
+        
+        # Build equity curve
+        equity_curve = build_account_curve(df['strategy_returns'], 50000000)
+        
+        # Create the plot
+        plt.figure(figsize=(15, 12))
+        
+        # Plot 1: Equity curve
+        plt.subplot(4, 1, 1)
+        plt.plot(equity_curve.index, equity_curve.values/1e6, 'b-', linewidth=1.5, label='Variable Risk Strategy')
+        plt.title('Chapter 3: Variable Risk Scaling Strategy', fontsize=14, fontweight='bold')
+        plt.ylabel('Portfolio Value ($M)', fontsize=12)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        # Plot 2: Volatility evolution
+        plt.subplot(4, 1, 2)
+        plt.plot(df.index, df['blended_vol'] * 100, 'r-', linewidth=1, label='Blended Volatility Forecast')
+        plt.ylabel('Volatility (%)', fontsize=12)
+        plt.title('Volatility Forecast Evolution', fontsize=12, fontweight='bold')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        # Plot 3: Position size evolution
+        plt.subplot(4, 1, 3)
+        plt.plot(df.index, df['position'], 'g-', linewidth=1, label='Position Size (Contracts)')
+        plt.plot(df.index, df['position_discrete'], 'g--', linewidth=1, alpha=0.7, label='Discrete Position')
+        plt.ylabel('Contracts', fontsize=12)
+        plt.title('Position Size Evolution', fontsize=12, fontweight='bold')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        # Plot 4: Drawdown
+        plt.subplot(4, 1, 4)
+        drawdown_stats = calculate_maximum_drawdown(equity_curve)
+        drawdown_series = drawdown_stats['drawdown_series'] * 100
+        
+        plt.fill_between(drawdown_series.index, drawdown_series.values, 0, 
+                        color='red', alpha=0.3, label='Drawdown')
+        plt.plot(drawdown_series.index, drawdown_series.values, 'r-', linewidth=1)
+        plt.ylabel('Drawdown (%)', fontsize=12)
+        plt.xlabel('Date', fontsize=12)
+        plt.title('Drawdown', fontsize=12, fontweight='bold')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        # Format x-axis dates for all subplots
+        for ax in plt.gcf().get_axes():
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+            ax.xaxis.set_major_locator(mdates.YearLocator(2))
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+        
+        # Add performance metrics as text
+        start_date = df.index[0].strftime('%Y-%m-%d')
+        end_date = df.index[-1].strftime('%Y-%m-%d')
+        
+        textstr = f'''Performance Summary:
+Total Return: {performance['total_return']:.1%}
+Annualized Return: {performance['annualized_return']:.1%}
+Volatility: {performance['annualized_volatility']:.1%}
+Sharpe Ratio: {performance['sharpe_ratio']:.3f}
+Max Drawdown: {performance['max_drawdown_pct']:.1f}%
+Avg Position: {performance['avg_position']:.1f} contracts
+Avg Volatility: {performance['avg_volatility']:.1%}
+Period: {start_date} to {end_date}'''
+        
+        plt.figtext(0.02, 0.02, textstr, fontsize=9, verticalalignment='bottom',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.subplots_adjust(bottom=0.25)  # Make room for performance text
+        
+        # Save the plot
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        print(f"\n✅ Chapter 3 variable risk results saved to: {save_path}")
+        
+    except Exception as e:
+        print(f"Error plotting Chapter 3 results: {e}")
+        import traceback
+        traceback.print_exc()
+
 def main():
     """
     Test Chapter 3 variable risk scaling implementation.
@@ -487,6 +587,9 @@ def main():
         fixed_position = calculate_variable_position_size(50000000, 5, 4500, 0.16, 0.2)
         print(f"Fixed Risk Position: {fixed_position:.2f} contracts")
         print(f"Variable Risk Final Position: {results['final_position']:.2f} contracts")
+        
+        # Plot the results
+        plot_chapter3_variable_risk_results(results)
         
     except Exception as e:
         print(f"Error in backtest: {e}")
