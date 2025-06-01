@@ -1,5 +1,8 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import os
 
 # Variables
 multiplier = 5
@@ -383,6 +386,88 @@ def calculate_comprehensive_performance(equity_curve, returns, risk_free_rate=0.
         'years_traded': years
     }
 
+def plot_basic_equity_curve(df, initial_capital=50000000, save_path='results/chapter1_equity_curve.png'):
+    """
+    Plot basic buy-and-hold equity curve for Chapter 1.
+    
+    Parameters:
+        df (pd.DataFrame): DataFrame with 'daily_returns' column.
+        initial_capital (float): Starting capital.
+        save_path (str): Path to save the plot.
+    """
+    try:
+        # Create results directory if it doesn't exist
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        # Build equity curve
+        equity_curve = build_account_curve(df['daily_returns'], initial_capital)
+        
+        # Calculate performance metrics
+        performance = calculate_comprehensive_performance(equity_curve, df['daily_returns'])
+        
+        # Create the plot
+        plt.figure(figsize=(12, 8))
+        
+        # Plot equity curve
+        plt.subplot(2, 1, 1)
+        plt.plot(equity_curve.index, equity_curve.values, 'g-', linewidth=1.5, label='Buy & Hold: Single Instrument (MES)')
+        plt.title('Chapter 1: Basic Buy & Hold Strategy Equity Curve', fontsize=14, fontweight='bold')
+        plt.ylabel('Portfolio Value ($)', fontsize=12)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        # Format y-axis for millions
+        plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x/1e6:.1f}M'))
+        
+        # Plot drawdown
+        plt.subplot(2, 1, 2)
+        drawdown_stats = calculate_maximum_drawdown(equity_curve)
+        drawdown_series = drawdown_stats['drawdown_series'] * 100
+        
+        plt.fill_between(drawdown_series.index, drawdown_series.values, 0, 
+                        color='red', alpha=0.3, label='Drawdown')
+        plt.plot(drawdown_series.index, drawdown_series.values, 'r-', linewidth=1)
+        plt.title('Drawdown', fontsize=12, fontweight='bold')
+        plt.ylabel('Drawdown (%)', fontsize=12)
+        plt.xlabel('Date', fontsize=12)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        # Format x-axis dates for both subplots
+        for ax in plt.gcf().get_axes():
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+            ax.xaxis.set_major_locator(mdates.YearLocator(2))
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+        
+        # Add performance metrics as text
+        start_date = equity_curve.index[0].strftime('%Y-%m-%d')
+        end_date = equity_curve.index[-1].strftime('%Y-%m-%d')
+        
+        textstr = f'''Performance Summary:
+Total Return: {performance['total_return']:.1%}
+Annualized Return: {performance['annualized_return']:.1%}
+Volatility: {performance['annualized_volatility']:.1%}
+Sharpe Ratio: {performance['sharpe_ratio']:.3f}
+Max Drawdown: {performance['max_drawdown_pct']:.1f}%
+Period: {start_date} to {end_date}'''
+        
+        plt.figtext(0.02, 0.02, textstr, fontsize=9, verticalalignment='bottom',
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.subplots_adjust(bottom=0.20)  # Make room for performance text
+        
+        # Save the plot
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        print(f"\n✅ Chapter 1 equity curve saved to: {save_path}")
+        
+    except Exception as e:
+        print(f"Error plotting equity curve: {e}")
+        import traceback
+        traceback.print_exc()
+
 def main():
     """
     Main function that reads the CSV, calculates daily/annualized standard deviation,
@@ -489,6 +574,9 @@ def main():
         print(f"Weighted SR Cost: {portfolio_sr_cost:.6f}")
     except Exception as e:
         print(f"Error calculating portfolio SR cost: {e}")
+    
+    # Plot equity curve for Chapter 1
+    plot_basic_equity_curve(df, initial_capital)
 
 if __name__ == "__main__":
     main()

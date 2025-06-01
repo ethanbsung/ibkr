@@ -1,4 +1,7 @@
 from chapter1 import *
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import os
 
 def calculate_notional_exposure(multiplier, price, fx=1.0):
     """
@@ -258,6 +261,107 @@ def calculate_conservative_risk_target_half_kelly(expected_sharpe_ratio):
     - float: Conservative risk target.
     """
     return 0.5 * expected_sharpe_ratio
+
+def plot_chapter2_risk_scaling_demo(capital=50000000, save_path='results/chapter2_risk_scaling.png'):
+    """
+    Plot demonstration of risk scaling with different capital levels for Chapter 2.
+    
+    Parameters:
+        capital (float): Base capital amount.
+        save_path (str): Path to save the plot.
+    """
+    try:
+        # Create results directory if it doesn't exist
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        # Load MES data for demo
+        df = pd.read_csv('Data/mes_daily_data.csv', parse_dates=['Time'])
+        df.set_index('Time', inplace=True)
+        df['daily_returns'] = df['Last'].pct_change().dropna()
+        df = df.dropna()
+        
+        # Get MES specs
+        instruments_df = load_instrument_data()
+        mes_specs = get_instrument_specs('MES', instruments_df)
+        multiplier = mes_specs['multiplier']
+        
+        # Demo parameters
+        price = 4500
+        volatility = 0.16
+        risk_targets = [0.05, 0.10, 0.15, 0.20, 0.25]  # Different risk targets
+        
+        # Calculate position sizes and simulate returns
+        plt.figure(figsize=(15, 10))
+        
+        # Plot 1: Position sizes vs risk target
+        plt.subplot(2, 2, 1)
+        position_sizes = []
+        for risk_target in risk_targets:
+            pos_size = calculate_position_size(capital, multiplier, price, volatility, risk_target)
+            position_sizes.append(pos_size)
+        
+        plt.plot(risk_targets, position_sizes, 'bo-', linewidth=2, markersize=8)
+        plt.xlabel('Risk Target', fontsize=12)
+        plt.ylabel('Position Size (Contracts)', fontsize=12)
+        plt.title('Position Size vs Risk Target', fontsize=12, fontweight='bold')
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 2: Capital requirements for different contract counts
+        plt.subplot(2, 2, 2)
+        contract_counts = [1, 2, 4, 8, 16]
+        capital_requirements = []
+        for n_contracts in contract_counts:
+            min_cap = calculate_min_capital_n_contracts(n_contracts, multiplier, price, volatility, 0.20)
+            capital_requirements.append(min_cap / 1e6)  # Convert to millions
+        
+        plt.bar(contract_counts, capital_requirements, color='orange', alpha=0.7)
+        plt.xlabel('Number of Contracts', fontsize=12)
+        plt.ylabel('Minimum Capital Required ($M)', fontsize=12)
+        plt.title('Capital Requirements vs Contract Count', fontsize=12, fontweight='bold')
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 3: Equity curves for different risk targets
+        plt.subplot(2, 1, 2)
+        
+        for i, risk_target in enumerate([0.10, 0.15, 0.20, 0.25]):
+            pos_size = calculate_position_size(capital, multiplier, price, volatility, risk_target)
+            
+            # Simulate strategy returns
+            strategy_returns = df['daily_returns'] * pos_size * multiplier * df['Last'].shift(1) / capital
+            strategy_returns = strategy_returns.dropna()
+            
+            # Build equity curve
+            equity_curve = build_account_curve(strategy_returns, capital)
+            
+            # Plot with different colors
+            colors = ['blue', 'green', 'orange', 'red']
+            plt.plot(equity_curve.index, equity_curve.values/1e6, 
+                    color=colors[i], linewidth=1.5, 
+                    label=f'Risk Target: {risk_target:.0%} ({pos_size:.1f} contracts)')
+        
+        plt.xlabel('Date', fontsize=12)
+        plt.ylabel('Portfolio Value ($M)', fontsize=12)
+        plt.title('Chapter 2: Risk Scaling Impact on Equity Curves', fontsize=14, fontweight='bold')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Format x-axis dates
+        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+        plt.gca().xaxis.set_major_locator(mdates.YearLocator(2))
+        plt.setp(plt.gca().xaxis.get_majorticklabels(), rotation=45)
+        
+        plt.tight_layout()
+        
+        # Save the plot
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        print(f"\n✅ Chapter 2 risk scaling demo saved to: {save_path}")
+        
+    except Exception as e:
+        print(f"Error plotting Chapter 2 demo: {e}")
+        import traceback
+        traceback.print_exc()
 
 def get_recommended_risk_targets():
     """

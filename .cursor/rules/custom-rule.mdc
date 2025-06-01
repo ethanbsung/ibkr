@@ -1,0 +1,12 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+---
+description: Enforce exact implementation of strategies as described in the specified book.
+---
+- Follow the implementation in the book exactly. Do not make assumptions, simplifications, or optimizations unless they are explicitly stated in the book.
+- All strategies must be implemented line-by-line as described in the source material. Preserve all variable names, formulas, data handling logic, and structure unless the book specifies a variation.
+- Never add extra functionality, reword variable names, or 'modernize' the code unless the user requests it explicitly. Prioritize fidelity to the book above all else.
+- Do not explain or justify changes unless asked. Your default behavior should be to assume the user wants faithful reproduction, not creative interpretation.

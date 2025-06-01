@@ -1,504 +1,521 @@
 from chapter4 import *
-from instrument_selection import optimize_instrument_selection
+from chapter3 import *
+from chapter2 import *
+from chapter1 import *
 import numpy as np
 import pandas as pd
+import os
+from typing import Dict, List, Tuple
 import warnings
 warnings.filterwarnings('ignore')
 
-def calculate_simple_moving_average(prices, window):
+#####   STRATEGY 5: SLOW TREND FOLLOWING, LONG ONLY   #####
+
+def calculate_ewma_trend(prices: pd.Series, fast_span: int = 64, slow_span: int = 256) -> pd.Series:
     """
-    Calculate Simple Moving Average for trend identification.
+    Calculate EWMA trend filter (EWMAC) using fast and slow exponentially weighted moving averages.
     
-    Formula: Moving average (256) = sum(p_t-255 + ... + p_t) ÷ 256
+    From book:
+        EWMA(N = 64, λ = 0.031) for fast trend
+        EWMA(N = 256, λ = 0.0078) for slow trend
+        EWMAC(64,256) = EWMA(64) - EWMA(256)
+        Go long if EWMAC > 0, else remain flat
     
     Parameters:
         prices (pd.Series): Price series.
-        window (int): Moving average window (e.g., 64, 256).
+        fast_span (int): Fast EWMA span (default 64).
+        slow_span (int): Slow EWMA span (default 256).
     
     Returns:
-        pd.Series: Simple moving average series.
+        pd.Series: EWMAC trend signal (positive = uptrend, negative/zero = downtrend).
     """
-    return prices.rolling(window=window, min_periods=1).mean()
-
-def calculate_ewma_trend(prices, span):
-    """
-    Calculate Exponentially Weighted Moving Average for trend following.
+    # Calculate EWMA with specified spans
+    fast_ewma = prices.ewm(span=fast_span, adjust=False).mean()
+    slow_ewma = prices.ewm(span=slow_span, adjust=False).mean()
     
-    Formula: EWMA(λ) = λp_t + λ(1-λ)p_t-1 + λ(1-λ)²p_t-2 + ...
-    where λ = 2 / (span + 1)
+    # EWMAC = fast - slow
+    ewmac = fast_ewma - slow_ewma
+    
+    return ewmac
+
+def calculate_trend_signal(prices: pd.Series, fast_span: int = 64, slow_span: int = 256) -> pd.Series:
+    """
+    Calculate binary trend signal from EWMAC.
     
     Parameters:
         prices (pd.Series): Price series.
-        span (int): EWMA span (e.g., 64, 256).
+        fast_span (int): Fast EWMA span.
+        slow_span (int): Slow EWMA span.
     
     Returns:
-        pd.Series: EWMA series.
+        pd.Series: Binary signal (1 = long, 0 = flat).
     """
-    return prices.ewm(span=span, adjust=False).mean()
+    ewmac = calculate_ewma_trend(prices, fast_span, slow_span)
+    
+    # Go long if EWMAC > 0, else flat
+    trend_signal = (ewmac > 0).astype(int)
+    
+    return trend_signal
 
-def calculate_moving_average_crossover(prices, fast_window=64, slow_window=256, use_ewma=True):
+def calculate_strategy5_position_size(symbol, capital, weight, idm, price, volatility, 
+                                    multiplier, trend_signal, risk_target=0.2, fx_rate=1.0):
     """
-    Calculate moving average crossover signals for trend following.
-    Go long if fast MA > slow MA, otherwise reduce/close positions.
+    Calculate position size for Strategy 5 with trend filter.
+    
+    From book: "Every day we'd calculate our optimal position using the standard strategy 
+    four position sizing equations, accounting for current levels of volatility, price 
+    and exchange rates. However, if the trend was showing a downward movement, then 
+    we'd set our optimal position to zero."
+    
+    Formula:
+        N = (Capital × IDM × Weight × τ × TrendSignal) ÷ (Multiplier × Price × FX × σ%)
     
     Parameters:
-        prices (pd.Series): Price series (back-adjusted futures prices recommended).
-        fast_window (int): Fast moving average window (default 64).
-        slow_window (int): Slow moving average window (default 256).
-        use_ewma (bool): Use EWMA instead of SMA (recommended).
+        symbol (str): Instrument symbol.
+        capital (float): Total portfolio capital.
+        weight (float): Weight allocated to this instrument.
+        idm (float): Instrument Diversification Multiplier.
+        price (float): Current price.
+        volatility (float): Annualized volatility forecast.
+        multiplier (float): Contract multiplier.
+        trend_signal (float): Trend signal (1 = long, 0 = flat).
+        risk_target (float): Target risk fraction.
+        fx_rate (float): FX rate for currency conversion.
     
     Returns:
-        dict: Dictionary containing fast MA, slow MA, and trend signals.
+        float: Number of contracts for this instrument.
     """
-    if use_ewma:
-        fast_ma = calculate_ewma_trend(prices, fast_window)
-        slow_ma = calculate_ewma_trend(prices, slow_window)
-    else:
-        fast_ma = calculate_simple_moving_average(prices, fast_window)
-        slow_ma = calculate_simple_moving_average(prices, slow_window)
+    if np.isnan(volatility) or volatility <= 0 or np.isnan(trend_signal):
+        return 0
     
-    # Trend signal: 1 for uptrend (fast > slow), 0 for downtrend/flat
-    trend_signal = (fast_ma > slow_ma).astype(int)
-    trend_strength = (fast_ma / slow_ma - 1)  # Relative strength measure
+    # Calculate base position size (same as Strategy 4)
+    base_position = calculate_portfolio_position_size(
+        symbol, capital, weight, idm, price, volatility, 
+        multiplier, risk_target, fx_rate
+    )
     
-    return {
-        'fast_ma': fast_ma,
-        'slow_ma': slow_ma,
-        'trend_signal': trend_signal,
-        'trend_strength': trend_strength,
-        'uptrend': fast_ma > slow_ma
-    }
+    # Apply trend filter: multiply by 1 (long) or 0 (flat)
+    position_with_trend = base_position * trend_signal
+    
+    return position_with_trend
 
-def apply_trend_filter_to_weights(portfolio_weights, trend_signals_dict):
+def backtest_trend_following_strategy(data_dir='Data', capital=50000000, risk_target=0.2,
+                                    short_span=32, long_years=10, 
+                                    trend_fast_span=64, trend_slow_span=256,
+                                    weight_method='handcrafted',
+                                    start_date=None, end_date=None):
     """
-    Apply trend filters to portfolio weights.
+    Backtest Strategy 5: Trend following multi-instrument portfolio.
+    
+    Implementation follows book exactly: "Buy and hold a portfolio of one or more 
+    instruments when they have been in a long uptrend, each with positions scaled 
+    for a variable risk estimate."
+    
+    Uses dynamic position sizing as stated in book: "positions are continuously 
+    managed after opening to ensure their risk is correct."
     
     Parameters:
-        portfolio_weights (dict): Original portfolio weights by instrument.
-        trend_signals_dict (dict): Trend signals for each instrument.
-    
-    Returns:
-        dict: Trend-adjusted weights for each date.
-    """
-    trend_adjusted_weights = {}
-    
-    # Get all dates from trend signals
-    all_dates = set()
-    for signals in trend_signals_dict.values():
-        if 'trend_signal' in signals:
-            all_dates.update(signals['trend_signal'].index)
-    
-    all_dates = sorted(all_dates)
-    
-    # For each date, calculate trend-adjusted weights
-    for date in all_dates:
-        date_weights = {}
-        total_trend_weight = 0
-        
-        # First pass: calculate trend-adjusted weights
-        for symbol, base_weight in portfolio_weights.items():
-            if symbol in trend_signals_dict:
-                signals = trend_signals_dict[symbol]
-                if date in signals['trend_signal'].index:
-                    trend_mult = signals['trend_signal'].loc[date]
-                    trend_weight = base_weight * trend_mult
-                    date_weights[symbol] = trend_weight
-                    total_trend_weight += trend_weight
-                else:
-                    date_weights[symbol] = 0
-            else:
-                date_weights[symbol] = 0
-        
-        # Renormalize weights to sum to 1 (for instruments in uptrends)
-        if total_trend_weight > 0:
-            date_weights = {k: v / total_trend_weight for k, v in date_weights.items()}
-        
-        trend_adjusted_weights[date] = date_weights
-    
-    return trend_adjusted_weights
-
-def backtest_trend_following_portfolio(portfolio_weights, data, instruments_df, capital=50000000, 
-                                     risk_target=0.2, start_date='2000-01-01', end_date='2025-01-01',
-                                     fast_window=64, slow_window=256, use_ewma=True):
-    """
-    Backtest trend-following portfolio strategy.
-    
-    This implements Chapter 5's trend following approach:
-    1. Calculate trend signals for each instrument
-    2. Apply trend filters to position sizing
-    3. Go long only when in uptrend, flat when in downtrend
-    
-    Parameters:
-        portfolio_weights (dict): Portfolio weights by instrument.
-        data (dict): Individual instrument data.
-        instruments_df (pd.DataFrame): Instruments specifications.
+        data_dir (str): Directory containing price data files.
         capital (float): Initial capital.
         risk_target (float): Target risk fraction.
-        start_date (str): Start date for backtest.
-        end_date (str): End date for backtest.
-        fast_window (int): Fast moving average window.
-        slow_window (int): Slow moving average window.
-        use_ewma (bool): Use EWMA instead of SMA.
+        short_span (int): EWMA span for short-run volatility.
+        long_years (int): Years for long-run volatility average.
+        trend_fast_span (int): Fast EWMA span for trend filter.
+        trend_slow_span (int): Slow EWMA span for trend filter.
+        weight_method (str): Method for calculating instrument weights.
+        start_date (str): Start date for backtest (YYYY-MM-DD).
+        end_date (str): End date for backtest (YYYY-MM-DD).
     
     Returns:
-        dict: Backtest results with trend following metrics.
+        dict: Comprehensive backtest results.
     """
-    if not portfolio_weights:
-        return {'error': 'No portfolio weights provided'}
-
-    # Filter portfolio_weights to those available in data
-    active_portfolio_weights = {
-        s: w for s, w in portfolio_weights.items() if s in data
-    }
-    if not active_portfolio_weights:
-        return {'error': 'None of the instruments in portfolio_weights are available in loaded data'}
+    print("=" * 60)
+    print("STRATEGY 5: SLOW TREND FOLLOWING, LONG ONLY")
+    print("=" * 60)
     
-    total_active_weight = sum(active_portfolio_weights.values())
-    if total_active_weight <= 0:
-        return {'error': 'Total weight of active portfolio instruments is not positive.'}
-    normalized_weights = {s: w / total_active_weight for s, w in active_portfolio_weights.items()}
-
-    # Calculate trend signals for each instrument
-    trend_signals_dict = {}
+    # Load all instrument data
+    instrument_data = load_all_instrument_data(data_dir)
     
-    for symbol in normalized_weights.keys():
+    if len(instrument_data) == 0:
+        raise ValueError("No instrument data loaded successfully")
+    
+    # Load instrument specifications
+    instruments_df = load_instrument_data()
+    
+    print(f"\nPortfolio Configuration:")
+    print(f"  Instruments: {len(instrument_data)}")
+    print(f"  Capital: ${capital:,.0f}")
+    print(f"  Risk Target: {risk_target:.1%}")
+    print(f"  Weight Method: {weight_method}")
+    print(f"  Trend Filter: EWMA({trend_fast_span},{trend_slow_span})")
+    
+    # Calculate IDM
+    idm = calculate_idm_from_count(len(instrument_data))
+    print(f"  IDM: {idm:.2f}")
+    
+    # Calculate instrument weights
+    weights = calculate_instrument_weights(instrument_data, weight_method, instruments_df)
+    
+    # Determine the full date range for backtest
+    all_start_dates = [df.index.min() for df in instrument_data.values()]
+    all_end_dates = [df.index.max() for df in instrument_data.values()]
+    
+    # Use the earliest available data to latest available data
+    backtest_start = start_date if start_date else min(all_start_dates)
+    backtest_end = end_date if end_date else max(all_end_dates)
+    
+    if isinstance(backtest_start, str):
+        backtest_start = pd.to_datetime(backtest_start)
+    if isinstance(backtest_end, str):
+        backtest_end = pd.to_datetime(backtest_end)
+    
+    print(f"\nBacktest Period:")
+    print(f"  Start: {backtest_start.date()}")
+    print(f"  End: {backtest_end.date()}")
+    print(f"  Duration: {(backtest_end - backtest_start).days} days")
+    
+    # Create full date range for backtest
+    full_date_range = pd.date_range(backtest_start, backtest_end, freq='D')
+    full_date_range = full_date_range[full_date_range.weekday < 5]  # Business days only
+    
+    # Process each instrument and calculate volatility forecasts + trend signals
+    processed_data = {}
+    
+    for symbol, df in instrument_data.items():
+        # Get instrument specs
         try:
-            symbol_data = data[symbol]
-            if 'Last' in symbol_data.columns and len(symbol_data) > slow_window:
-                # Use back-adjusted prices for trend calculation
-                prices = symbol_data['Last'].copy()
-                
-                # Calculate trend signals
-                trend_signals = calculate_moving_average_crossover(
-                    prices, fast_window, slow_window, use_ewma
-                )
-                trend_signals_dict[symbol] = trend_signals
-        except Exception as e:
-            continue
-    
-    if not trend_signals_dict:
-        return {'error': 'No trend signals could be calculated'}
-
-    # Apply trend filters to get dynamic weights
-    trend_adjusted_weights = apply_trend_filter_to_weights(normalized_weights, trend_signals_dict)
-    
-    # Calculate correlation matrix for IDM calculation
-    returns_for_idm_list = []
-    for s_key in normalized_weights.keys():
-        if 'returns' in data[s_key] and isinstance(data[s_key]['returns'], pd.Series):
-            s_returns = data[s_key]['returns'].copy()
-            s_returns.name = s_key
-            returns_for_idm_list.append(s_returns)
-
-    correlation_matrix = pd.DataFrame()
-    base_idm = 1.0  # Default IDM
-
-    if returns_for_idm_list:
-        common_returns_matrix = pd.concat(returns_for_idm_list, axis=1, join='inner')
-        common_returns_matrix.dropna(inplace=True)
-
-        if not common_returns_matrix.empty and common_returns_matrix.shape[0] >= 2 and common_returns_matrix.shape[1] > 1:
-            try:
-                correlation_matrix_calculated = calculate_correlation_matrix(common_returns_matrix)
-                # Calculate base IDM using equal weights for all available instruments
-                equal_weights_series = pd.Series({symbol: 1.0/len(normalized_weights) for symbol in normalized_weights.keys()})
-                equal_weights_series = equal_weights_series.reindex(correlation_matrix_calculated.index).fillna(0)
-                equal_weights_series = equal_weights_series / equal_weights_series.sum()
-                base_idm_calculated = calculate_idm_from_correlations(equal_weights_series, correlation_matrix_calculated)
-                base_idm = base_idm_calculated
-                correlation_matrix = correlation_matrix_calculated
-            except:
-                if list(normalized_weights.keys()):
-                    symbols_for_dummy_corr = list(normalized_weights.keys())
-                    correlation_matrix = pd.DataFrame(np.eye(len(symbols_for_dummy_corr)), 
-                                                    index=symbols_for_dummy_corr, columns=symbols_for_dummy_corr)
-    
-    # Determine backtest date range from available data
-    returns_for_backtest = []
-    for s_key in normalized_weights.keys():
-        if 'returns' in data[s_key] and isinstance(data[s_key]['returns'], pd.Series):
-            s_returns = data[s_key]['returns'].copy()
-            s_returns.name = s_key
-            returns_for_backtest.append(s_returns)
-
-    if not returns_for_backtest:
-        return {'error': 'No returns series available for backtest.'}
-        
-    # Use outer join for maximum date coverage
-    returns_matrix = pd.concat(returns_for_backtest, axis=1, join='outer')
-    
-    # Filter by date range
-    param_start_dt = pd.to_datetime(start_date)
-    param_end_dt = pd.to_datetime(end_date)
-    returns_matrix = returns_matrix[(returns_matrix.index >= param_start_dt) & 
-                                   (returns_matrix.index <= param_end_dt)]
-    
-    if returns_matrix.empty:
-        return {'error': 'No data available after date filtering.'}
-
-    # Pre-calculate volatilities for position sizing
-    volatilities = {}
-    for symbol in normalized_weights.keys():
-        symbol_data_df = data[symbol]
-        symbol_returns = symbol_data_df['returns'] 
-        blended_vol_series = calculate_blended_volatility(symbol_returns).reindex(returns_matrix.index, method='ffill')
-        volatilities[symbol] = blended_vol_series
-    
-    # Initialize tracking variables
-    portfolio_returns = []
-    positions_data = {symbol: [] for symbol in normalized_weights.keys()}
-    trend_exposure_data = []  # Track percentage of portfolio in trends
-    trend_signals_data = {symbol: [] for symbol in normalized_weights.keys()}
-    idm_data = []  # Track IDM values over time
-    
-    for i, date_val in enumerate(returns_matrix.index):
-        if i == 0:
-            # Initialize first day
-            for symbol in normalized_weights.keys():
-                positions_data[symbol].append(0)
-                trend_signals_data[symbol].append(0)
-            portfolio_returns.append(0)
-            trend_exposure_data.append(0)
-            idm_data.append(base_idm)
+            specs = get_instrument_specs(symbol, instruments_df)
+            multiplier = specs['multiplier']
+        except:
             continue
         
-        prev_date = returns_matrix.index[i-1]
-        current_date = date_val
+        # Filter data to backtest period
+        df_filtered = df[(df.index >= backtest_start) & (df.index <= backtest_end)].copy()
         
-        # Get trend-adjusted weights for previous date (for position sizing)
-        if prev_date in trend_adjusted_weights:
-            current_weights = trend_adjusted_weights[prev_date]
-        else:
-            # Find closest available date
-            available_dates = [d for d in trend_adjusted_weights.keys() if d <= prev_date]
-            if available_dates:
-                closest_date = max(available_dates)
-                current_weights = trend_adjusted_weights[closest_date]
+        if len(df_filtered) < 300:  # Need more data for trend filter (256 + buffer)
+            continue
+        
+        # Calculate blended volatility forecast (same as Strategy 4)
+        df_filtered['blended_vol'] = calculate_blended_volatility(
+            df_filtered['returns'], short_span=short_span, long_years=long_years
+        )
+        
+        # Calculate trend signal using EWMAC
+        df_filtered['trend_signal'] = calculate_trend_signal(
+            df_filtered['Last'], trend_fast_span, trend_slow_span
+        )
+        
+        # Calculate position sizes with trend filter
+        positions = []
+        for i in range(len(df_filtered)):
+            if i == 0:
+                positions.append(0)  # No position on first day
             else:
-                current_weights = {symbol: 0 for symbol in normalized_weights.keys()}
-        
-        # Calculate dynamic IDM for instruments currently in uptrend
-        active_instruments = [symbol for symbol, weight in current_weights.items() if weight > 0]
-        if len(active_instruments) > 1 and not correlation_matrix.empty:
-            try:
-                # Get weights for active instruments only
-                active_weights = {symbol: current_weights[symbol] for symbol in active_instruments}
-                active_weights_series = pd.Series(active_weights)
+                prev_price = df_filtered['Last'].iloc[i-1]
+                prev_vol = df_filtered['blended_vol'].iloc[i-1]
+                prev_trend = df_filtered['trend_signal'].iloc[i-1]
                 
-                # Calculate IDM for active instruments
-                active_correlation_matrix = correlation_matrix.reindex(index=active_instruments, columns=active_instruments)
-                if active_correlation_matrix.shape[0] > 1:
-                    current_idm = calculate_idm_from_correlations(active_weights_series, active_correlation_matrix)
-                else:
-                    current_idm = 1.0
-            except:
-                current_idm = base_idm
-        else:
-            current_idm = 1.0  # Single instrument or no correlation data
-        
-        # Calculate total trend exposure
-        total_trend_exposure = sum(current_weights.values())
-        trend_exposure_data.append(total_trend_exposure)
-        idm_data.append(current_idm)
-        
-        # Calculate positions and P&L
-        daily_portfolio_return = 0
-        
-        for symbol in normalized_weights.keys():
-            try:
-                specs = get_instrument_specs(symbol, instruments_df)
-                multiplier = specs['multiplier']
-                symbol_data_df = data[symbol]
-                
-                # Get trend-adjusted weight
-                trend_weight = current_weights.get(symbol, 0)
-                
-                # Store trend signal
-                if symbol in trend_signals_dict and prev_date in trend_signals_dict[symbol]['trend_signal'].index:
-                    trend_signal = trend_signals_dict[symbol]['trend_signal'].loc[prev_date]
-                else:
-                    trend_signal = 0
-                trend_signals_data[symbol].append(trend_signal)
-                
-                # Calculate position based on trend-adjusted weight
-                if (prev_date in symbol_data_df.index and symbol_data_df.loc[prev_date, 'Last'] is not np.nan and 
-                    current_date in symbol_data_df.index and symbol_data_df.loc[current_date, 'returns'] is not np.nan and
-                    trend_weight > 0):
-                    
-                    prev_price = symbol_data_df.loc[prev_date, 'Last']
-                    current_return = symbol_data_df.loc[current_date, 'returns']
-                    
-                    # Get volatility for position sizing
-                    if prev_date in volatilities[symbol].index and not pd.isna(volatilities[symbol].loc[prev_date]):
-                        blended_vol = volatilities[symbol].loc[prev_date]
-                    else:
-                        blended_vol = 0.16  # fallback volatility
-                    
+                if (np.isnan(prev_vol) or prev_vol <= 0 or 
+                    np.isnan(prev_trend) or prev_trend == 0):
                     position = 0
-                    if blended_vol > 0 and not pd.isna(prev_price) and prev_price > 0:
-                        # Calculate position using trend-adjusted weight and dynamic IDM
-                        position = calculate_position_size_with_idm(
-                            capital, trend_weight, current_idm, multiplier, prev_price, 1.0, blended_vol, risk_target
-                        )
-                    
-                    positions_data[symbol].append(position)
-                    
-                    # Calculate P&L
-                    if not pd.isna(current_return) and position != 0:
-                        notional_exposure = position * multiplier * prev_price
-                        instrument_pnl = notional_exposure * current_return
-                        instrument_return_contrib = instrument_pnl / capital
-                        
-                        # Safeguard against extreme values
-                        if np.isinf(instrument_return_contrib) or np.isnan(instrument_return_contrib):
-                            raise ValueError(f"Overflow in trend following P&L calculation for {symbol}")
-                        
-                        daily_portfolio_return += instrument_return_contrib
                 else:
-                    positions_data[symbol].append(0)
-                    
-            except Exception as e:
-                positions_data[symbol].append(0)
-                trend_signals_data[symbol].append(0)
+                    position = calculate_strategy5_position_size(
+                        symbol, capital, weights[symbol], idm, 
+                        prev_price, prev_vol, multiplier, prev_trend, risk_target
+                    )
+                positions.append(position)
         
-        portfolio_returns.append(daily_portfolio_return)
+        df_filtered['position'] = positions
+        df_filtered['position_lag'] = df_filtered['position'].shift(1)
+        df_filtered['multiplier'] = multiplier
+        df_filtered['weight'] = weights[symbol]
+        
+        # Calculate P&L for this instrument
+        df_filtered['instrument_pnl'] = (
+            df_filtered['position_lag'] * 
+            multiplier * 
+            df_filtered['returns'] * 
+            df_filtered['Last'].shift(1)
+        )
+        
+        processed_data[symbol] = df_filtered
     
-    # Create results dataframe
-    results_df = pd.DataFrame(index=returns_matrix.index)
-    results_df['portfolio_returns'] = portfolio_returns
-    results_df['trend_exposure'] = trend_exposure_data
-    results_df['idm'] = idm_data
+    print(f"\nCombining portfolio...")
+    print(f"Successfully processed {len(processed_data)} instruments")
     
-    for symbol, pos_list in positions_data.items():
-        if len(pos_list) == len(results_df):
-            results_df[f'position_{symbol}'] = pos_list
-            
-    for symbol, signal_list in trend_signals_data.items():
-        if len(signal_list) == len(results_df):
-            results_df[f'trend_signal_{symbol}'] = signal_list
+    # Create portfolio DataFrame with full date range
+    portfolio_df = pd.DataFrame(index=full_date_range)
+    portfolio_df['total_pnl'] = 0.0
+    portfolio_df['num_active_instruments'] = 0
+    portfolio_df['num_long_signals'] = 0
     
-    # Remove initial zero return day if needed
-    if len(results_df) > 1 and results_df['portfolio_returns'].iloc[0] == 0:
-        results_df = results_df.iloc[1:]
+    # Aggregate P&L across all instruments for each day
+    for symbol, df in processed_data.items():
+        # Initialize columns if they don't exist
+        portfolio_df[f'{symbol}_position'] = 0.0
+        portfolio_df[f'{symbol}_pnl'] = 0.0
+        portfolio_df[f'{symbol}_trend'] = 0.0
+        
+        # Add P&L only for dates where we have actual data
+        actual_dates = df.index.intersection(full_date_range)
+        
+        for date in actual_dates:
+            if date in df.index and not pd.isna(df.loc[date, 'instrument_pnl']):
+                portfolio_df.loc[date, 'total_pnl'] += df.loc[date, 'instrument_pnl']
+                portfolio_df.loc[date, f'{symbol}_pnl'] = df.loc[date, 'instrument_pnl']
+                portfolio_df.loc[date, f'{symbol}_position'] = df.loc[date, 'position_lag']
+                portfolio_df.loc[date, f'{symbol}_trend'] = df.loc[date, 'trend_signal']
+                
+                if abs(df.loc[date, 'position_lag']) > 0.01:
+                    portfolio_df.loc[date, 'num_active_instruments'] += 1
+                
+                if df.loc[date, 'trend_signal'] > 0.5:
+                    portfolio_df.loc[date, 'num_long_signals'] += 1
     
-    if results_df.empty:
-        return {'error': 'No valid backtest data after processing'}
+    # Calculate portfolio returns
+    portfolio_df['strategy_returns'] = portfolio_df['total_pnl'] / capital
+    
+    # Remove rows with no activity (weekends, holidays)
+    portfolio_df = portfolio_df[portfolio_df.index.weekday < 5]  # Business days only
+    portfolio_df = portfolio_df.dropna(subset=['strategy_returns'])
+    
+    print(f"Final portfolio data: {len(portfolio_df)} observations")
+    print(f"Average active instruments: {portfolio_df['num_active_instruments'].mean():.1f}")
+    print(f"Average instruments with long signals: {portfolio_df['num_long_signals'].mean():.1f}")
     
     # Calculate performance metrics
-    equity_curve_series = build_account_curve(results_df['portfolio_returns'], capital)
+    account_curve = build_account_curve(portfolio_df['strategy_returns'], capital)
+    performance = calculate_comprehensive_performance(account_curve, portfolio_df['strategy_returns'])
     
-    performance = calculate_comprehensive_performance(
-        equity_curve_series,
-        results_df['portfolio_returns']
-    )
+    # Add strategy-specific metrics
+    performance['num_instruments'] = len(processed_data)
+    performance['idm'] = idm
+    performance['avg_active_instruments'] = portfolio_df['num_active_instruments'].mean()
+    performance['avg_long_signals'] = portfolio_df['num_long_signals'].mean()
+    performance['weight_method'] = weight_method
+    performance['backtest_start'] = backtest_start
+    performance['backtest_end'] = backtest_end
+    performance['trend_fast_span'] = trend_fast_span
+    performance['trend_slow_span'] = trend_slow_span
     
-    # Add trend-following specific metrics
-    performance['num_instruments'] = len(normalized_weights)
-    performance['avg_trend_exposure'] = results_df['trend_exposure'].mean()
-    performance['max_trend_exposure'] = results_df['trend_exposure'].max()
-    performance['min_trend_exposure'] = results_df['trend_exposure'].min()
-    performance['percent_time_in_trends'] = (results_df['trend_exposure'] > 0.1).mean()
-    performance['avg_idm'] = results_df['idm'].mean()
-    performance['max_idm'] = results_df['idm'].max()
-    performance['min_idm'] = results_df['idm'].min()
-    performance['fast_window'] = fast_window
-    performance['slow_window'] = slow_window
-    performance['use_ewma'] = use_ewma
-    
-    # Calculate trend signal statistics
-    trend_stats = {}
-    for symbol in normalized_weights.keys():
-        if f'trend_signal_{symbol}' in results_df.columns:
-            signals = results_df[f'trend_signal_{symbol}']
-            trend_stats[symbol] = {
-                'uptrend_pct': signals.mean(),
-                'signal_changes': signals.diff().abs().sum()
-            }
-    performance['trend_statistics'] = trend_stats
+    # Calculate per-instrument statistics
+    instrument_stats = {}
+    for symbol in processed_data.keys():
+        pnl_col = f'{symbol}_pnl'
+        pos_col = f'{symbol}_position'
+        trend_col = f'{symbol}_trend'
+        
+        if pnl_col in portfolio_df.columns:
+            # Get only non-zero P&L periods for this instrument
+            inst_pnl = portfolio_df[pnl_col][portfolio_df[pnl_col] != 0]
+            inst_trend = portfolio_df[trend_col][portfolio_df[pnl_col] != 0]
+            
+            if len(inst_pnl) > 10:  # Need minimum observations
+                inst_returns = inst_pnl / capital
+                inst_performance = calculate_comprehensive_performance(
+                    build_account_curve(inst_returns, capital), inst_returns
+                )
+                
+                instrument_stats[symbol] = {
+                    'total_return': inst_performance['total_return'],
+                    'sharpe_ratio': inst_performance['sharpe_ratio'],
+                    'volatility': inst_performance['annualized_volatility'],
+                    'max_drawdown': inst_performance['max_drawdown_pct'],
+                    'avg_position': portfolio_df[pos_col][portfolio_df[pos_col] != 0].mean(),
+                    'weight': weights[symbol],
+                    'active_days': len(inst_pnl),
+                    'total_pnl': inst_pnl.sum(),
+                    'avg_trend_signal': inst_trend.mean(),
+                    'percent_time_long': (inst_trend > 0.5).mean()
+                }
     
     return {
-        'data': results_df,
+        'portfolio_data': portfolio_df,
+        'instrument_data': processed_data,
         'performance': performance,
-        'portfolio_weights': normalized_weights,
-        'trend_signals': trend_signals_dict,
-        'strategy_type': 'trend_following'
+        'instrument_stats': instrument_stats,
+        'weights': weights,
+        'idm': idm,
+        'config': {
+            'capital': capital,
+            'risk_target': risk_target,
+            'short_span': short_span,
+            'long_years': long_years,
+            'trend_fast_span': trend_fast_span,
+            'trend_slow_span': trend_slow_span,
+            'weight_method': weight_method,
+            'backtest_start': backtest_start,
+            'backtest_end': backtest_end
+        }
     }
 
-def test_jumbo_portfolio_with_trend_following(capital=50000000, risk_target=0.2, 
-                                            max_instruments=50, fast_window=64, slow_window=256):
+def analyze_trend_following_results(results):
     """
-    Test trend following strategy on jumbo portfolio using optimized selection.
-    
-    This implements the book's Chapter 5 approach of applying trend filters to a 
-    diversified portfolio selection.
+    Analyze and display comprehensive trend following results.
     
     Parameters:
-        capital (float): Initial capital.
-        risk_target (float): Target risk fraction.
-        max_instruments (int): Maximum instruments for jumbo portfolio.
-        fast_window (int): Fast moving average window.
-        slow_window (int): Slow moving average window.
-    
-    Returns:
-        dict: Backtest results for trend following strategy.
+        results (dict): Results from backtest_trend_following_strategy.
     """
-    # Load data and create jumbo portfolio using optimized selection
-    instruments_df = load_instrument_data()
-    available_instruments = get_available_instruments(instruments_df)
+    performance = results['performance']
+    instrument_stats = results['instrument_stats']
+    config = results['config']
     
-    # Select suitable instruments
-    suitable_instruments = select_instruments_by_criteria(
-        instruments_df, available_instruments, capital, max_cost_sr=0.01
+    print("\n" + "=" * 60)
+    print("TREND FOLLOWING PERFORMANCE ANALYSIS")
+    print("=" * 60)
+    
+    # Overall performance
+    print(f"\n--- Overall Portfolio Performance ---")
+    print(f"Total Return: {performance['total_return']:.2%}")
+    print(f"Annualized Return: {performance['annualized_return']:.2%}")
+    print(f"Annualized Volatility: {performance['annualized_volatility']:.2%}")
+    print(f"Sharpe Ratio: {performance['sharpe_ratio']:.3f}")
+    print(f"Max Drawdown: {performance['max_drawdown_pct']:.1f}%")
+    print(f"Skewness: {performance['skewness']:.3f}")
+    
+    # Trend following characteristics
+    print(f"\n--- Trend Following Characteristics ---")
+    print(f"Average Active Instruments: {performance['avg_active_instruments']:.1f}")
+    print(f"Average Long Signals: {performance['avg_long_signals']:.1f}")
+    print(f"Percent Time in Market: {(performance['avg_long_signals'] / performance['num_instruments']):.1%}")
+    print(f"Trend Filter: EWMA({config['trend_fast_span']},{config['trend_slow_span']})")
+    
+    # Portfolio characteristics
+    print(f"\n--- Portfolio Characteristics ---")
+    print(f"Number of Instruments: {performance['num_instruments']}")
+    print(f"IDM: {performance['idm']:.2f}")
+    print(f"Capital: ${config['capital']:,.0f}")
+    print(f"Risk Target: {config['risk_target']:.1%}")
+    print(f"Backtest Period: {config['backtest_start'].date()} to {config['backtest_end'].date()}")
+    
+    # Top performing instruments
+    print(f"\n--- Top 10 Performing Instruments (by Total P&L) ---")
+    sorted_instruments = sorted(
+        instrument_stats.items(), 
+        key=lambda x: x[1]['total_pnl'], 
+        reverse=True
     )
     
-    if len(suitable_instruments) == 0:
-        return {'error': 'No suitable instruments found'}
+    print(f"{'Symbol':<8} {'Weight':<8} {'Return':<10} {'Sharpe':<8} {'%Long':<8} {'TotalPnL':<12} {'Days':<6}")
+    print("-" * 75)
     
-    # Load data
-    data = load_instrument_data_files(suitable_instruments)
+    for symbol, stats in sorted_instruments[:10]:
+        print(f"{symbol:<8} {stats['weight']:<8.3f} {stats['total_return']:<10.2%} "
+              f"{stats['sharpe_ratio']:<8.3f} {stats['percent_time_long']:<8.1%} "
+              f"${stats['total_pnl']:<11,.0f} {stats['active_days']:<6}")
+
+def compare_strategies():
+    """
+    Compare Strategy 4 (no trend filter) vs Strategy 5 (with trend filter).
+    """
+    print("\n" + "=" * 80)
+    print("STRATEGY COMPARISON: STRATEGY 4 vs STRATEGY 5")
+    print("=" * 80)
     
-    if len(data) == 0:
-        return {'error': 'No data loaded'}
-    
-    # Create optimized selection portfolio (Chapter 4 method)
-    optimized_weights = optimize_instrument_selection(
-        instruments_df, list(data.keys()), target_instruments=min(max_instruments, len(data))
-    )
-    
-    if not optimized_weights:
-        return {'error': 'Could not create optimized portfolio'}
-    
-    # Run trend following backtest
-    results = backtest_trend_following_portfolio(
-        optimized_weights, data, instruments_df, capital, risk_target,
-        fast_window=fast_window, slow_window=slow_window
-    )
-    
-    return results
+    try:
+        # Strategy 4 (no trend filter)
+        print("Running Strategy 4 (no trend filter)...")
+        strategy4_results = backtest_multi_instrument_strategy(
+            data_dir='Data',
+            capital=50000000,
+            risk_target=0.2,
+            weight_method='handcrafted'
+        )
+        
+        # Strategy 5 (with trend filter)
+        print("Running Strategy 5 (with trend filter)...")
+        strategy5_results = backtest_trend_following_strategy(
+            data_dir='Data',
+            capital=50000000,
+            risk_target=0.2,
+            weight_method='handcrafted'
+        )
+        
+        if strategy4_results and strategy5_results:
+            s4_perf = strategy4_results['performance']
+            s5_perf = strategy5_results['performance']
+            
+            print(f"\n{'Strategy':<15} {'Ann. Return':<12} {'Volatility':<12} {'Sharpe':<8} {'Max DD':<8} {'Time in Market':<15}")
+            print("-" * 85)
+            print(f"{'Strategy 4':<15} {s4_perf['annualized_return']:<12.2%} "
+                  f"{s4_perf['annualized_volatility']:<12.2%} "
+                  f"{s4_perf['sharpe_ratio']:<8.3f} "
+                  f"{s4_perf['max_drawdown_pct']:<8.1f}% "
+                  f"{'100.0%':<15}")
+            
+            time_in_market = (s5_perf['avg_long_signals'] / s5_perf['num_instruments']) * 100
+            print(f"{'Strategy 5':<15} {s5_perf['annualized_return']:<12.2%} "
+                  f"{s5_perf['annualized_volatility']:<12.2%} "
+                  f"{s5_perf['sharpe_ratio']:<8.3f} "
+                  f"{s5_perf['max_drawdown_pct']:<8.1f}% "
+                  f"{time_in_market:<15.1f}%")
+            
+            # Calculate differences
+            return_diff = s5_perf['annualized_return'] - s4_perf['annualized_return']
+            vol_diff = s5_perf['annualized_volatility'] - s4_perf['annualized_volatility']
+            sharpe_diff = s5_perf['sharpe_ratio'] - s4_perf['sharpe_ratio']
+            dd_diff = s5_perf['max_drawdown_pct'] - s4_perf['max_drawdown_pct']
+            
+            print(f"{'Difference':<15} {return_diff:<+12.2%} "
+                  f"{vol_diff:<+12.2%} "
+                  f"{sharpe_diff:<+8.3f} "
+                  f"{dd_diff:<+8.1f}% "
+                  f"{time_in_market - 100:<+15.1f}%")
+            
+            print(f"\n--- Strategy 5 Benefits ---")
+            if vol_diff < 0:
+                print(f"✓ Lower volatility by {abs(vol_diff):.2%}")
+            if dd_diff < 0:
+                print(f"✓ Better max drawdown by {abs(dd_diff):.1f}%")
+            if sharpe_diff > 0:
+                print(f"✓ Better Sharpe ratio by {sharpe_diff:.3f}")
+            if return_diff > 0:
+                print(f"✓ Higher returns by {return_diff:.2%}")
+            
+            print(f"✓ Reduces market exposure to {time_in_market:.1f}% of time")
+            
+            return {
+                'strategy4': strategy4_results,
+                'strategy5': strategy5_results
+            }
+        
+    except Exception as e:
+        print(f"Error in strategy comparison: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def main():
     """
-    Main function to run Chapter 5 trend following strategy.
+    Test Strategy 5 implementation.
     """
-    # Run the trend following strategy on jumbo portfolio
-    results = test_jumbo_portfolio_with_trend_following(
-        capital=50000000,
-        risk_target=0.2,
-        max_instruments=25,  # Manageable size for testing
-        fast_window=64,      # Book's recommended fast window
-        slow_window=256      # Book's recommended slow window
-    )
+    print("=" * 60)
+    print("TESTING STRATEGY 5: TREND FOLLOWING")
+    print("=" * 60)
     
-    if 'error' in results:
-        print(f"Error: {results['error']}")
-    else:
-        print("Chapter 5 trend following strategy completed successfully!")
-        print(f"Portfolio includes {results['performance']['num_instruments']} instruments")
-        print(f"Annual Return: {results['performance']['annualized_return']:.1%}")
-        print(f"Volatility: {results['performance']['annualized_volatility']:.1%}")
-        print(f"Sharpe Ratio: {results['performance']['sharpe_ratio']:.2f}")
-        print(f"Max Drawdown: {results['performance']['max_drawdown_pct']:.1f}%")
-        print(f"Average Trend Exposure: {results['performance']['avg_trend_exposure']:.1%}")
+    try:
+        # Run Strategy 5 backtest
+        results = backtest_trend_following_strategy(
+            data_dir='Data',
+            capital=50000000,
+            risk_target=0.2,
+            weight_method='handcrafted'
+        )
+        
+        # Analyze results
+        analyze_trend_following_results(results)
+        
+        # Compare strategies
+        comparison = compare_strategies()
+        
+        print(f"\nStrategy 5 backtest completed successfully!")
+        return results
+        
+    except Exception as e:
+        print(f"Error in Strategy 5 backtest: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 if __name__ == "__main__":
     main()

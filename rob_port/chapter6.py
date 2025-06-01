@@ -1,792 +1,518 @@
 from chapter5 import *
+from chapter4 import *
+from chapter3 import *
+from chapter2 import *
+from chapter1 import *
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+import os
+from typing import Dict, List, Tuple
 import warnings
 warnings.filterwarnings('ignore')
 
-#####   LONG/SHORT TREND FOLLOWING LOGIC   #####
+#####   STRATEGY 6: SLOW TREND FOLLOWING, LONG AND SHORT   #####
 
-def calculate_long_short_trend_signals(prices, fast_window=64, slow_window=256, use_ewma=True):
+def calculate_trend_signal_long_short(prices: pd.Series, fast_span: int = 64, slow_span: int = 256) -> pd.Series:
     """
-    Calculate long/short trend signals using EWMAC methodology from the book.
+    Calculate long/short trend signal from EWMAC.
     
-    From Chapter 6:
-        EWMAC(64,256) = EWMA(N=64) - EWMA(N=256)
-        Go long if: EWMAC(64,256) >= 0 (Book implies hold/go long if zero)
+    From book:
+        Go long if: EWMAC(64,256) > 0
         Go short if: EWMAC(64,256) < 0
-        
-    Key Change: Never go flat - always take either long or short position.
-                 Signal must be robustly +1 or -1.
     
     Parameters:
-        prices (pd.Series): Price series (back-adjusted futures prices recommended).
-        fast_window (int): Fast moving average window (default 64).
-        slow_window (int): Slow moving average window (default 256).
-        use_ewma (bool): Use EWMA instead of SMA (recommended in book).
+        prices (pd.Series): Price series.
+        fast_span (int): Fast EWMA span.
+        slow_span (int): Slow EWMA span.
     
     Returns:
-        dict: Dictionary containing trend signals and robust position multipliers (+1 or -1).
+        pd.Series: Trend signal (+1 = long, -1 = short).
     """
-    if use_ewma:
-        fast_ma = calculate_ewma_trend(prices, fast_window)
-        slow_ma = calculate_ewma_trend(prices, slow_window)
-    else:
-        fast_ma = calculate_simple_moving_average(prices, fast_window)
-        slow_ma = calculate_simple_moving_average(prices, slow_window)
+    ewmac = calculate_ewma_trend(prices, fast_span, slow_span)
     
-    # EWMAC signal
-    ewmac_signal = fast_ma - slow_ma
+    # Go long if EWMAC > 0, short if EWMAC < 0
+    trend_signal = np.where(ewmac > 0, 1, -1)
     
-    # Position multiplier: +1 for long, -1 for short. Robustly handle all cases.
-    # Default to long (1.0) if ewmac_signal is NaN (e.g., at the start of the series before MAs are defined)
-    position_multiplier = pd.Series(np.ones(len(ewmac_signal)), index=ewmac_signal.index)
-    position_multiplier[ewmac_signal < 0] = -1.0  # Short if EWMAC is negative
-    # ewmac_signal >= 0 remains 1.0 (long)
-    
-    # Ensure no NaNs remain from MA calculations, fill forward then backward, then default to 1.0
-    if position_multiplier.isnull().any():
-        position_multiplier = position_multiplier.ffill().bfill().fillna(1.0)
+    return pd.Series(trend_signal, index=prices.index)
 
-    # Trend strength for analysis
-    # Avoid division by zero if slow_ma is zero or NaN
-    trend_strength = ewmac_signal.copy()
-    valid_slow_ma = slow_ma.replace(0, np.nan).ffill().bfill()
-    trend_strength = ewmac_signal / valid_slow_ma
-    trend_strength.fillna(0, inplace=True) # Fill any remaining NaNs with 0 strength
-    
-    return {
-        'fast_ma': fast_ma,
-        'slow_ma': slow_ma,
-        'ewmac_signal': ewmac_signal,
-        'position_multiplier': position_multiplier, # Should always be +1 or -1
-        'trend_strength': trend_strength,
-        'uptrend': position_multiplier > 0, # Consistent with multiplier
-        'downtrend': position_multiplier < 0 # Consistent with multiplier
-    }
-
-def apply_long_short_trend_filter_to_weights(portfolio_weights, trend_signals_dict):
+def calculate_strategy6_position_size(symbol, capital, weight, idm, price, volatility, 
+                                    multiplier, trend_signal, risk_target=0.2, fx_rate=1.0):
     """
-    Determine the target position sign (+1 for long, -1 for short) for each instrument on each date.
-    The actual weighting (magnitude) is handled by the main backtest loop using normalized_weights.
+    Calculate position size for Strategy 6 with long/short trend filter.
+    
+    From book: "N_t = (Sign(trend_t) × Capital × IDM × Weight_t × τ) ÷ (Multiplier_t × Price_t × FX_t × σ_t)"
+    
+    Where if N > 0 we go long (in an uptrend), otherwise with N < 0 we would be short (in a downtrend).
     
     Parameters:
-        portfolio_weights (dict): Original portfolio weights by instrument (used to get the list of symbols).
-        trend_signals_dict (dict): Long/short trend signals for each instrument 
-                                 (must contain 'position_multiplier' which is always +1 or -1).
+        symbol (str): Instrument symbol.
+        capital (float): Total portfolio capital.
+        weight (float): Weight allocated to this instrument.
+        idm (float): Instrument Diversification Multiplier.
+        price (float): Current price.
+        volatility (float): Annualized volatility forecast.
+        multiplier (float): Contract multiplier.
+        trend_signal (float): Trend signal (+1 = long, -1 = short).
+        risk_target (float): Target risk fraction.
+        fx_rate (float): FX rate for currency conversion.
     
     Returns:
-        dict: Dictionary of {date: {symbol: sign}} where sign is +1 or -1.
+        float: Number of contracts for this instrument (positive = long, negative = short).
     """
-    daily_target_signs = {}
+    if np.isnan(volatility) or volatility <= 0 or np.isnan(trend_signal):
+        return 0
     
-    # Get all dates from trend signals
-    all_dates = set()
-    for signals in trend_signals_dict.values():
-        if 'position_multiplier' in signals:
-            all_dates.update(signals['position_multiplier'].index)
+    # Calculate base position size (same as Strategy 4)
+    base_position = calculate_portfolio_position_size(
+        symbol, capital, weight, idm, price, volatility, 
+        multiplier, risk_target, fx_rate
+    )
     
-    all_dates = sorted(list(all_dates))
+    # Apply trend filter: multiply by +1 (long) or -1 (short)
+    position_with_trend = base_position * trend_signal
     
-    # For each date, determine target sign for each instrument
-    for date in all_dates:
-        date_signs = {}
-        for symbol in portfolio_weights.keys(): # Iterate over all instruments in the target portfolio
-            if symbol in trend_signals_dict:
-                signals = trend_signals_dict[symbol]
-                if date in signals['position_multiplier'].index:
-                    # position_multiplier is guaranteed to be +1 or -1 by calculate_long_short_trend_signals
-                    target_sign = signals['position_multiplier'].loc[date]
-                    date_signs[symbol] = target_sign
-                else:
-                    # If no signal for this specific date (should be rare with robust signal calc),
-                    # try to ffill from previous day, else default to long (1.0)
-                    # This instrument might be new or data is patchy.
-                    prev_signal = signals['position_multiplier'].asof(date)
-                    date_signs[symbol] = prev_signal if not pd.isna(prev_signal) else 1.0
-            else:
-                # If instrument has no trend signals at all (e.g. very new, insufficient data for MA),
-                # default to long. This ensures it's included if in portfolio_weights.
-                date_signs[symbol] = 1.0
-        
-        daily_target_signs[date] = date_signs
-    
-    return daily_target_signs
+    return position_with_trend
 
-#####   LONG/SHORT PORTFOLIO BACKTESTING   #####
-
-def backtest_long_short_trend_following_portfolio(portfolio_weights, data, instruments_df, capital=1000000, 
-                                                 risk_target=0.2, start_date='2000-01-01', end_date='2025-01-01',
-                                                 fast_window=64, slow_window=256, use_ewma=True):
+def backtest_long_short_trend_strategy(data_dir='Data', capital=50000000, risk_target=0.2,
+                                     short_span=32, long_years=10, 
+                                     trend_fast_span=64, trend_slow_span=256,
+                                     weight_method='handcrafted',
+                                     start_date=None, end_date=None):
     """
-    Backtest long/short trend-following portfolio strategy.
+    Backtest Strategy 6: Long/short trend following multi-instrument portfolio.
     
-    This implements Chapter 6's long/short trend following approach:
-    1. Calculate trend signals for each instrument using EWMAC
-    2. Go long when EWMAC > 0, short when EWMAC < 0
-    3. Maintain full portfolio exposure with appropriate signs
+    Implementation follows book exactly: "Trade a portfolio of one or more instruments, 
+    each with positions scaled for a variable risk estimate. Hold a long position when 
+    they have been in a long uptrend, and a short position in a downtrend."
+    
+    Uses dynamic position sizing as stated in book: "positions are continuously 
+    managed after opening to ensure their risk is correct."
     
     Parameters:
-        portfolio_weights (dict): Portfolio weights by instrument.
-        data (dict): Individual instrument data.
-        instruments_df (pd.DataFrame): Instruments specifications.
+        data_dir (str): Directory containing price data files.
         capital (float): Initial capital.
         risk_target (float): Target risk fraction.
-        start_date (str): Start date for backtest.
-        end_date (str): End date for backtest.
-        fast_window (int): Fast moving average window.
-        slow_window (int): Slow moving average window.
-        use_ewma (bool): Use EWMA instead of SMA.
+        short_span (int): EWMA span for short-run volatility.
+        long_years (int): Years for long-run volatility average.
+        trend_fast_span (int): Fast EWMA span for trend filter.
+        trend_slow_span (int): Slow EWMA span for trend filter.
+        weight_method (str): Method for calculating instrument weights.
+        start_date (str): Start date for backtest (YYYY-MM-DD).
+        end_date (str): End date for backtest (YYYY-MM-DD).
     
     Returns:
-        dict: Backtest results with long/short trend following metrics.
+        dict: Comprehensive backtest results.
     """
-    if not portfolio_weights:
-        return {'error': 'No portfolio weights provided'}
-
-    # Filter portfolio_weights to those available in data
-    active_portfolio_weights = {
-        s: w for s, w in portfolio_weights.items() if s in data
-    }
-    if not active_portfolio_weights:
-        return {'error': 'None of the instruments in portfolio_weights are available in loaded data'}
+    print("=" * 60)
+    print("STRATEGY 6: SLOW TREND FOLLOWING, LONG AND SHORT")
+    print("=" * 60)
     
-    total_active_weight = sum(active_portfolio_weights.values())
-    if total_active_weight <= 0:
-        return {'error': 'Total weight of active portfolio instruments is not positive.'}
-    normalized_weights = {s: w / total_active_weight for s, w in active_portfolio_weights.items()}
-
-    # Calculate long/short trend signals for each instrument
-    print(f"Calculating long/short trend signals for {len(normalized_weights)} instruments...")
-    trend_signals_dict = {}
+    # Load all instrument data
+    instrument_data = load_all_instrument_data(data_dir)
     
-    for symbol in normalized_weights.keys():
+    if len(instrument_data) == 0:
+        raise ValueError("No instrument data loaded successfully")
+    
+    # Load instrument specifications
+    instruments_df = load_instrument_data()
+    
+    print(f"\nPortfolio Configuration:")
+    print(f"  Instruments: {len(instrument_data)}")
+    print(f"  Capital: ${capital:,.0f}")
+    print(f"  Risk Target: {risk_target:.1%}")
+    print(f"  Weight Method: {weight_method}")
+    print(f"  Trend Filter: EWMA({trend_fast_span},{trend_slow_span}) Long/Short")
+    
+    # Calculate IDM
+    idm = calculate_idm_from_count(len(instrument_data))
+    print(f"  IDM: {idm:.2f}")
+    
+    # Calculate instrument weights
+    weights = calculate_instrument_weights(instrument_data, weight_method, instruments_df)
+    
+    # Determine the full date range for backtest
+    all_start_dates = [df.index.min() for df in instrument_data.values()]
+    all_end_dates = [df.index.max() for df in instrument_data.values()]
+    
+    # Use the earliest available data to latest available data
+    backtest_start = start_date if start_date else min(all_start_dates)
+    backtest_end = end_date if end_date else max(all_end_dates)
+    
+    if isinstance(backtest_start, str):
+        backtest_start = pd.to_datetime(backtest_start)
+    if isinstance(backtest_end, str):
+        backtest_end = pd.to_datetime(backtest_end)
+    
+    print(f"\nBacktest Period:")
+    print(f"  Start: {backtest_start.date()}")
+    print(f"  End: {backtest_end.date()}")
+    print(f"  Duration: {(backtest_end - backtest_start).days} days")
+    
+    # Create full date range for backtest
+    full_date_range = pd.date_range(backtest_start, backtest_end, freq='D')
+    full_date_range = full_date_range[full_date_range.weekday < 5]  # Business days only
+    
+    # Process each instrument and calculate volatility forecasts + trend signals
+    processed_data = {}
+    
+    for symbol, df in instrument_data.items():
+        # Get instrument specs
         try:
-            symbol_data = data[symbol]
-            if 'Last' in symbol_data.columns and len(symbol_data) > slow_window:
-                # Use back-adjusted prices for trend calculation (book recommendation)
-                prices = symbol_data['Last'].copy()
-                
-                # Calculate long/short trend signals
-                trend_signals = calculate_long_short_trend_signals(
-                    prices, fast_window, slow_window, use_ewma
-                )
-                trend_signals_dict[symbol] = trend_signals
-            else:
-                print(f"Warning: Insufficient data for trend calculation in {symbol}")
-        except Exception as e:
-            print(f"Error calculating trend signals for {symbol}: {e}")
-            continue
-    
-    if not trend_signals_dict:
-        return {'error': 'No trend signals could be calculated'}
-
-    # Calculate correlation matrix for IDM calculation (same as Chapter 5)
-    returns_for_idm_list = []
-    for s_key in normalized_weights.keys():
-        if 'returns' in data[s_key] and isinstance(data[s_key]['returns'], pd.Series):
-            s_returns = data[s_key]['returns'].copy()
-            s_returns.name = s_key
-            returns_for_idm_list.append(s_returns)
-
-    correlation_matrix = pd.DataFrame()
-    base_idm = 1.0  # Default IDM
-
-    if not returns_for_idm_list:
-        print("Warning: No returns series available for IDM calculation. Using IDM=1.0.")
-    else:
-        common_returns_matrix = pd.concat(returns_for_idm_list, axis=1, join='inner')
-        common_returns_matrix.dropna(inplace=True)
-
-        if common_returns_matrix.empty or common_returns_matrix.shape[0] < 2:
-            print(f"Warning: Not enough common data for IDM calculation. Using IDM=1.0.")
-            if list(normalized_weights.keys()):
-                symbols_for_dummy_corr = list(normalized_weights.keys())
-                correlation_matrix = pd.DataFrame(np.eye(len(symbols_for_dummy_corr)), 
-                                                index=symbols_for_dummy_corr, columns=symbols_for_dummy_corr)
-        elif common_returns_matrix.shape[1] == 1:
-            base_idm = 1.0
-            symbol = common_returns_matrix.columns[0]
-            correlation_matrix = pd.DataFrame([[1.0]], index=[symbol], columns=[symbol])
-            print(f"Note: Only one instrument ({symbol}) in common data for IDM. IDM set to 1.0.")
-        else:
-            try:
-                correlation_matrix_calculated = calculate_correlation_matrix(common_returns_matrix)
-                # Calculate base IDM using equal weights for all available instruments
-                equal_weights_series = pd.Series({symbol: 1.0/len(normalized_weights) for symbol in normalized_weights.keys()})
-                equal_weights_series = equal_weights_series.reindex(correlation_matrix_calculated.index).fillna(0)
-                equal_weights_series = equal_weights_series / equal_weights_series.sum()
-                base_idm_calculated = calculate_idm_from_correlations(equal_weights_series, correlation_matrix_calculated)
-                base_idm = base_idm_calculated
-                correlation_matrix = correlation_matrix_calculated
-                print(f"Calculated base IDM for long/short strategy: {base_idm:.2f}")
-            except Exception as e_idm:
-                print(f"Error calculating IDM from correlations: {e_idm}. Using IDM=1.0.")
-                if list(normalized_weights.keys()) and correlation_matrix.empty:
-                    symbols_for_dummy_corr = list(normalized_weights.keys())
-                    correlation_matrix = pd.DataFrame(np.eye(len(symbols_for_dummy_corr)), 
-                                                    index=symbols_for_dummy_corr, columns=symbols_for_dummy_corr)
-
-    # Apply long/short trend filters to get dynamic target signs (+1 or -1)
-    print("Applying long/short trend filters to determine target signs...")
-    daily_target_signs = apply_long_short_trend_filter_to_weights(normalized_weights, trend_signals_dict)
-    
-    # Determine backtest date range from available data
-    returns_for_backtest = []
-    for s_key in normalized_weights.keys():
-        if 'returns' in data[s_key] and isinstance(data[s_key]['returns'], pd.Series):
-            s_returns = data[s_key]['returns'].copy()
-            s_returns.name = s_key
-            returns_for_backtest.append(s_returns)
-
-    if not returns_for_backtest:
-        return {'error': 'No returns series available for backtest.'}
-        
-    # Use outer join for maximum date coverage
-    returns_matrix = pd.concat(returns_for_backtest, axis=1, join='outer')
-    
-    # Filter by date range
-    param_start_dt = pd.to_datetime(start_date)
-    param_end_dt = pd.to_datetime(end_date)
-    returns_matrix = returns_matrix[(returns_matrix.index >= param_start_dt) & 
-                                   (returns_matrix.index <= param_end_dt)]
-    
-    if returns_matrix.empty:
-        return {'error': 'No data available after date filtering.'}
-
-    # Pre-calculate volatilities for position sizing
-    volatilities = {}
-    for symbol in normalized_weights.keys():
-        symbol_data_df = data[symbol]
-        symbol_returns = symbol_data_df['returns'] 
-        blended_vol_series = calculate_blended_volatility(symbol_returns).reindex(returns_matrix.index, method='ffill')
-        volatilities[symbol] = blended_vol_series
-    
-    # Initialize tracking variables
-    portfolio_returns = []
-    positions_data = {symbol: [] for symbol in normalized_weights.keys()}
-    long_exposure_data = []   # Track percentage of portfolio long
-    short_exposure_data = []  # Track percentage of portfolio short
-    net_exposure_data = []    # Track net exposure (long - short)
-    position_multipliers_data = {symbol: [] for symbol in normalized_weights.keys()}
-    idm_data = []  # Track IDM values over time
-    
-    for i, date_val in enumerate(returns_matrix.index):
-        if i == 0:
-            # Initialize first day
-            for symbol in normalized_weights.keys():
-                positions_data[symbol].append(0)
-                position_multipliers_data[symbol].append(0)
-            portfolio_returns.append(0)
-            long_exposure_data.append(0)
-            short_exposure_data.append(0)
-            net_exposure_data.append(0)
-            idm_data.append(base_idm)
+            specs = get_instrument_specs(symbol, instruments_df)
+            multiplier = specs['multiplier']
+        except:
             continue
         
-        prev_date = returns_matrix.index[i-1]
-        current_date = date_val
+        # Filter data to backtest period
+        df_filtered = df[(df.index >= backtest_start) & (df.index <= backtest_end)].copy()
         
-        # Get target signs for previous date (for position sizing)
-        if prev_date in daily_target_signs:
-            current_target_signs = daily_target_signs[prev_date]
-        else:
-            # Find closest available date for signs
-            available_dates_signs = [d for d in daily_target_signs.keys() if d <= prev_date]
-            if available_dates_signs:
-                closest_date_signs = max(available_dates_signs)
-                current_target_signs = daily_target_signs[closest_date_signs]
+        if len(df_filtered) < 300:  # Need more data for trend filter (256 + buffer)
+            continue
+        
+        # Calculate blended volatility forecast (same as Strategy 4)
+        df_filtered['blended_vol'] = calculate_blended_volatility(
+            df_filtered['returns'], short_span=short_span, long_years=long_years
+        )
+        
+        # Calculate long/short trend signal using EWMAC
+        df_filtered['trend_signal'] = calculate_trend_signal_long_short(
+            df_filtered['Last'], trend_fast_span, trend_slow_span
+        )
+        
+        # Calculate position sizes with long/short trend filter
+        positions = []
+        for i in range(len(df_filtered)):
+            if i == 0:
+                positions.append(0)  # No position on first day
             else:
-                # Default to long for all if no signs found (should be rare)
-                current_target_signs = {symbol: 1.0 for symbol in normalized_weights.keys()}
-        
-        # Use the pre-calculated base_idm for the long/short strategy
-        # This IDM should reflect the diversification of a portfolio that *can* go long/short.
-        # The book suggests a single, higher IDM for Strategy 6 (e.g., 2.89 for jumbo).
-        # For now, we use the 'base_idm' calculated earlier which uses equal weights on the full correlation matrix.
-        # A more advanced IDM would consider the *signed* correlation matrix as attempted before for 'current_idm'.
-        # However, for simplicity and to align with a single IDM per strategy, we'll use base_idm.
-        current_idm_to_use = base_idm 
-        idm_data.append(current_idm_to_use)
-
-        # Calculate exposure metrics based on target signs and normalized weights
-        long_exposure = 0
-        short_exposure = 0
-        net_exposure = 0
-        gross_exposure = 0
-        
-        for symbol, base_weight in normalized_weights.items():
-            target_sign = current_target_signs.get(symbol, 1.0) # Default to long if symbol somehow missing
-            gross_exposure += base_weight # Each instrument contributes its full base weight to gross exposure
-            if target_sign > 0:
-                long_exposure += base_weight
-                net_exposure += base_weight
-            elif target_sign < 0:
-                short_exposure += base_weight
-                net_exposure -= base_weight
-        
-        long_exposure_data.append(long_exposure)
-        short_exposure_data.append(short_exposure) 
-        net_exposure_data.append(net_exposure)
-        # Gross exposure should ideally be 1.0 if all instruments are always active
-        # print(f"DEBUG {prev_date}: Gross Exp: {gross_exposure}, Long: {long_exposure}, Short: {short_exposure}, Net: {net_exposure}")
-
-        # Calculate positions and P&L
-        daily_portfolio_return = 0
-        
-        for symbol, base_weight in normalized_weights.items(): # Iterate through ALL instruments in portfolio
-            try:
-                specs = get_instrument_specs(symbol, instruments_df)
-                multiplier = specs['multiplier']
-                symbol_data_df = data[symbol]
+                prev_price = df_filtered['Last'].iloc[i-1]
+                prev_vol = df_filtered['blended_vol'].iloc[i-1]
+                prev_trend = df_filtered['trend_signal'].iloc[i-1]
                 
-                # Get target sign for this instrument
-                target_sign = current_target_signs.get(symbol, 1.0) # Default to long
-                position_multipliers_data[symbol].append(target_sign)
-                
-                # Calculate position: use base_weight and apply target_sign
-                if (prev_date in symbol_data_df.index and symbol_data_df.loc[prev_date, 'Last'] is not np.nan and 
-                    current_date in symbol_data_df.index and symbol_data_df.loc[current_date, 'returns'] is not np.nan):
-                    # target_sign is always +1 or -1, so we always attempt to trade if data exists
-                    
-                    prev_price = symbol_data_df.loc[prev_date, 'Last']
-                    current_return = symbol_data_df.loc[current_date, 'returns']
-                    
-                    if prev_date in volatilities[symbol].index and not pd.isna(volatilities[symbol].loc[prev_date]):
-                        blended_vol = volatilities[symbol].loc[prev_date]
-                    else:
-                        blended_vol = 0.16  # fallback
-                    
+                if (np.isnan(prev_vol) or prev_vol <= 0 or np.isnan(prev_trend)):
                     position = 0
-                    if blended_vol > 0 and not pd.isna(prev_price) and prev_price > 0 and base_weight > 0:
-                        # Position size based on full base_weight
-                        abs_position = calculate_position_size_with_idm(
-                            capital, base_weight, current_idm_to_use, multiplier, prev_price, 1.0, blended_vol, risk_target
-                        )
-                        # Apply trend direction sign
-                        position = abs_position * target_sign
-                    
-                    positions_data[symbol].append(position)
-                    
-                    if not pd.isna(current_return) and position != 0:
-                        notional_exposure = position * multiplier * prev_price
-                        instrument_pnl = notional_exposure * current_return
-                        instrument_return_contrib = instrument_pnl / capital
-                        
-                        if np.isinf(instrument_return_contrib) or np.isnan(instrument_return_contrib):
-                            print(f"LS OVERFLOW {current_date}: {symbol} pos={position:.2f} ret={current_return:.4f} pnl={instrument_pnl:.2f}")
-                            raise ValueError(f"Overflow for {symbol}")
-                        
-                        daily_portfolio_return += instrument_return_contrib
                 else:
-                    positions_data[symbol].append(0) # No trade if no price/return data
-                    
-            except Exception as e:
-                # print(f"Error processing {symbol} on {current_date} in L/S: {e}")
-                positions_data[symbol].append(0)
-                if symbol not in position_multipliers_data or len(position_multipliers_data[symbol]) < i:
-                     position_multipliers_data[symbol].append(0) # ensure list length matches
+                    position = calculate_strategy6_position_size(
+                        symbol, capital, weights[symbol], idm, 
+                        prev_price, prev_vol, multiplier, prev_trend, risk_target
+                    )
+                positions.append(position)
         
-        portfolio_returns.append(daily_portfolio_return)
+        df_filtered['position'] = positions
+        df_filtered['position_lag'] = df_filtered['position'].shift(1)
+        df_filtered['multiplier'] = multiplier
+        df_filtered['weight'] = weights[symbol]
+        
+        # Calculate P&L for this instrument
+        df_filtered['instrument_pnl'] = (
+            df_filtered['position_lag'] * 
+            multiplier * 
+            df_filtered['returns'] * 
+            df_filtered['Last'].shift(1)
+        )
+        
+        processed_data[symbol] = df_filtered
     
-    # Create results dataframe
-    results_df = pd.DataFrame(index=returns_matrix.index)
-    results_df['portfolio_returns'] = portfolio_returns
-    results_df['long_exposure'] = long_exposure_data
-    results_df['short_exposure'] = short_exposure_data
-    results_df['net_exposure'] = net_exposure_data
-    results_df['gross_exposure'] = np.array(long_exposure_data) + np.array(short_exposure_data)
-    results_df['idm'] = idm_data
+    print(f"\nCombining portfolio...")
+    print(f"Successfully processed {len(processed_data)} instruments")
     
-    for symbol, pos_list in positions_data.items():
-        if len(pos_list) == len(results_df):
-            results_df[f'position_{symbol}'] = pos_list
-            
-    for symbol, mult_list in position_multipliers_data.items():
-        if len(mult_list) == len(results_df):
-            results_df[f'pos_mult_{symbol}'] = mult_list
+    # Create portfolio DataFrame with full date range
+    portfolio_df = pd.DataFrame(index=full_date_range)
+    portfolio_df['total_pnl'] = 0.0
+    portfolio_df['num_active_instruments'] = 0
+    portfolio_df['num_long_signals'] = 0
+    portfolio_df['num_short_signals'] = 0
     
-    # Remove initial zero return day if needed
-    if len(results_df) > 1 and results_df['portfolio_returns'].iloc[0] == 0:
-        results_df = results_df.iloc[1:]
+    # Aggregate P&L across all instruments for each day
+    for symbol, df in processed_data.items():
+        # Initialize columns if they don't exist
+        portfolio_df[f'{symbol}_position'] = 0.0
+        portfolio_df[f'{symbol}_pnl'] = 0.0
+        portfolio_df[f'{symbol}_trend'] = 0.0
+        
+        # Add P&L only for dates where we have actual data
+        actual_dates = df.index.intersection(full_date_range)
+        
+        for date in actual_dates:
+            if date in df.index and not pd.isna(df.loc[date, 'instrument_pnl']):
+                portfolio_df.loc[date, 'total_pnl'] += df.loc[date, 'instrument_pnl']
+                portfolio_df.loc[date, f'{symbol}_pnl'] = df.loc[date, 'instrument_pnl']
+                portfolio_df.loc[date, f'{symbol}_position'] = df.loc[date, 'position_lag']
+                portfolio_df.loc[date, f'{symbol}_trend'] = df.loc[date, 'trend_signal']
+                
+                if abs(df.loc[date, 'position_lag']) > 0.01:
+                    portfolio_df.loc[date, 'num_active_instruments'] += 1
+                
+                if df.loc[date, 'trend_signal'] > 0.5:
+                    portfolio_df.loc[date, 'num_long_signals'] += 1
+                elif df.loc[date, 'trend_signal'] < -0.5:
+                    portfolio_df.loc[date, 'num_short_signals'] += 1
     
-    if results_df.empty:
-        return {'error': 'No valid backtest data after processing'}
+    # Calculate portfolio returns
+    portfolio_df['strategy_returns'] = portfolio_df['total_pnl'] / capital
+    
+    # Remove rows with no activity (weekends, holidays)
+    portfolio_df = portfolio_df[portfolio_df.index.weekday < 5]  # Business days only
+    portfolio_df = portfolio_df.dropna(subset=['strategy_returns'])
+    
+    print(f"Final portfolio data: {len(portfolio_df)} observations")
+    print(f"Average active instruments: {portfolio_df['num_active_instruments'].mean():.1f}")
+    print(f"Average instruments with long signals: {portfolio_df['num_long_signals'].mean():.1f}")
+    print(f"Average instruments with short signals: {portfolio_df['num_short_signals'].mean():.1f}")
     
     # Calculate performance metrics
-    equity_curve_series = build_account_curve(results_df['portfolio_returns'], capital)
+    account_curve = build_account_curve(portfolio_df['strategy_returns'], capital)
+    performance = calculate_comprehensive_performance(account_curve, portfolio_df['strategy_returns'])
     
-    performance = calculate_comprehensive_performance(
-        equity_curve_series,
-        results_df['portfolio_returns']
-    )
+    # Add strategy-specific metrics
+    performance['num_instruments'] = len(processed_data)
+    performance['idm'] = idm
+    performance['avg_active_instruments'] = portfolio_df['num_active_instruments'].mean()
+    performance['avg_long_signals'] = portfolio_df['num_long_signals'].mean()
+    performance['avg_short_signals'] = portfolio_df['num_short_signals'].mean()
+    performance['weight_method'] = weight_method
+    performance['backtest_start'] = backtest_start
+    performance['backtest_end'] = backtest_end
+    performance['trend_fast_span'] = trend_fast_span
+    performance['trend_slow_span'] = trend_slow_span
     
-    # Add long/short specific metrics
-    performance['num_instruments'] = len(normalized_weights)
-    performance['avg_long_exposure'] = results_df['long_exposure'].mean()
-    performance['avg_short_exposure'] = results_df['short_exposure'].mean()
-    performance['avg_net_exposure'] = results_df['net_exposure'].mean()
-    performance['avg_gross_exposure'] = results_df['gross_exposure'].mean()
-    performance['avg_idm'] = results_df['idm'].mean()
-    performance['max_idm'] = results_df['idm'].max()
-    performance['min_idm'] = results_df['idm'].min()
-    performance['fast_window'] = fast_window
-    performance['slow_window'] = slow_window
-    performance['use_ewma'] = use_ewma
-    
-    # Calculate position statistics
-    position_stats = {}
-    for symbol in normalized_weights.keys():
-        if f'pos_mult_{symbol}' in results_df.columns:
-            multipliers = results_df[f'pos_mult_{symbol}']
-            position_stats[symbol] = {
-                'long_pct': (multipliers == 1.0).mean(),
-                'short_pct': (multipliers == -1.0).mean(),
-                'flat_pct': (multipliers == 0.0).mean(),
-                'signal_changes': multipliers.diff().abs().sum() / 2  # Divide by 2 since changes are ±2
-            }
-    performance['position_statistics'] = position_stats
+    # Calculate per-instrument statistics
+    instrument_stats = {}
+    for symbol in processed_data.keys():
+        pnl_col = f'{symbol}_pnl'
+        pos_col = f'{symbol}_position'
+        trend_col = f'{symbol}_trend'
+        
+        if pnl_col in portfolio_df.columns:
+            # Get only non-zero P&L periods for this instrument
+            inst_pnl = portfolio_df[pnl_col][portfolio_df[pnl_col] != 0]
+            inst_trend = portfolio_df[trend_col][portfolio_df[pnl_col] != 0]
+            
+            if len(inst_pnl) > 10:  # Need minimum observations
+                inst_returns = inst_pnl / capital
+                inst_performance = calculate_comprehensive_performance(
+                    build_account_curve(inst_returns, capital), inst_returns
+                )
+                
+                instrument_stats[symbol] = {
+                    'total_return': inst_performance['total_return'],
+                    'sharpe_ratio': inst_performance['sharpe_ratio'],
+                    'volatility': inst_performance['annualized_volatility'],
+                    'max_drawdown': inst_performance['max_drawdown_pct'],
+                    'avg_position': portfolio_df[pos_col][portfolio_df[pos_col] != 0].mean(),
+                    'weight': weights[symbol],
+                    'active_days': len(inst_pnl),
+                    'total_pnl': inst_pnl.sum(),
+                    'avg_trend_signal': inst_trend.mean(),
+                    'percent_time_long': (inst_trend > 0.5).mean(),
+                    'percent_time_short': (inst_trend < -0.5).mean()
+                }
     
     return {
-        'data': results_df,
+        'portfolio_data': portfolio_df,
+        'instrument_data': processed_data,
         'performance': performance,
-        'portfolio_weights': normalized_weights,
-        'trend_signals': trend_signals_dict,
-        'strategy_type': 'long_short_trend_following'
-    }
-
-#####   THREE-WAY STRATEGY COMPARISON   #####
-
-def compare_three_strategies(portfolio_weights, data, instruments_df, capital=1000000, 
-                           risk_target=0.2, fast_window=64, slow_window=256):
-    """
-    Compare all three strategies: No trend (Chapter 4), Long-only trend (Chapter 5), 
-    and Long/short trend (Chapter 6).
-    
-    Parameters:
-        portfolio_weights (dict): Portfolio weights.
-        data (dict): Individual instrument data.
-        instruments_df (pd.DataFrame): Instruments specifications.
-        capital (float): Initial capital.
-        risk_target (float): Target risk fraction.
-        fast_window (int): Fast MA window for trend filter.
-        slow_window (int): Slow MA window for trend filter.
-    
-    Returns:
-        dict: Comprehensive comparison results.
-    """
-    print("=" * 90)
-    print("THREE-STRATEGY COMPARISON: NO TREND vs LONG-ONLY TREND vs LONG/SHORT TREND")
-    print("=" * 90)
-    
-    # Strategy 4: No trend filter (buy and hold)
-    print("\nRunning Strategy 4: Buy and Hold (No Trend Filter)...")
-    # Scale up risk target for no-trend strategy to achieve ~20% volatility
-    scaled_risk_target = risk_target * (20.0 / 14.9)  # Scale from observed 14.9% to target 20%
-    print(f"Using scaled risk target of {scaled_risk_target:.1%} for no-trend strategy to achieve ~20% volatility")
-    
-    no_trend_result = backtest_portfolio_with_individual_data(
-        portfolio_weights, data, instruments_df, capital, scaled_risk_target
-    )
-    
-    # Strategy 5: Long-only trend following
-    print("\nRunning Strategy 5: Long-Only Trend Following...")
-    long_only_result = backtest_trend_following_portfolio(
-        portfolio_weights, data, instruments_df, capital, risk_target,
-        fast_window=fast_window, slow_window=slow_window
-    )
-    
-    # Strategy 6: Long/short trend following
-    print("\nRunning Strategy 6: Long/Short Trend Following...")
-    long_short_result = backtest_long_short_trend_following_portfolio(
-        portfolio_weights, data, instruments_df, capital, risk_target,
-        fast_window=fast_window, slow_window=slow_window
-    )
-    
-    if 'error' in no_trend_result or 'error' in long_only_result or 'error' in long_short_result:
-        return {
-            'no_trend_error': no_trend_result.get('error'),
-            'long_only_error': long_only_result.get('error'),
-            'long_short_error': long_short_result.get('error')
-        }
-    
-    # Performance comparison
-    no_trend_perf = no_trend_result['performance']
-    long_only_perf = long_only_result['performance']
-    long_short_perf = long_short_result['performance']
-    
-    print(f"\n{'='*90}")
-    print("COMPREHENSIVE PERFORMANCE COMPARISON")
-    print(f"{'='*90}")
-    
-    print(f"\n{'Metric':<25} {'No Trend':<15} {'Long-Only':<15} {'Long/Short':<15}")
-    print("-" * 80)
-    
-    # Key performance metrics
-    metrics = [
-        ('Annual Return', 'annualized_return', '%'),
-        ('Volatility', 'annualized_volatility', '%'),
-        ('Sharpe Ratio', 'sharpe_ratio', ''),
-        ('Max Drawdown', 'max_drawdown_pct', '%'),
-        ('Calmar Ratio', 'calmar_ratio', ''),
-        ('Skewness', 'skewness', '')
-    ]
-    
-    for metric_name, metric_key, suffix in metrics:
-        no_trend_val = no_trend_perf[metric_key]
-        long_only_val = long_only_perf[metric_key]
-        long_short_val = long_short_perf[metric_key]
-        
-        if suffix == '%':
-            no_trend_str = f"{no_trend_val:.1%}"
-            long_only_str = f"{long_only_val:.1%}"
-            long_short_str = f"{long_short_val:.1%}"
-        elif metric_key == 'max_drawdown_pct':
-            no_trend_str = f"{no_trend_val:.1f}%"
-            long_only_str = f"{long_only_val:.1f}%"
-            long_short_str = f"{long_short_val:.1f}%"
-        else:
-            no_trend_str = f"{no_trend_val:.3f}"
-            long_only_str = f"{long_only_val:.3f}"
-            long_short_str = f"{long_short_val:.3f}"
-        
-        print(f"{metric_name:<25} {no_trend_str:<15} {long_only_str:<15} {long_short_str:<15}")
-    
-    # Long/Short specific metrics
-    print(f"\n{'='*60}")
-    print("LONG/SHORT STRATEGY SPECIFIC METRICS")
-    print(f"{'='*60}")
-    print(f"Average Long Exposure: {long_short_perf.get('avg_long_exposure', 0):.1%}")
-    print(f"Average Short Exposure: {long_short_perf.get('avg_short_exposure', 0):.1%}")
-    print(f"Average Net Exposure: {long_short_perf.get('avg_net_exposure', 0):.1%}")
-    print(f"Average Gross Exposure: {long_short_perf.get('avg_gross_exposure', 0):.1%}")
-    print(f"Average IDM: {long_short_perf.get('avg_idm', 1.0):.2f}")
-    
-    # Position analysis for long/short strategy
-    if 'position_statistics' in long_short_perf:
-        print(f"\n{'='*60}")
-        print("INDIVIDUAL INSTRUMENT LONG/SHORT STATISTICS")
-        print(f"{'='*60}")
-        print(f"{'Instrument':<10} {'Long %':<8} {'Short %':<8} {'Flat %':<8} {'Changes':<8}")
-        print("-" * 50)
-        
-        position_stats = long_short_perf['position_statistics']
-        for symbol, stats in position_stats.items():
-            print(f"{symbol:<10} {stats['long_pct']:<8.1%} {stats['short_pct']:<8.1%} "
-                  f"{stats['flat_pct']:<8.1%} {stats['signal_changes']:<8.0f}")
-    
-    return {
-        'no_trend': no_trend_result,
-        'long_only_trend': long_only_result,
-        'long_short_trend': long_short_result,
-        'performance_comparison': {
-            'strategies': ['No Trend', 'Long-Only', 'Long/Short'],
-            'returns': [no_trend_perf['annualized_return'], long_only_perf['annualized_return'], long_short_perf['annualized_return']],
-            'sharpes': [no_trend_perf['sharpe_ratio'], long_only_perf['sharpe_ratio'], long_short_perf['sharpe_ratio']],
-            'drawdowns': [no_trend_perf['max_drawdown_pct'], long_only_perf['max_drawdown_pct'], long_short_perf['max_drawdown_pct']],
-            'volatilities': [no_trend_perf['annualized_volatility'], long_only_perf['annualized_volatility'], long_short_perf['annualized_volatility']]
+        'instrument_stats': instrument_stats,
+        'weights': weights,
+        'idm': idm,
+        'config': {
+            'capital': capital,
+            'risk_target': risk_target,
+            'short_span': short_span,
+            'long_years': long_years,
+            'trend_fast_span': trend_fast_span,
+            'trend_slow_span': trend_slow_span,
+            'weight_method': weight_method,
+            'backtest_start': backtest_start,
+            'backtest_end': backtest_end
         }
     }
 
-def plot_three_strategy_comparison(comparison_results, capital=1000000):
+def analyze_long_short_results(results):
     """
-    Plot comprehensive comparison of all three strategies.
+    Analyze and display comprehensive long/short trend following results.
     
     Parameters:
-        comparison_results (dict): Results from compare_three_strategies.
-        capital (float): Initial capital for plotting.
+        results (dict): Results from backtest_long_short_trend_strategy.
     """
-    if not all(key in comparison_results for key in ['no_trend', 'long_only_trend', 'long_short_trend']):
-        print("Error: Missing strategy data for plotting")
-        return
+    performance = results['performance']
+    instrument_stats = results['instrument_stats']
+    config = results['config']
     
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(18, 12))
+    print("\n" + "=" * 60)
+    print("LONG/SHORT TREND FOLLOWING PERFORMANCE ANALYSIS")
+    print("=" * 60)
     
-    # Colors for strategies
-    colors = ['blue', 'green', 'red']
-    labels = ['No Trend (Strategy 4)', 'Long-Only Trend (Strategy 5)', 'Long/Short Trend (Strategy 6)']
+    # Overall performance
+    print(f"\n--- Overall Portfolio Performance ---")
+    print(f"Total Return: {performance['total_return']:.2%}")
+    print(f"Annualized Return: {performance['annualized_return']:.2%}")
+    print(f"Annualized Volatility: {performance['annualized_volatility']:.2%}")
+    print(f"Sharpe Ratio: {performance['sharpe_ratio']:.3f}")
+    print(f"Max Drawdown: {performance['max_drawdown_pct']:.1f}%")
+    print(f"Skewness: {performance['skewness']:.3f}")
     
-    # Equity curves
-    strategies = ['no_trend', 'long_only_trend', 'long_short_trend']
-    for i, (strategy_key, label, color) in enumerate(zip(strategies, labels, colors)):
-        equity_curve = build_account_curve(comparison_results[strategy_key]['data']['portfolio_returns'], capital)
-        ax1.plot(equity_curve.index, equity_curve.values, label=label, linewidth=2, color=color)
+    # Long/short characteristics
+    print(f"\n--- Long/Short Trend Following Characteristics ---")
+    print(f"Average Active Instruments: {performance['avg_active_instruments']:.1f}")
+    print(f"Average Long Signals: {performance['avg_long_signals']:.1f}")
+    print(f"Average Short Signals: {performance['avg_short_signals']:.1f}")
+    total_signals = performance['avg_long_signals'] + performance['avg_short_signals']
+    print(f"Percent Time Long: {(performance['avg_long_signals'] / performance['num_instruments']):.1%}")
+    print(f"Percent Time Short: {(performance['avg_short_signals'] / performance['num_instruments']):.1%}")
+    print(f"Percent Time in Market: {(total_signals / performance['num_instruments']):.1%}")
+    print(f"Trend Filter: EWMA({config['trend_fast_span']},{config['trend_slow_span']}) Long/Short")
     
-    ax1.set_title('Equity Curve Comparison (All Strategies)')
-    ax1.set_ylabel('Portfolio Value ($)')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    ax1.set_yscale('log')
+    # Portfolio characteristics
+    print(f"\n--- Portfolio Characteristics ---")
+    print(f"Number of Instruments: {performance['num_instruments']}")
+    print(f"IDM: {performance['idm']:.2f}")
+    print(f"Capital: ${config['capital']:,.0f}")
+    print(f"Risk Target: {config['risk_target']:.1%}")
+    print(f"Backtest Period: {config['backtest_start'].date()} to {config['backtest_end'].date()}")
     
-    # Drawdown comparison
-    for i, (strategy_key, label, color) in enumerate(zip(strategies, labels, colors)):
-        equity_curve = build_account_curve(comparison_results[strategy_key]['data']['portfolio_returns'], capital)
-        drawdown = calculate_maximum_drawdown(equity_curve)['drawdown_series'] * 100
-        ax2.fill_between(drawdown.index, drawdown.values, 0, alpha=0.3, label=label, color=color)
+    # Top performing instruments
+    print(f"\n--- Top 10 Performing Instruments (by Total P&L) ---")
+    sorted_instruments = sorted(
+        instrument_stats.items(), 
+        key=lambda x: x[1]['total_pnl'], 
+        reverse=True
+    )
     
-    ax2.set_title('Drawdown Comparison')
-    ax2.set_ylabel('Drawdown (%)')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
+    print(f"{'Symbol':<8} {'Weight':<8} {'Return':<10} {'Sharpe':<8} {'%Long':<8} {'%Short':<8} {'TotalPnL':<12} {'Days':<6}")
+    print("-" * 85)
     
-    # Long/Short exposure over time (Strategy 6 only)
-    long_short_data = comparison_results['long_short_trend']['data']
-    ax3.plot(long_short_data.index, long_short_data['long_exposure'] * 100, 
-             label='Long Exposure', linewidth=1, color='green')
-    ax3.plot(long_short_data.index, long_short_data['short_exposure'] * 100, 
-             label='Short Exposure', linewidth=1, color='red')
-    ax3.plot(long_short_data.index, long_short_data['net_exposure'] * 100, 
-             label='Net Exposure', linewidth=1, color='blue')
-    ax3.set_title('Long/Short Strategy Exposure Over Time')
-    ax3.set_ylabel('Exposure (%)')
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
-    
-    # Performance comparison bar chart
-    perf_comp = comparison_results['performance_comparison']
-    x_pos = np.arange(len(perf_comp['strategies']))
-    
-    ax4.bar(x_pos - 0.25, [r * 100 for r in perf_comp['returns']], 0.25, 
-            label='Annual Return (%)', alpha=0.8, color='lightblue')
-    ax4.bar(x_pos, [s * 10 for s in perf_comp['sharpes']], 0.25, 
-            label='Sharpe Ratio (×10)', alpha=0.8, color='lightgreen')
-    ax4.bar(x_pos + 0.25, [abs(d) for d in perf_comp['drawdowns']], 0.25, 
-            label='Max Drawdown (%)', alpha=0.8, color='lightcoral')
-    
-    ax4.set_title('Performance Metrics Comparison')
-    ax4.set_ylabel('Value')
-    ax4.set_xticks(x_pos)
-    ax4.set_xticklabels(perf_comp['strategies'])
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.show()
+    for symbol, stats in sorted_instruments[:10]:
+        print(f"{symbol:<8} {stats['weight']:<8.3f} {stats['total_return']:<10.2%} "
+              f"{stats['sharpe_ratio']:<8.3f} {stats['percent_time_long']:<8.1%} "
+              f"{stats['percent_time_short']:<8.1%} ${stats['total_pnl']:<11,.0f} {stats['active_days']:<6}")
 
-#####   MAIN CHAPTER 6 IMPLEMENTATION   #####
-
-def test_long_short_trend_following_strategy(capital=1000000, risk_target=0.2, 
-                                           max_instruments=25, fast_window=64, slow_window=256):
+def compare_all_strategies():
     """
-    Test long/short trend following strategy on optimized portfolio.
-    
-    This implements Chapter 6's approach of going both long and short
-    based on trend signals.
-    
-    Parameters:
-        capital (float): Initial capital.
-        risk_target (float): Target risk fraction.
-        max_instruments (int): Maximum instruments for portfolio.
-        fast_window (int): Fast moving average window.
-        slow_window (int): Slow moving average window.
-    
-    Returns:
-        dict: Comprehensive test results comparing all three strategies.
+    Compare Strategy 4 (no trend filter) vs Strategy 5 (long only) vs Strategy 6 (long/short).
     """
-    print("=" * 80)
-    print("CHAPTER 6: LONG/SHORT TREND FOLLOWING STRATEGY")
+    print("\n" + "=" * 80)
+    print("STRATEGY COMPARISON: STRATEGY 4 vs 5 vs 6")
     print("=" * 80)
     
-    # Load data and create portfolio using optimized selection (same as Chapter 5)
-    print("\nLoading instruments and data...")
-    instruments_df = load_instrument_data()
-    available_instruments = get_available_instruments(instruments_df)
-    print(f"Found {len(available_instruments)} instruments with data files")
-    
-    # Select suitable instruments
-    suitable_instruments = select_instruments_by_criteria(
-        instruments_df, available_instruments, capital, max_cost_sr=0.01
-    )
-    print(f"Selected {len(suitable_instruments)} suitable instruments")
-    
-    if len(suitable_instruments) == 0:
-        print("No suitable instruments found!")
-        return {}
-    
-    # Load data
-    print("Loading individual instrument data...")
-    data = load_instrument_data_files(suitable_instruments)
-    print(f"Successfully loaded data for {len(data)} instruments")
-    
-    if len(data) == 0:
-        print("No data loaded!")
-        return {}
-    
-    # Create optimized selection portfolio
-    optimized_weights = optimize_instrument_selection(
-        instruments_df, list(data.keys()), target_instruments=min(max_instruments, len(data))
-    )
-    
-    if not optimized_weights:
-        print("Could not create optimized portfolio!")
-        return {}
-    
-    print(f"\nOptimized Portfolio created with {len(optimized_weights)} instruments")
-    print(f"Instruments: {list(optimized_weights.keys())}")
-    
-    # Compare all three strategies
-    comparison_results = compare_three_strategies(
-        optimized_weights, data, instruments_df, capital, risk_target, fast_window, slow_window
-    )
-    
-    # Plot results
-    if all(key in comparison_results for key in ['no_trend', 'long_only_trend', 'long_short_trend']):
-        plot_three_strategy_comparison(comparison_results, capital)
+    try:
+        # Strategy 4 (no trend filter)
+        print("Running Strategy 4 (no trend filter)...")
+        strategy4_results = backtest_multi_instrument_strategy(
+            data_dir='Data',
+            capital=50000000,
+            risk_target=0.2,
+            weight_method='handcrafted'
+        )
         
-        # Summary statistics
-        print(f"\n{'='*90}")
-        print("CHAPTER 6 SUMMARY INSIGHTS")
-        print(f"{'='*90}")
+        # Strategy 5 (with trend filter, long only)
+        print("Running Strategy 5 (trend filter, long only)...")
+        strategy5_results = backtest_trend_following_strategy(
+            data_dir='Data',
+            capital=50000000,
+            risk_target=0.2,
+            weight_method='handcrafted'
+        )
         
-        perf_comp = comparison_results['performance_comparison']
+        # Strategy 6 (with trend filter, long/short)
+        print("Running Strategy 6 (trend filter, long/short)...")
+        strategy6_results = backtest_long_short_trend_strategy(
+            data_dir='Data',
+            capital=50000000,
+            risk_target=0.2,
+            weight_method='handcrafted'
+        )
         
-        print(f"\n🔹 **Strategy Performance Summary:**")
-        for i, strategy in enumerate(perf_comp['strategies']):
-            ret = perf_comp['returns'][i] * 100
-            sharpe = perf_comp['sharpes'][i]
-            dd = perf_comp['drawdowns'][i]
-            vol = perf_comp['volatilities'][i] * 100
-            print(f"   {strategy}: {ret:.1f}% return, {sharpe:.3f} Sharpe, {dd:.1f}% maxDD, {vol:.1f}% vol")
+        if strategy4_results and strategy5_results and strategy6_results:
+            s4_perf = strategy4_results['performance']
+            s5_perf = strategy5_results['performance']
+            s6_perf = strategy6_results['performance']
+            
+            print(f"\n{'Strategy':<15} {'Ann. Return':<12} {'Volatility':<12} {'Sharpe':<8} {'Max DD':<8} {'Time in Market':<15}")
+            print("-" * 95)
+            
+            print(f"{'Strategy 4':<15} {s4_perf['annualized_return']:<12.2%} "
+                  f"{s4_perf['annualized_volatility']:<12.2%} "
+                  f"{s4_perf['sharpe_ratio']:<8.3f} "
+                  f"{s4_perf['max_drawdown_pct']:<8.1f}% "
+                  f"{'100.0%':<15}")
+            
+            s5_time_in_market = (s5_perf['avg_long_signals'] / s5_perf['num_instruments']) * 100
+            print(f"{'Strategy 5':<15} {s5_perf['annualized_return']:<12.2%} "
+                  f"{s5_perf['annualized_volatility']:<12.2%} "
+                  f"{s5_perf['sharpe_ratio']:<8.3f} "
+                  f"{s5_perf['max_drawdown_pct']:<8.1f}% "
+                  f"{s5_time_in_market:<15.1f}%")
+            
+            s6_time_in_market = ((s6_perf['avg_long_signals'] + s6_perf['avg_short_signals']) / s6_perf['num_instruments']) * 100
+            print(f"{'Strategy 6':<15} {s6_perf['annualized_return']:<12.2%} "
+                  f"{s6_perf['annualized_volatility']:<12.2%} "
+                  f"{s6_perf['sharpe_ratio']:<8.3f} "
+                  f"{s6_perf['max_drawdown_pct']:<8.1f}% "
+                  f"{s6_time_in_market:<15.1f}%")
+            
+            print(f"\n--- Strategy 6 vs Strategy 5 Analysis ---")
+            return_diff = s6_perf['annualized_return'] - s5_perf['annualized_return']
+            vol_diff = s6_perf['annualized_volatility'] - s5_perf['annualized_volatility']
+            sharpe_diff = s6_perf['sharpe_ratio'] - s5_perf['sharpe_ratio']
+            dd_diff = s6_perf['max_drawdown_pct'] - s5_perf['max_drawdown_pct']
+            
+            print(f"Return Difference: {return_diff:+.2%}")
+            print(f"Volatility Difference: {vol_diff:+.2%}")
+            print(f"Sharpe Difference: {sharpe_diff:+.3f}")
+            print(f"Max Drawdown Difference: {dd_diff:+.1f}%")
+            print(f"Time in Market Difference: {s6_time_in_market - s5_time_in_market:+.1f}%")
+            
+            s6_long_pct = (s6_perf['avg_long_signals'] / s6_perf['num_instruments']) * 100
+            s6_short_pct = (s6_perf['avg_short_signals'] / s6_perf['num_instruments']) * 100
+            print(f"\nStrategy 6 Position Breakdown:")
+            print(f"  Time Long: {s6_long_pct:.1f}%")
+            print(f"  Time Short: {s6_short_pct:.1f}%")
+            print(f"  Time Out: {100 - s6_time_in_market:.1f}%")
+            
+            return {
+                'strategy4': strategy4_results,
+                'strategy5': strategy5_results,
+                'strategy6': strategy6_results
+            }
         
-        # Key insights from the book
-        print(f"\n🔹 **Key Insights from Chapter 6:**")
-        print("   1. Long/short trend following enables profit in falling markets")
-        print("   2. Provides better diversification than long-only strategies")
-        print("   3. Higher turnover due to position reversals on trend changes")
-        print("   4. Similar volatility to no-trend but different risk characteristics")
-        print("   5. The 'magical diversification machine' - creates negative correlations")
-        
-        # Long/short specific insights
-        long_short_perf = comparison_results['long_short_trend']['performance']
-        print(f"\n🔹 **Long/Short Strategy Characteristics:**")
-        print(f"   Average Long Exposure: {long_short_perf.get('avg_long_exposure', 0):.1%}")
-        print(f"   Average Short Exposure: {long_short_perf.get('avg_short_exposure', 0):.1%}")
-        print(f"   Average Net Exposure: {long_short_perf.get('avg_net_exposure', 0):.1%}")
-        print(f"   Average Gross Exposure: {long_short_perf.get('avg_gross_exposure', 0):.1%}")
-        
-    return comparison_results
+    except Exception as e:
+        print(f"Error in strategy comparison: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def main():
     """
-    Main function to run Chapter 6 long/short trend following strategy.
+    Test Strategy 6 implementation.
     """
-    print("=" * 70)
-    print("CHAPTER 6: SLOW TREND FOLLOWING, LONG AND SHORT")
-    print("=" * 70)
+    print("=" * 60)
+    print("TESTING STRATEGY 6: LONG/SHORT TREND FOLLOWING")
+    print("=" * 60)
     
-    # Test the long/short trend following strategy
-    results = test_long_short_trend_following_strategy(
-        capital=1000000,
-        risk_target=0.2,
-        max_instruments=25,  # Manageable size for testing
-        fast_window=64,      # Book's recommended fast window
-        slow_window=256      # Book's recommended slow window
-    )
-    
-    if results:
-        print("\nChapter 6 long/short trend following strategy implementation completed successfully!")
-    else:
-        print("\nError: Could not complete long/short trend following strategy test.")
+    try:
+        # Run Strategy 6 backtest
+        results = backtest_long_short_trend_strategy(
+            data_dir='Data',
+            capital=50000000,
+            risk_target=0.2,
+            weight_method='handcrafted'
+        )
+        
+        # Analyze results
+        analyze_long_short_results(results)
+        
+        # Compare all strategies
+        comparison = compare_all_strategies()
+        
+        print(f"\nStrategy 6 backtest completed successfully!")
+        return results
+        
+    except Exception as e:
+        print(f"Error in Strategy 6 backtest: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 if __name__ == "__main__":
     main()

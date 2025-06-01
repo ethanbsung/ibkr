@@ -1,696 +1,610 @@
 from chapter6 import *
+from chapter5 import *
+from chapter4 import *
+from chapter3 import *
+from chapter2 import *
+from chapter1 import *
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+import os
+from typing import Dict, List, Tuple
 import warnings
 warnings.filterwarnings('ignore')
 
-#####   FORECAST CALCULATION FUNCTIONS   #####
+#####   STRATEGY 7: SLOW TREND FOLLOWING WITH TREND STRENGTH   #####
 
-def calculate_price_volatility(price, percentage_volatility):
+def calculate_raw_forecast(prices: pd.Series, fast_span: int = 64, slow_span: int = 256) -> pd.Series:
     """
-    Calculate price-based volatility for forecast calculation.
+    Calculate raw forecast for EWMAC trend following.
     
-    From Chapter 7:
-        σp = Price × σ% ÷ 16
-    
-    Parameters:
-        price (float or pd.Series): Current price(s).
-        percentage_volatility (float or pd.Series): Volatility as percentage (e.g., 0.16 for 16%).
-    
-    Returns:
-        float or pd.Series: Price-based volatility.
-    """
-    return price * percentage_volatility / 16
-
-def calculate_raw_forecast(fast_ma, slow_ma, price, percentage_volatility):
-    """
-    Calculate raw forecast using EWMAC methodology from Chapter 7.
-    
-    Formula:
+    From book:
         Raw forecast = (Fast EWMA - Slow EWMA) ÷ σp
-        where σp = Price × σ% ÷ 16
-    
-    Parameters:
-        fast_ma (pd.Series): Fast moving average series.
-        slow_ma (pd.Series): Slow moving average series.
-        price (pd.Series): Price series.
-        percentage_volatility (pd.Series): Volatility as percentage.
-    
-    Returns:
-        pd.Series: Raw forecast series.
-    """
-    ewmac_signal = fast_ma - slow_ma
-    price_vol = calculate_price_volatility(price, percentage_volatility)
-    
-    # Avoid division by zero
-    price_vol = price_vol.replace(0, np.nan)
-    raw_forecast = ewmac_signal / price_vol
-    
-    # Fill NaN values with 0 (neutral forecast)
-    raw_forecast.fillna(0, inplace=True)
-    
-    return raw_forecast
-
-def scale_forecast(raw_forecast, scale_factor=1.9):
-    """
-    Scale raw forecast by a constant factor.
-    
-    From Chapter 7:
-        Scaled forecast = Raw forecast × 1.9
-    
-    Parameters:
-        raw_forecast (pd.Series): Raw forecast series.
-        scale_factor (float): Scaling factor (1.9 for EWMAC(64,256) in book).
-    
-    Returns:
-        pd.Series: Scaled forecast series.
-    """
-    return raw_forecast * scale_factor
-
-def cap_forecast(scaled_forecast, max_forecast=20, min_forecast=-20):
-    """
-    Cap forecast values to prevent extreme positions.
-    
-    From Chapter 7:
-        Capped forecast = Max(Min(Scaled forecast, +20), -20)
-    
-    Parameters:
-        scaled_forecast (pd.Series): Scaled forecast series.
-        max_forecast (float): Maximum forecast value (default 20).
-        min_forecast (float): Minimum forecast value (default -20).
-    
-    Returns:
-        pd.Series: Capped forecast series.
-    """
-    return scaled_forecast.clip(lower=min_forecast, upper=max_forecast)
-
-def calculate_forecast_signals(prices, fast_window=64, slow_window=256, use_ewma=True, 
-                             scale_factor=1.9, max_forecast=20, min_forecast=-20):
-    """
-    Calculate complete forecast signals for trend following with strength.
-    
-    This implements the full Chapter 7 forecast methodology:
-    1. Calculate EWMAC signal (Fast MA - Slow MA)
-    2. Calculate raw forecast = EWMAC ÷ σp
-    3. Scale forecast by factor (1.9)
-    4. Cap forecast between -20 and +20
+        where σp = Price × σ% ÷ 16 (daily price volatility)
     
     Parameters:
         prices (pd.Series): Price series.
-        fast_window (int): Fast moving average window.
-        slow_window (int): Slow moving average window.
-        use_ewma (bool): Use EWMA instead of SMA.
-        scale_factor (float): Forecast scaling factor.
-        max_forecast (float): Maximum forecast value.
-        min_forecast (float): Minimum forecast value.
+        fast_span (int): Fast EWMA span (default 64).
+        slow_span (int): Slow EWMA span (default 256).
     
     Returns:
-        dict: Dictionary containing all forecast components.
+        pd.Series: Raw forecast values.
     """
-    # Calculate moving averages
-    if use_ewma:
-        fast_ma = calculate_ewma_trend(prices, fast_window)
-        slow_ma = calculate_ewma_trend(prices, slow_window)
-    else:
-        fast_ma = calculate_simple_moving_average(prices, fast_window)
-        slow_ma = calculate_simple_moving_average(prices, slow_window)
+    # Calculate EWMA crossover (same as before)
+    ewmac = calculate_ewma_trend(prices, fast_span, slow_span)
     
-    # Calculate returns and volatility
-    returns = prices.pct_change()
-    percentage_volatility = calculate_blended_volatility(returns)
+    # Calculate daily price volatility: σp = Price × σ% ÷ 16
+    returns = prices.pct_change().dropna()
     
-    # Calculate raw forecast
-    raw_forecast = calculate_raw_forecast(fast_ma, slow_ma, prices, percentage_volatility)
+    # Calculate annualized volatility and convert to daily price volatility
+    rolling_vol = returns.ewm(span=32).std() * np.sqrt(business_days_per_year)
+    daily_price_vol = prices * rolling_vol / 16
     
-    # Scale and cap forecast
-    scaled_forecast = scale_forecast(raw_forecast, scale_factor)
-    capped_forecast = cap_forecast(scaled_forecast, max_forecast, min_forecast)
+    # Reindex to match EWMAC
+    daily_price_vol = daily_price_vol.reindex(ewmac.index, method='ffill')
     
-    # Position direction (for analysis)
-    position_direction = pd.Series(index=capped_forecast.index)
-    position_direction[capped_forecast > 0] = 1.0   # Long
-    position_direction[capped_forecast < 0] = -1.0  # Short
-    position_direction[capped_forecast == 0] = 0.0  # Flat (rare)
-    position_direction.fillna(0.0, inplace=True)
+    # Calculate raw forecast: EWMAC ÷ σp
+    raw_forecast = ewmac / daily_price_vol
     
-    return {
-        'fast_ma': fast_ma,
-        'slow_ma': slow_ma,
-        'percentage_volatility': percentage_volatility,
-        'raw_forecast': raw_forecast,
-        'scaled_forecast': scaled_forecast,
-        'capped_forecast': capped_forecast,
-        'position_direction': position_direction,
-        'forecast_strength': capped_forecast.abs(),  # Absolute forecast for analysis
-        'uptrend': capped_forecast > 0,
-        'downtrend': capped_forecast < 0
-    }
+    # Handle division by zero or very small volatility
+    raw_forecast = raw_forecast.replace([np.inf, -np.inf], 0)
+    raw_forecast = raw_forecast.fillna(0)
+    
+    return raw_forecast
 
-#####   FORECAST-BASED POSITION SIZING   #####
-
-def calculate_forecast_position_size(capital, weight, idm, multiplier, price, fx_rate, 
-                                   volatility_pct, capped_forecast, risk_target=0.2):
+def calculate_scaled_forecast(raw_forecast: pd.Series, forecast_scalar: float = 1.9) -> pd.Series:
     """
-    Calculate position size using forecast scaling methodology from Chapter 7.
+    Calculate scaled forecast from raw forecast.
     
-    Formula:
-        N = Capped_forecast × Capital × IDM × Weight × τ ÷ (10 × Multiplier × Price × FX × σ%)
+    From book:
+        Scaled forecast = Raw forecast × Forecast scalar
+        where Forecast scalar = 1.9 for EWMAC(64,256)
     
     Parameters:
-        capital (float): Total capital.
-        weight (float): Target weight for instrument.
-        idm (float): Instrument diversification multiplier.
-        multiplier (float): Contract multiplier.
-        price (float): Current price.
-        fx_rate (float): FX rate.
-        volatility_pct (float): Volatility as percentage.
-        capped_forecast (float): Capped forecast value (-20 to +20).
-        risk_target (float): Risk target.
+        raw_forecast (pd.Series): Raw forecast values.
+        forecast_scalar (float): Forecast scalar (default 1.9).
     
     Returns:
-        float: Number of contracts (signed based on forecast).
+        pd.Series: Scaled forecast values.
     """
-    if (np.isnan(capped_forecast) or capped_forecast == 0 or 
-        volatility_pct <= 0 or price <= 0 or multiplier <= 0):
+    return raw_forecast * forecast_scalar
+
+def calculate_capped_forecast(scaled_forecast: pd.Series, cap: float = 20.0) -> pd.Series:
+    """
+    Calculate capped forecast to limit extreme positions.
+    
+    From book:
+        Capped forecast = Max(Min(Scaled forecast, +20), -20)
+    
+    Parameters:
+        scaled_forecast (pd.Series): Scaled forecast values.
+        cap (float): Maximum absolute forecast value (default 20.0).
+    
+    Returns:
+        pd.Series: Capped forecast values.
+    """
+    return np.clip(scaled_forecast, -cap, cap)
+
+def calculate_forecast_for_instrument(prices: pd.Series, fast_span: int = 64, slow_span: int = 256,
+                                    forecast_scalar: float = 1.9, cap: float = 20.0) -> pd.Series:
+    """
+    Calculate complete forecast pipeline for an instrument.
+    
+    Parameters:
+        prices (pd.Series): Price series.
+        fast_span (int): Fast EWMA span.
+        slow_span (int): Slow EWMA span.
+        forecast_scalar (float): Forecast scalar.
+        cap (float): Maximum absolute forecast value.
+    
+    Returns:
+        pd.Series: Capped forecast values.
+    """
+    raw_forecast = calculate_raw_forecast(prices, fast_span, slow_span)
+    scaled_forecast = calculate_scaled_forecast(raw_forecast, forecast_scalar)
+    capped_forecast = calculate_capped_forecast(scaled_forecast, cap)
+    
+    return capped_forecast
+
+def calculate_strategy7_position_size(symbol, capital, weight, idm, price, volatility, 
+                                    multiplier, forecast, risk_target=0.2, fx_rate=1.0):
+    """
+    Calculate position size for Strategy 7 with forecast scaling.
+    
+    From book:
+        N = Capped forecast × Capital × IDM × Weight × τ ÷ (10 × Multiplier × Price × FX × σ%)
+    
+    The key difference is the division by 10 and multiplication by forecast instead of ±1.
+    
+    Parameters:
+        symbol (str): Instrument symbol.
+        capital (float): Total portfolio capital.
+        weight (float): Weight allocated to this instrument.
+        idm (float): Instrument Diversification Multiplier.
+        price (float): Current price.
+        volatility (float): Annualized volatility forecast.
+        multiplier (float): Contract multiplier.
+        forecast (float): Capped forecast value.
+        risk_target (float): Target risk fraction.
+        fx_rate (float): FX rate for currency conversion.
+    
+    Returns:
+        float: Number of contracts for this instrument.
+    """
+    if np.isnan(volatility) or volatility <= 0 or np.isnan(forecast):
         return 0
     
-    # Chapter 7 position sizing formula
-    numerator = capped_forecast * capital * idm * weight * risk_target
-    denominator = 10 * multiplier * price * fx_rate * volatility_pct
+    # Calculate position size with forecast scaling
+    numerator = forecast * capital * idm * weight * risk_target
+    denominator = 10 * multiplier * price * fx_rate * volatility
     
-    position = numerator / denominator
+    position_size = numerator / denominator
     
-    # Apply reasonable position limits
-    max_reasonable_position = 1000
-    if abs(position) > max_reasonable_position:
-        position = np.sign(position) * max_reasonable_position
+    # Protect against infinite or extremely large position sizes
+    if np.isinf(position_size) or abs(position_size) > 100000:
+        return 0
     
-    return position
+    return position_size
 
-def apply_forecast_scaling_to_weights(portfolio_weights, forecast_signals_dict):
+def backtest_forecast_trend_strategy(data_dir='Data', capital=50000000, risk_target=0.2,
+                                   short_span=32, long_years=10, 
+                                   trend_fast_span=64, trend_slow_span=256,
+                                   forecast_scalar=1.9, forecast_cap=20.0,
+                                   weight_method='handcrafted',
+                                   start_date=None, end_date=None):
     """
-    Apply forecast scaling to determine position magnitudes and directions.
+    Backtest Strategy 7: Forecast-based trend following multi-instrument portfolio.
+    
+    Implementation follows book exactly: "Trade a portfolio of one or more instruments, 
+    each with positions scaled for a variable risk estimate. Hold a long position when 
+    they are in an uptrend, and hold a short position in a downtrend. Scale the size 
+    of the position according to the strength of the trend."
     
     Parameters:
-        portfolio_weights (dict): Original portfolio weights by instrument.
-        forecast_signals_dict (dict): Forecast signals for each instrument.
-    
-    Returns:
-        dict: Dictionary of {date: {symbol: forecast_value}} where forecast_value is -20 to +20.
-    """
-    daily_forecasts = {}
-    
-    # Get all dates from forecast signals
-    all_dates = set()
-    for signals in forecast_signals_dict.values():
-        if 'capped_forecast' in signals:
-            all_dates.update(signals['capped_forecast'].index)
-    
-    all_dates = sorted(list(all_dates))
-    
-    # For each date, get forecast value for each instrument
-    for date in all_dates:
-        date_forecasts = {}
-        for symbol in portfolio_weights.keys():
-            if symbol in forecast_signals_dict:
-                signals = forecast_signals_dict[symbol]
-                if date in signals['capped_forecast'].index:
-                    forecast_value = signals['capped_forecast'].loc[date]
-                    date_forecasts[symbol] = forecast_value if not pd.isna(forecast_value) else 0.0
-                else:
-                    # Try to forward fill from previous date
-                    prev_forecast = signals['capped_forecast'].asof(date)
-                    date_forecasts[symbol] = prev_forecast if not pd.isna(prev_forecast) else 0.0
-            else:
-                # No forecast signals for this instrument
-                date_forecasts[symbol] = 0.0
-        
-        daily_forecasts[date] = date_forecasts
-    
-    return daily_forecasts
-
-#####   FORECAST-BASED PORTFOLIO BACKTESTING   #####
-
-def backtest_forecast_trend_following_portfolio(portfolio_weights, data, instruments_df, capital=1000000, 
-                                              risk_target=0.2, start_date='2000-01-01', end_date='2025-01-01',
-                                              fast_window=64, slow_window=256, use_ewma=True,
-                                              scale_factor=1.9, max_forecast=20, min_forecast=-20):
-    """
-    Backtest trend following strategy with forecast scaling (Chapter 7).
-    
-    This implements Strategy 7: positions scaled according to forecast strength,
-    where forecasts range from -20 to +20 based on trend strength.
-    
-    Parameters:
-        portfolio_weights (dict): Portfolio weights by instrument.
-        data (dict): Individual instrument data.
-        instruments_df (pd.DataFrame): Instruments specifications.
+        data_dir (str): Directory containing price data files.
         capital (float): Initial capital.
         risk_target (float): Target risk fraction.
-        start_date (str): Start date for backtest.
-        end_date (str): End date for backtest.
-        fast_window (int): Fast moving average window.
-        slow_window (int): Slow moving average window.
-        use_ewma (bool): Use EWMA instead of SMA.
-        scale_factor (float): Forecast scaling factor.
-        max_forecast (float): Maximum forecast value.
-        min_forecast (float): Minimum forecast value.
+        short_span (int): EWMA span for short-run volatility.
+        long_years (int): Years for long-run volatility average.
+        trend_fast_span (int): Fast EWMA span for trend filter.
+        trend_slow_span (int): Slow EWMA span for trend filter.
+        forecast_scalar (float): Forecast scaling factor (default 1.9).
+        forecast_cap (float): Maximum absolute forecast value (default 20.0).
+        weight_method (str): Method for calculating instrument weights.
+        start_date (str): Start date for backtest (YYYY-MM-DD).
+        end_date (str): End date for backtest (YYYY-MM-DD).
     
     Returns:
-        dict: Backtest results including forecast-specific metrics.
+        dict: Comprehensive backtest results.
     """
-    if not portfolio_weights:
-        return {'error': 'No portfolio weights provided'}
-
-    # Filter and normalize portfolio weights
-    active_portfolio_weights = {
-        s: w for s, w in portfolio_weights.items() if s in data
-    }
-    if not active_portfolio_weights:
-        return {'error': 'No instruments available in data'}
+    print("=" * 60)
+    print("STRATEGY 7: SLOW TREND FOLLOWING WITH TREND STRENGTH")
+    print("=" * 60)
     
-    total_active_weight = sum(active_portfolio_weights.values())
-    normalized_weights = {s: w / total_active_weight for s, w in active_portfolio_weights.items()}
-
-    # Calculate forecast signals for each instrument
-    print("Calculating forecast signals for each instrument...")
-    forecast_signals_dict = {}
+    # Load all instrument data
+    instrument_data = load_all_instrument_data(data_dir)
     
-    for symbol in normalized_weights.keys():
+    if len(instrument_data) == 0:
+        raise ValueError("No instrument data loaded successfully")
+    
+    # Load instrument specifications
+    instruments_df = load_instrument_data()
+    
+    print(f"\nPortfolio Configuration:")
+    print(f"  Instruments: {len(instrument_data)}")
+    print(f"  Capital: ${capital:,.0f}")
+    print(f"  Risk Target: {risk_target:.1%}")
+    print(f"  Weight Method: {weight_method}")
+    print(f"  Trend Filter: EWMAC({trend_fast_span},{trend_slow_span}) with Forecasts")
+    print(f"  Forecast Scalar: {forecast_scalar}")
+    print(f"  Forecast Cap: ±{forecast_cap}")
+    
+    # Calculate IDM
+    idm = calculate_idm_from_count(len(instrument_data))
+    print(f"  IDM: {idm:.2f}")
+    
+    # Calculate instrument weights
+    weights = calculate_instrument_weights(instrument_data, weight_method, instruments_df)
+    
+    # Determine the full date range for backtest
+    all_start_dates = [df.index.min() for df in instrument_data.values()]
+    all_end_dates = [df.index.max() for df in instrument_data.values()]
+    
+    # Use the earliest available data to latest available data
+    backtest_start = start_date if start_date else min(all_start_dates)
+    backtest_end = end_date if end_date else max(all_end_dates)
+    
+    if isinstance(backtest_start, str):
+        backtest_start = pd.to_datetime(backtest_start)
+    if isinstance(backtest_end, str):
+        backtest_end = pd.to_datetime(backtest_end)
+    
+    print(f"\nBacktest Period:")
+    print(f"  Start: {backtest_start.date()}")
+    print(f"  End: {backtest_end.date()}")
+    print(f"  Duration: {(backtest_end - backtest_start).days} days")
+    
+    # Create full date range for backtest
+    full_date_range = pd.date_range(backtest_start, backtest_end, freq='D')
+    full_date_range = full_date_range[full_date_range.weekday < 5]  # Business days only
+    
+    # Process each instrument and calculate volatility forecasts + trend forecasts
+    processed_data = {}
+    
+    for symbol, df in instrument_data.items():
+        # Get instrument specs
         try:
-            symbol_data = data[symbol]
-            prices = symbol_data['Last']
-            
-            forecast_signals = calculate_forecast_signals(
-                prices, fast_window, slow_window, use_ewma, 
-                scale_factor, max_forecast, min_forecast
-            )
-            forecast_signals_dict[symbol] = forecast_signals
-            
-        except Exception as e:
-            print(f"Error calculating forecast signals for {symbol}: {e}")
+            specs = get_instrument_specs(symbol, instruments_df)
+            multiplier = specs['multiplier']
+        except:
             continue
-
-    if not forecast_signals_dict:
-        return {'error': 'No forecast signals calculated'}
-
-    # Calculate correlation matrix and IDM
-    returns_for_idm_list = []
-    for s_key in normalized_weights.keys():
-        if 'returns' in data[s_key]:
-            s_returns = data[s_key]['returns'].copy()
-            s_returns.name = s_key
-            returns_for_idm_list.append(s_returns)
-
-    correlation_matrix = pd.DataFrame()
-    base_idm = 1.0
-
-    if returns_for_idm_list and len(returns_for_idm_list) > 1:
-        try:
-            common_returns_matrix = pd.concat(returns_for_idm_list, axis=1, join='inner').dropna()
-            
-            if not common_returns_matrix.empty and common_returns_matrix.shape[1] > 1:
-                correlation_matrix = calculate_correlation_matrix(common_returns_matrix)
-                equal_weights_series = pd.Series({symbol: 1.0/len(normalized_weights) for symbol in normalized_weights.keys()})
-                equal_weights_series = equal_weights_series.reindex(correlation_matrix.index).fillna(0)
-                equal_weights_series = equal_weights_series / equal_weights_series.sum()
-                base_idm = calculate_idm_from_correlations(equal_weights_series, correlation_matrix)
-                print(f"Calculated IDM for forecast strategy: {base_idm:.2f}")
-        except Exception as e:
-            print(f"Error calculating IDM: {e}")
-
-    # Apply forecast scaling to get daily forecast values
-    print("Applying forecast scaling to determine position sizes...")
-    daily_forecasts = apply_forecast_scaling_to_weights(normalized_weights, forecast_signals_dict)
-    
-    # Determine backtest date range
-    returns_for_backtest = []
-    for s_key in normalized_weights.keys():
-        if 'returns' in data[s_key]:
-            s_returns = data[s_key]['returns'].copy()
-            s_returns.name = s_key
-            returns_for_backtest.append(s_returns)
-
-    if not returns_for_backtest:
-        return {'error': 'No returns data for backtest'}
         
-    returns_matrix = pd.concat(returns_for_backtest, axis=1, join='outer')
-    param_start_dt = pd.to_datetime(start_date)
-    param_end_dt = pd.to_datetime(end_date)
-    returns_matrix = returns_matrix[(returns_matrix.index >= param_start_dt) & 
-                                   (returns_matrix.index <= param_end_dt)]
-    
-    if returns_matrix.empty:
-        return {'error': 'No data in specified date range'}
-
-    # Pre-calculate volatilities
-    volatilities = {}
-    for symbol in normalized_weights.keys():
-        symbol_returns = data[symbol]['returns']
-        blended_vol = calculate_blended_volatility(symbol_returns)
-        volatilities[symbol] = blended_vol.reindex(returns_matrix.index, method='ffill')
-
-    # Initialize tracking variables
-    portfolio_returns = []
-    positions_data = {symbol: [] for symbol in normalized_weights.keys()}
-    forecast_data = {symbol: [] for symbol in normalized_weights.keys()}
-    long_exposure_data = []
-    short_exposure_data = []
-    net_exposure_data = []
-    gross_exposure_data = []
-    idm_data = []
-
-    # Main backtesting loop
-    for i, date_val in enumerate(returns_matrix.index):
-        if i == 0:
-            # Initialize first day
-            for symbol in normalized_weights.keys():
-                positions_data[symbol].append(0)
-                forecast_data[symbol].append(0)
-            portfolio_returns.append(0)
-            long_exposure_data.append(0)
-            short_exposure_data.append(0)
-            net_exposure_data.append(0)
-            gross_exposure_data.append(0)
-            idm_data.append(base_idm)
+        # Filter data to backtest period
+        df_filtered = df[(df.index >= backtest_start) & (df.index <= backtest_end)].copy()
+        
+        if len(df_filtered) < 300:  # Need more data for trend filter (256 + buffer)
             continue
-
-        prev_date = returns_matrix.index[i-1]
-        current_date = date_val
-
-        # Get forecast values for previous date
-        if prev_date in daily_forecasts:
-            current_forecasts = daily_forecasts[prev_date]
-        else:
-            available_dates_forecasts = [d for d in daily_forecasts.keys() if d <= prev_date]
-            if available_dates_forecasts:
-                closest_date_forecasts = max(available_dates_forecasts)
-                current_forecasts = daily_forecasts[closest_date_forecasts]
-            else:
-                current_forecasts = {symbol: 0.0 for symbol in normalized_weights.keys()}
-
-        # Calculate exposure metrics
-        long_exposure = 0
-        short_exposure = 0
-        net_exposure = 0
-        gross_exposure = 0
-
-        for symbol, base_weight in normalized_weights.items():
-            forecast_value = current_forecasts.get(symbol, 0.0)
-            forecast_data[symbol].append(forecast_value)
-            
-            # Calculate effective exposure based on forecast
-            # Forecast ranges from -20 to +20, so normalize to get exposure
-            effective_exposure = abs(forecast_value) / 20.0 * base_weight  # Scale by forecast strength
-            gross_exposure += effective_exposure
-            
-            if forecast_value > 0:
-                long_exposure += effective_exposure
-                net_exposure += effective_exposure
-            elif forecast_value < 0:
-                short_exposure += effective_exposure
-                net_exposure -= effective_exposure
-
-        long_exposure_data.append(long_exposure)
-        short_exposure_data.append(short_exposure)
-        net_exposure_data.append(net_exposure)
-        gross_exposure_data.append(gross_exposure)
-        idm_data.append(base_idm)
-
-        # Calculate positions and P&L
-        daily_portfolio_return = 0
-
-        for symbol, base_weight in normalized_weights.items():
-            try:
-                specs = get_instrument_specs(symbol, instruments_df)
-                multiplier = specs['multiplier']
-                symbol_data_df = data[symbol]
-
-                forecast_value = current_forecasts.get(symbol, 0.0)
-
-                # Calculate forecast-based position
-                if (prev_date in symbol_data_df.index and current_date in symbol_data_df.index and
-                    not pd.isna(symbol_data_df.loc[prev_date, 'Last']) and 
-                    not pd.isna(symbol_data_df.loc[current_date, 'returns'])):
-
-                    prev_price = symbol_data_df.loc[prev_date, 'Last']
-                    current_return = symbol_data_df.loc[current_date, 'returns']
-
-                    # Get volatility
-                    if prev_date in volatilities[symbol].index:
-                        blended_vol = volatilities[symbol].loc[prev_date]
-                    else:
-                        blended_vol = 0.16
-
-                    position = 0
-                    if blended_vol > 0 and prev_price > 0 and forecast_value != 0:
-                        position = calculate_forecast_position_size(
-                            capital, base_weight, base_idm, multiplier, prev_price, 1.0, 
-                            blended_vol, forecast_value, risk_target
-                        )
-
-                    positions_data[symbol].append(position)
-
-                    # Calculate P&L
-                    if position != 0 and not pd.isna(current_return):
-                        notional_exposure = position * multiplier * prev_price
-                        instrument_pnl = notional_exposure * current_return
-                        instrument_return_contrib = instrument_pnl / capital
-
-                        if np.isinf(instrument_return_contrib) or np.isnan(instrument_return_contrib):
-                            print(f"FORECAST OVERFLOW {current_date}: {symbol} pos={position:.2f}")
-                            raise ValueError(f"Overflow for {symbol}")
-
-                        daily_portfolio_return += instrument_return_contrib
-                else:
-                    positions_data[symbol].append(0)
-
-            except Exception as e:
-                positions_data[symbol].append(0)
-
-        portfolio_returns.append(daily_portfolio_return)
-
-    # Create results dataframe
-    results_df = pd.DataFrame(index=returns_matrix.index)
-    results_df['portfolio_returns'] = portfolio_returns
-    results_df['long_exposure'] = long_exposure_data
-    results_df['short_exposure'] = short_exposure_data
-    results_df['net_exposure'] = net_exposure_data
-    results_df['gross_exposure'] = gross_exposure_data
-    results_df['idm'] = idm_data
-
-    for symbol, pos_list in positions_data.items():
-        if len(pos_list) == len(results_df):
-            results_df[f'position_{symbol}'] = pos_list
-
-    for symbol, forecast_list in forecast_data.items():
-        if len(forecast_list) == len(results_df):
-            results_df[f'forecast_{symbol}'] = forecast_list
-
-    # Remove initial zero return day
-    if len(results_df) > 1 and results_df['portfolio_returns'].iloc[0] == 0:
-        results_df = results_df.iloc[1:]
-
-    if results_df.empty:
-        return {'error': 'No valid backtest data'}
-
-    # Calculate performance metrics
-    equity_curve_series = build_account_curve(results_df['portfolio_returns'], capital)
-    performance = calculate_comprehensive_performance(equity_curve_series, results_df['portfolio_returns'])
-
-    # Add forecast-specific metrics
-    performance['num_instruments'] = len(normalized_weights)
-    performance['avg_gross_exposure'] = results_df['gross_exposure'].mean()
-    performance['max_gross_exposure'] = results_df['gross_exposure'].max()
-    performance['avg_net_exposure'] = results_df['net_exposure'].mean()
-    performance['avg_long_exposure'] = results_df['long_exposure'].mean()
-    performance['avg_short_exposure'] = results_df['short_exposure'].mean()
-    performance['avg_idm'] = results_df['idm'].mean()
-    performance['fast_window'] = fast_window
-    performance['slow_window'] = slow_window
-    performance['scale_factor'] = scale_factor
-    performance['max_forecast'] = max_forecast
-
-    # Calculate average forecast statistics
-    forecast_cols = [col for col in results_df.columns if col.startswith('forecast_')]
-    if forecast_cols:
-        all_forecasts = results_df[forecast_cols].values.flatten()
-        all_forecasts = all_forecasts[~np.isnan(all_forecasts)]
-        performance['avg_forecast_magnitude'] = np.mean(np.abs(all_forecasts))
-        performance['max_forecast_used'] = np.max(np.abs(all_forecasts))
-        performance['percent_time_long'] = np.mean(all_forecasts > 0)
-        performance['percent_time_short'] = np.mean(all_forecasts < 0)
-        performance['percent_time_flat'] = np.mean(all_forecasts == 0)
-
-    return {
-        'data': results_df,
-        'performance': performance,
-        'portfolio_weights': normalized_weights,
-        'forecast_signals': forecast_signals_dict,
-        'correlation_matrix': correlation_matrix,
-        'idm': base_idm
-    }
-
-#####   STRATEGY COMPARISON FUNCTIONS   #####
-
-def compare_four_strategies(portfolio_weights, data, instruments_df, capital=1000000, 
-                          risk_target=0.2, fast_window=64, slow_window=256):
-    """
-    Compare four strategies: No trend, Long-only trend, Long/short trend, Forecast trend.
-    
-    This implements the comparison shown in Chapter 7 between:
-    - Strategy 4: No trend filter (buy and hold)
-    - Strategy 5: Long-only trend filter  
-    - Strategy 6: Long/short trend filter
-    - Strategy 7: Forecast-based trend filter
-    
-    Parameters:
-        portfolio_weights (dict): Portfolio weights.
-        data (dict): Individual instrument data.
-        instruments_df (pd.DataFrame): Instruments specifications.
-        capital (float): Initial capital.
-        risk_target (float): Target risk fraction.
-        fast_window (int): Fast MA window.
-        slow_window (int): Slow MA window.
-    
-    Returns:
-        dict: Comparison results for all four strategies.
-    """
-    print("=" * 80)
-    print("FOUR STRATEGY COMPARISON: No Trend vs Long-Only vs Long/Short vs Forecast")
-    print("=" * 80)
-    
-    comparison_results = {}
-
-    # Strategy 4: No trend filter (buy and hold)
-    print("\nRunning Strategy 4: Buy and Hold (No Trend Filter)...")
-    scaled_risk_target = risk_target * (20.0 / 14.9)  # Scale to achieve ~20% volatility
-    no_trend_result = backtest_portfolio_with_individual_data(
-        portfolio_weights, data, instruments_df, capital, scaled_risk_target
-    )
-    comparison_results['Strategy 4 (No Trend)'] = no_trend_result
-
-    # Strategy 5: Long-only trend filter
-    print("\nRunning Strategy 5: Long-Only Trend Following...")
-    long_only_result = backtest_trend_following_portfolio(
-        portfolio_weights, data, instruments_df, capital, risk_target, 
-        fast_window=fast_window, slow_window=slow_window
-    )
-    comparison_results['Strategy 5 (Long-Only)'] = long_only_result
-
-    # Strategy 6: Long/short trend filter
-    print("\nRunning Strategy 6: Long/Short Trend Following...")
-    long_short_result = backtest_long_short_trend_following_portfolio(
-        portfolio_weights, data, instruments_df, capital, risk_target,
-        fast_window=fast_window, slow_window=slow_window
-    )
-    comparison_results['Strategy 6 (Long/Short)'] = long_short_result
-
-    # Strategy 7: Forecast-based trend filter
-    print("\nRunning Strategy 7: Forecast-Based Trend Following...")
-    forecast_result = backtest_forecast_trend_following_portfolio(
-        portfolio_weights, data, instruments_df, capital, risk_target,
-        fast_window=fast_window, slow_window=slow_window
-    )
-    comparison_results['Strategy 7 (Forecast)'] = forecast_result
-
-    # Display comparison results
-    print(f"\n{'='*80}")
-    print("STRATEGY COMPARISON RESULTS")
-    print(f"{'='*80}")
-    
-    # Summary table
-    print(f"\n{'Strategy':<25} {'Return':<10} {'Vol':<8} {'Sharpe':<8} {'MaxDD':<8} {'Exposure':<10}")
-    print("-" * 80)
-    
-    for strategy_name, result in comparison_results.items():
-        if 'error' not in result:
-            perf = result['performance']
-            exposure = perf.get('avg_gross_exposure', perf.get('avg_trend_exposure', 1.0))
-            
-            print(f"{strategy_name:<25} {perf['annualized_return']:<10.1%} "
-                  f"{perf['annualized_volatility']:<8.1%} {perf['sharpe_ratio']:<8.3f} "
-                  f"{perf['max_drawdown_pct']:<8.1f}% {exposure:<10.1%}")
-        else:
-            print(f"{strategy_name:<25} ERROR: {result['error']}")
-
-    # Detailed metrics comparison
-    print(f"\n{'-'*50}")
-    print("DETAILED METRICS COMPARISON")
-    print(f"{'-'*50}")
-    
-    for strategy_name, result in comparison_results.items():
-        if 'error' not in result:
-            perf = result['performance']
-            print(f"\n{strategy_name}:")
-            print(f"  Annual Return: {perf['annualized_return']:.2%}")
-            print(f"  Volatility: {perf['annualized_volatility']:.2%}")
-            print(f"  Sharpe Ratio: {perf['sharpe_ratio']:.3f}")
-            print(f"  Max Drawdown: {perf['max_drawdown_pct']:.1f}%")
-            print(f"  IDM: {result.get('idm', 'N/A')}")
-            
-            # Strategy-specific metrics
-            if 'avg_forecast_magnitude' in perf:
-                print(f"  Avg Forecast Magnitude: {perf['avg_forecast_magnitude']:.1f}")
-                print(f"  Time Long: {perf.get('percent_time_long', 0):.1%}")
-                print(f"  Time Short: {perf.get('percent_time_short', 0):.1%}")
-            elif 'avg_long_exposure' in perf:
-                print(f"  Long Exposure: {perf['avg_long_exposure']:.1%}")
-                print(f"  Short Exposure: {perf['avg_short_exposure']:.1%}")
-                print(f"  Net Exposure: {perf['avg_net_exposure']:.1%}")
-            elif 'avg_trend_exposure' in perf:
-                print(f"  Trend Exposure: {perf['avg_trend_exposure']:.1%}")
-
-    return comparison_results
-
-def test_forecast_trend_following_strategy(capital=1000000, risk_target=0.2, 
-                                         max_instruments=25, fast_window=64, slow_window=256):
-    """
-    Test forecast-based trend following strategy on optimized portfolio.
-    """
-    print("=" * 80)
-    print("CHAPTER 7: FORECAST-BASED TREND FOLLOWING STRATEGY TEST")
-    print("=" * 80)
-    
-    # Get optimized portfolio setup
-    try:
-        strategies, data, instruments_df, asset_classes = run_portfolio_comparison(capital, risk_target, max_instruments)
         
-        if not strategies or 'Optimized Selection' not in strategies:
-            print("Error: Could not create optimized portfolio")
-            return
-        
-        optimized_weights = strategies['Optimized Selection']
-        
-        print(f"Testing on optimized portfolio:")
-        print(f"  Instruments: {len(optimized_weights)}")
-        print(f"  Symbols: {list(optimized_weights.keys())}")
-        print(f"  Capital: ${capital:,.0f}")
-        print(f"  Risk Target: {risk_target:.1%}")
-        
-        # Run four-strategy comparison
-        comparison_results = compare_four_strategies(
-            optimized_weights, data, instruments_df, capital, risk_target, fast_window, slow_window
+        # Calculate blended volatility forecast (same as previous strategies)
+        df_filtered['blended_vol'] = calculate_blended_volatility(
+            df_filtered['returns'], short_span=short_span, long_years=long_years
         )
         
-        return comparison_results
+        # Calculate forecast using trend strength
+        df_filtered['forecast'] = calculate_forecast_for_instrument(
+            df_filtered['Last'], trend_fast_span, trend_slow_span, 
+            forecast_scalar, forecast_cap
+        )
+        
+        # Calculate position sizes with forecast scaling
+        positions = []
+        for i in range(len(df_filtered)):
+            if i == 0:
+                positions.append(0)  # No position on first day
+            else:
+                prev_price = df_filtered['Last'].iloc[i-1]
+                prev_vol = df_filtered['blended_vol'].iloc[i-1]
+                prev_forecast = df_filtered['forecast'].iloc[i-1]
+                
+                if (np.isnan(prev_vol) or prev_vol <= 0 or np.isnan(prev_forecast)):
+                    position = 0
+                else:
+                    position = calculate_strategy7_position_size(
+                        symbol, capital, weights[symbol], idm, 
+                        prev_price, prev_vol, multiplier, prev_forecast, risk_target
+                    )
+                positions.append(position)
+        
+        df_filtered['position'] = positions
+        df_filtered['position_lag'] = df_filtered['position'].shift(1)
+        df_filtered['multiplier'] = multiplier
+        df_filtered['weight'] = weights[symbol]
+        
+        # Calculate P&L for this instrument
+        df_filtered['instrument_pnl'] = (
+            df_filtered['position_lag'] * 
+            multiplier * 
+            df_filtered['returns'] * 
+            df_filtered['Last'].shift(1)
+        )
+        
+        processed_data[symbol] = df_filtered
+    
+    print(f"\nCombining portfolio...")
+    print(f"Successfully processed {len(processed_data)} instruments")
+    
+    # Create portfolio DataFrame with full date range
+    portfolio_df = pd.DataFrame(index=full_date_range)
+    portfolio_df['total_pnl'] = 0.0
+    portfolio_df['num_active_instruments'] = 0
+    portfolio_df['avg_forecast'] = 0.0
+    portfolio_df['avg_abs_forecast'] = 0.0
+    
+    # Aggregate P&L across all instruments for each day
+    for symbol, df in processed_data.items():
+        # Initialize columns if they don't exist
+        portfolio_df[f'{symbol}_position'] = 0.0
+        portfolio_df[f'{symbol}_pnl'] = 0.0
+        portfolio_df[f'{symbol}_forecast'] = 0.0
+        
+        # Add P&L only for dates where we have actual data
+        actual_dates = df.index.intersection(full_date_range)
+        
+        for date in actual_dates:
+            if date in df.index and not pd.isna(df.loc[date, 'instrument_pnl']):
+                portfolio_df.loc[date, 'total_pnl'] += df.loc[date, 'instrument_pnl']
+                portfolio_df.loc[date, f'{symbol}_pnl'] = df.loc[date, 'instrument_pnl']
+                portfolio_df.loc[date, f'{symbol}_position'] = df.loc[date, 'position_lag']
+                portfolio_df.loc[date, f'{symbol}_forecast'] = df.loc[date, 'forecast']
+                
+                if abs(df.loc[date, 'position_lag']) > 0.01:
+                    portfolio_df.loc[date, 'num_active_instruments'] += 1
+    
+    # Calculate average forecast metrics
+    forecast_cols = [col for col in portfolio_df.columns if col.endswith('_forecast')]
+    if forecast_cols:
+        portfolio_df['avg_forecast'] = portfolio_df[forecast_cols].mean(axis=1)
+        portfolio_df['avg_abs_forecast'] = portfolio_df[forecast_cols].abs().mean(axis=1)
+    
+    # Calculate portfolio returns
+    portfolio_df['strategy_returns'] = portfolio_df['total_pnl'] / capital
+    
+    # Remove rows with no activity (weekends, holidays)
+    portfolio_df = portfolio_df[portfolio_df.index.weekday < 5]  # Business days only
+    portfolio_df = portfolio_df.dropna(subset=['strategy_returns'])
+    
+    print(f"Final portfolio data: {len(portfolio_df)} observations")
+    print(f"Average active instruments: {portfolio_df['num_active_instruments'].mean():.1f}")
+    print(f"Average forecast: {portfolio_df['avg_forecast'].mean():.2f}")
+    print(f"Average absolute forecast: {portfolio_df['avg_abs_forecast'].mean():.2f}")
+    
+    # Calculate performance metrics
+    account_curve = build_account_curve(portfolio_df['strategy_returns'], capital)
+    performance = calculate_comprehensive_performance(account_curve, portfolio_df['strategy_returns'])
+    
+    # Add strategy-specific metrics
+    performance['num_instruments'] = len(processed_data)
+    performance['idm'] = idm
+    performance['avg_active_instruments'] = portfolio_df['num_active_instruments'].mean()
+    performance['avg_forecast'] = portfolio_df['avg_forecast'].mean()
+    performance['avg_abs_forecast'] = portfolio_df['avg_abs_forecast'].mean()
+    performance['weight_method'] = weight_method
+    performance['backtest_start'] = backtest_start
+    performance['backtest_end'] = backtest_end
+    performance['trend_fast_span'] = trend_fast_span
+    performance['trend_slow_span'] = trend_slow_span
+    performance['forecast_scalar'] = forecast_scalar
+    performance['forecast_cap'] = forecast_cap
+    
+    # Calculate per-instrument statistics
+    instrument_stats = {}
+    for symbol in processed_data.keys():
+        pnl_col = f'{symbol}_pnl'
+        pos_col = f'{symbol}_position'
+        forecast_col = f'{symbol}_forecast'
+        
+        if pnl_col in portfolio_df.columns:
+            # Get only non-zero P&L periods for this instrument
+            inst_pnl = portfolio_df[pnl_col][portfolio_df[pnl_col] != 0]
+            inst_forecast = portfolio_df[forecast_col][portfolio_df[pnl_col] != 0]
+            
+            if len(inst_pnl) > 10:  # Need minimum observations
+                inst_returns = inst_pnl / capital
+                inst_performance = calculate_comprehensive_performance(
+                    build_account_curve(inst_returns, capital), inst_returns
+                )
+                
+                instrument_stats[symbol] = {
+                    'total_return': inst_performance['total_return'],
+                    'sharpe_ratio': inst_performance['sharpe_ratio'],
+                    'volatility': inst_performance['annualized_volatility'],
+                    'max_drawdown': inst_performance['max_drawdown_pct'],
+                    'avg_position': portfolio_df[pos_col][portfolio_df[pos_col] != 0].mean(),
+                    'weight': weights[symbol],
+                    'active_days': len(inst_pnl),
+                    'total_pnl': inst_pnl.sum(),
+                    'avg_forecast': inst_forecast.mean(),
+                    'avg_abs_forecast': inst_forecast.abs().mean(),
+                    'max_forecast': inst_forecast.max(),
+                    'min_forecast': inst_forecast.min()
+                }
+    
+    return {
+        'portfolio_data': portfolio_df,
+        'instrument_data': processed_data,
+        'performance': performance,
+        'instrument_stats': instrument_stats,
+        'weights': weights,
+        'idm': idm,
+        'config': {
+            'capital': capital,
+            'risk_target': risk_target,
+            'short_span': short_span,
+            'long_years': long_years,
+            'trend_fast_span': trend_fast_span,
+            'trend_slow_span': trend_slow_span,
+            'forecast_scalar': forecast_scalar,
+            'forecast_cap': forecast_cap,
+            'weight_method': weight_method,
+            'backtest_start': backtest_start,
+            'backtest_end': backtest_end
+        }
+    }
+
+def analyze_forecast_results(results):
+    """
+    Analyze and display comprehensive forecast trend following results.
+    
+    Parameters:
+        results (dict): Results from backtest_forecast_trend_strategy.
+    """
+    performance = results['performance']
+    instrument_stats = results['instrument_stats']
+    config = results['config']
+    
+    print("\n" + "=" * 60)
+    print("FORECAST TREND FOLLOWING PERFORMANCE ANALYSIS")
+    print("=" * 60)
+    
+    # Overall performance
+    print(f"\n--- Overall Portfolio Performance ---")
+    print(f"Total Return: {performance['total_return']:.2%}")
+    print(f"Annualized Return: {performance['annualized_return']:.2%}")
+    print(f"Annualized Volatility: {performance['annualized_volatility']:.2%}")
+    print(f"Sharpe Ratio: {performance['sharpe_ratio']:.3f}")
+    print(f"Max Drawdown: {performance['max_drawdown_pct']:.1f}%")
+    print(f"Skewness: {performance['skewness']:.3f}")
+    
+    # Forecast characteristics
+    print(f"\n--- Forecast Characteristics ---")
+    print(f"Average Active Instruments: {performance['avg_active_instruments']:.1f}")
+    print(f"Average Forecast: {performance['avg_forecast']:.2f}")
+    print(f"Average Absolute Forecast: {performance['avg_abs_forecast']:.2f}")
+    print(f"Forecast Scalar: {config['forecast_scalar']}")
+    print(f"Forecast Cap: ±{config['forecast_cap']}")
+    print(f"Trend Filter: EWMAC({config['trend_fast_span']},{config['trend_slow_span']}) with Forecasts")
+    
+    # Portfolio characteristics
+    print(f"\n--- Portfolio Characteristics ---")
+    print(f"Number of Instruments: {performance['num_instruments']}")
+    print(f"IDM: {performance['idm']:.2f}")
+    print(f"Capital: ${config['capital']:,.0f}")
+    print(f"Risk Target: {config['risk_target']:.1%}")
+    print(f"Backtest Period: {config['backtest_start'].date()} to {config['backtest_end'].date()}")
+    
+    # Top performing instruments
+    print(f"\n--- Top 10 Performing Instruments (by Total P&L) ---")
+    sorted_instruments = sorted(
+        instrument_stats.items(), 
+        key=lambda x: x[1]['total_pnl'], 
+        reverse=True
+    )
+    
+    print(f"{'Symbol':<8} {'Weight':<8} {'Return':<10} {'Sharpe':<8} {'AvgFcst':<8} {'MaxFcst':<8} {'TotalPnL':<12} {'Days':<6}")
+    print("-" * 95)
+    
+    for symbol, stats in sorted_instruments[:10]:
+        print(f"{symbol:<8} {stats['weight']:<8.3f} {stats['total_return']:<10.2%} "
+              f"{stats['sharpe_ratio']:<8.3f} {stats['avg_forecast']:<8.2f} "
+              f"{stats['max_forecast']:<8.2f} ${stats['total_pnl']:<11,.0f} {stats['active_days']:<6}")
+
+def compare_all_forecast_strategies():
+    """
+    Compare Strategy 4 (no trend) vs Strategy 5 (long only) vs Strategy 6 (long/short) vs Strategy 7 (forecasts).
+    """
+    print("\n" + "=" * 80)
+    print("STRATEGY COMPARISON: STRATEGY 4 vs 5 vs 6 vs 7")
+    print("=" * 80)
+    
+    try:
+        # Strategy 4 (no trend filter)
+        print("Running Strategy 4 (no trend filter)...")
+        strategy4_results = backtest_multi_instrument_strategy(
+            data_dir='Data',
+            capital=50000000,
+            risk_target=0.2,
+            weight_method='handcrafted'
+        )
+        
+        # Strategy 5 (with trend filter, long only)
+        print("Running Strategy 5 (trend filter, long only)...")
+        strategy5_results = backtest_trend_following_strategy(
+            data_dir='Data',
+            capital=50000000,
+            risk_target=0.2,
+            weight_method='handcrafted'
+        )
+        
+        # Strategy 6 (with trend filter, long/short)
+        print("Running Strategy 6 (trend filter, long/short)...")
+        strategy6_results = backtest_long_short_trend_strategy(
+            data_dir='Data',
+            capital=50000000,
+            risk_target=0.2,
+            weight_method='handcrafted'
+        )
+        
+        # Strategy 7 (with forecasts)
+        print("Running Strategy 7 (trend filter with forecasts)...")
+        strategy7_results = backtest_forecast_trend_strategy(
+            data_dir='Data',
+            capital=50000000,
+            risk_target=0.2,
+            weight_method='handcrafted'
+        )
+        
+        if strategy4_results and strategy5_results and strategy6_results and strategy7_results:
+            s4_perf = strategy4_results['performance']
+            s5_perf = strategy5_results['performance']
+            s6_perf = strategy6_results['performance']
+            s7_perf = strategy7_results['performance']
+            
+            print(f"\n{'Strategy':<15} {'Ann. Return':<12} {'Volatility':<12} {'Sharpe':<8} {'Max DD':<8} {'Special':<15}")
+            print("-" * 85)
+            
+            print(f"{'Strategy 4':<15} {s4_perf['annualized_return']:<12.2%} "
+                  f"{s4_perf['annualized_volatility']:<12.2%} "
+                  f"{s4_perf['sharpe_ratio']:<8.3f} "
+                  f"{s4_perf['max_drawdown_pct']:<8.1f}% "
+                  f"{'Always Long':<15}")
+            
+            print(f"{'Strategy 5':<15} {s5_perf['annualized_return']:<12.2%} "
+                  f"{s5_perf['annualized_volatility']:<12.2%} "
+                  f"{s5_perf['sharpe_ratio']:<8.3f} "
+                  f"{s5_perf['max_drawdown_pct']:<8.1f}% "
+                  f"{'Long/Flat':<15}")
+            
+            print(f"{'Strategy 6':<15} {s6_perf['annualized_return']:<12.2%} "
+                  f"{s6_perf['annualized_volatility']:<12.2%} "
+                  f"{s6_perf['sharpe_ratio']:<8.3f} "
+                  f"{s6_perf['max_drawdown_pct']:<8.1f}% "
+                  f"{'Long/Short':<15}")
+            
+            print(f"{'Strategy 7':<15} {s7_perf['annualized_return']:<12.2%} "
+                  f"{s7_perf['annualized_volatility']:<12.2%} "
+                  f"{s7_perf['sharpe_ratio']:<8.3f} "
+                  f"{s7_perf['max_drawdown_pct']:<8.1f}% "
+                  f"{'Forecasts':<15}")
+            
+            print(f"\n--- Strategy 7 vs Strategy 6 Analysis ---")
+            return_diff = s7_perf['annualized_return'] - s6_perf['annualized_return']
+            vol_diff = s7_perf['annualized_volatility'] - s6_perf['annualized_volatility']
+            sharpe_diff = s7_perf['sharpe_ratio'] - s6_perf['sharpe_ratio']
+            dd_diff = s7_perf['max_drawdown_pct'] - s6_perf['max_drawdown_pct']
+            
+            print(f"Return Difference: {return_diff:+.2%}")
+            print(f"Volatility Difference: {vol_diff:+.2%}")
+            print(f"Sharpe Difference: {sharpe_diff:+.3f}")
+            print(f"Max Drawdown Difference: {dd_diff:+.1f}%")
+            
+            if 'avg_forecast' in s7_perf:
+                print(f"\nStrategy 7 Forecast Characteristics:")
+                print(f"  Average Forecast: {s7_perf['avg_forecast']:.2f}")
+                print(f"  Average Absolute Forecast: {s7_perf['avg_abs_forecast']:.2f}")
+            
+            return {
+                'strategy4': strategy4_results,
+                'strategy5': strategy5_results,
+                'strategy6': strategy6_results,
+                'strategy7': strategy7_results
+            }
         
     except Exception as e:
-        print(f"Error in forecast trend following test: {e}")
+        print(f"Error in strategy comparison: {e}")
         import traceback
         traceback.print_exc()
+        return None
 
 def main():
     """
-    Main function to test Chapter 7 forecast-based trend following.
+    Test Strategy 7 implementation.
     """
-    print("=" * 70)
-    print("CHAPTER 7: SLOW TREND FOLLOWING WITH TREND STRENGTH (FORECASTS)")
-    print("=" * 70)
+    print("=" * 60)
+    print("TESTING STRATEGY 7: FORECAST TREND FOLLOWING")
+    print("=" * 60)
     
-    # Test forecast trend following strategy
-    test_forecast_trend_following_strategy()
+    try:
+        # Run Strategy 7 backtest
+        results = backtest_forecast_trend_strategy(
+            data_dir='Data',
+            capital=50000000,
+            risk_target=0.2,
+            weight_method='handcrafted'
+        )
+        
+        # Analyze results
+        analyze_forecast_results(results)
+        
+        # Compare all strategies
+        comparison = compare_all_forecast_strategies()
+        
+        print(f"\nStrategy 7 backtest completed successfully!")
+        return results
+        
+    except Exception as e:
+        print(f"Error in Strategy 7 backtest: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 if __name__ == "__main__":
     main()
