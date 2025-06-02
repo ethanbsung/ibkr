@@ -61,6 +61,7 @@ def calculate_idm_from_count(num_instruments):
     """
     Calculate Instrument Diversification Multiplier based on number of instruments.
     
+    From the book: IDM should be 2.5 for 30+ instruments.
     This is a simplified version. The book references Table 16 and Appendix B
     for more sophisticated calculations.
     
@@ -70,20 +71,30 @@ def calculate_idm_from_count(num_instruments):
     Returns:
         float: IDM value.
     """
-    # Simple approximation: IDM increases with sqrt of number of instruments
-    # but with diminishing returns. Cap at reasonable level.
+    # Corrected IDM calculation based on book guidance
     if num_instruments <= 1:
         return 1.0
+    elif num_instruments <= 2:
+        return 1.2
+    elif num_instruments <= 3:
+        return 1.48
+    elif num_instruments <= 4:
+        return 1.56
     elif num_instruments <= 5:
-        return 1.5
-    elif num_instruments <= 10:
-        return 2.0
-    elif num_instruments <= 20:
-        return 2.5
-    elif num_instruments <= 50:
-        return 3.0
+        return 1.7
+    elif num_instruments <= 6:
+        return 1.9
+    elif num_instruments <= 7:
+        return 2.10
+    elif num_instruments <= 14:
+        return 2.2
+    elif num_instruments <= 24:
+        return 2.3
+    elif num_instruments <= 29:
+        return 2.4
     else:
-        return 3.5
+        # Book specifies 2.5 for 30+ instruments
+        return 2.5
 
 def calculate_instrument_weights(instrument_data, method='equal', instruments_df=None, common_hypothetical_SR=0.3, annual_turnover_T=7.0, risk_target=0.2):
     """
@@ -397,25 +408,33 @@ def backtest_multi_instrument_strategy(data_dir='Data', capital=50000000, risk_t
     
     print(f"  Instruments after preprocessing: {len(processed_instrument_data)}")
 
-    # Determine common date range for backtest
-    # Ensure all_indices uses processed_instrument_data directly
+    # Determine common date range for backtest - start from earliest available data from ANY instrument
     all_indices = [df.index for df in processed_instrument_data.values() if not df.empty]
-    if not all_indices: # Add a check in case processed_instrument_data is empty or all DFs are empty
+    if not all_indices:
         raise ValueError("No valid instrument data in processed_instrument_data to determine date range.")
 
-    # Use global min/max dates to allow instruments to phase in
+    # Use absolute earliest and latest dates across all instruments to maximize trading period
     all_available_start_dates = [idx.min() for idx in all_indices]
     all_available_end_dates = [idx.max() for idx in all_indices]
 
-    global_min_date = min(all_available_start_dates) if all_available_start_dates else pd.Timestamp.min # Fallback for safety
-    global_max_date = max(all_available_end_dates) if all_available_end_dates else pd.Timestamp.max   # Fallback for safety
+    global_min_date = min(all_available_start_dates) if all_available_start_dates else pd.Timestamp.min
+    global_max_date = max(all_available_end_dates) if all_available_end_dates else pd.Timestamp.max
     
-    backtest_start_dt = pd.to_datetime(start_date) if start_date else global_min_date
-    backtest_end_dt = pd.to_datetime(end_date) if end_date else global_max_date
+    # Start from earliest available data if no start_date specified
+    # If start_date is specified, use the earlier of start_date or earliest available data
+    if start_date:
+        user_start_dt = pd.to_datetime(start_date)
+        backtest_start_dt = min(user_start_dt, global_min_date)  # Use earlier date
+    else:
+        backtest_start_dt = global_min_date
     
-    # Clamp user-defined dates to the absolute earliest/latest possible dates from data
-    backtest_start_dt = max(backtest_start_dt, global_min_date)
-    backtest_end_dt = min(backtest_end_dt, global_max_date)
+    # End at latest available data if no end_date specified
+    # If end_date is specified, use the later of end_date or latest available data
+    if end_date:
+        user_end_dt = pd.to_datetime(end_date)
+        backtest_end_dt = max(user_end_dt, global_max_date)  # Use later date
+    else:
+        backtest_end_dt = global_max_date
 
     if backtest_start_dt >= backtest_end_dt:
         raise ValueError(f"Invalid backtest period: Start {backtest_start_dt}, End {backtest_end_dt}. Check data alignment and date inputs.")
