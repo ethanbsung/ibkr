@@ -5,6 +5,7 @@ from chapter1 import *
 import numpy as np
 import pandas as pd
 import os
+from copy import copy
 from typing import Dict, List, Tuple
 import warnings
 import matplotlib.pyplot as plt
@@ -31,9 +32,9 @@ def calculate_ewma_trend(prices: pd.Series, fast_span: int = 64, slow_span: int 
     Returns:
         pd.Series: EWMAC trend signal (positive = uptrend, negative/zero = downtrend).
     """
-    # Calculate EWMA with specified spans
-    fast_ewma = prices.ewm(span=fast_span, adjust=False).mean()
-    slow_ewma = prices.ewm(span=slow_span, adjust=False).mean()
+    # Calculate EWMA with specified spans and min_periods=2 (matching author's code)
+    fast_ewma = prices.ewm(span=fast_span, min_periods=2, adjust=False).mean()
+    slow_ewma = prices.ewm(span=slow_span, min_periods=2, adjust=False).mean()
     
     # EWMAC = fast - slow
     ewmac = fast_ewma - slow_ewma
@@ -59,47 +60,44 @@ def calculate_trend_signal(prices: pd.Series, fast_span: int = 64, slow_span: in
     
     return trend_signal
 
-def calculate_strategy5_position_size(symbol, capital, weight, idm, price, volatility, 
-                                    multiplier, trend_signal, risk_target=0.2, fx_rate=1.0):
+def apply_trend_filter_to_position(base_position: pd.Series, prices: pd.Series, 
+                                 fast_span: int = 64, slow_span: int = 256) -> pd.Series:
     """
-    Calculate position size for Strategy 5 with trend filter.
+    Apply trend filter to base position by zeroing out bearish positions.
     
-    From book: "Every day we'd calculate our optimal position using the standard strategy 
-    four position sizing equations, accounting for current levels of volatility, price 
-    and exchange rates. However, if the trend was showing a downward movement, then 
-    we'd set our optimal position to zero."
-    
-    Formula:
-        N = (Capital × IDM × Weight × τ × TrendSignal) ÷ (Multiplier × Price × FX × σ%)
+    This matches the author's implementation approach:
+    1. Calculate base position (without trend filter)
+    2. Calculate EWMAC trend signal
+    3. Zero out positions when EWMAC < 0 (bearish)
     
     Parameters:
-        symbol (str): Instrument symbol.
-        capital (float): Total portfolio capital.
-        weight (float): Weight allocated to this instrument.
-        idm (float): Instrument Diversification Multiplier.
-        price (float): Current price.
-        volatility (float): Annualized volatility forecast.
-        multiplier (float): Contract multiplier.
-        trend_signal (float): Trend signal (1 = long, 0 = flat).
-        risk_target (float): Target risk fraction.
-        fx_rate (float): FX rate for currency conversion.
+        base_position (pd.Series): Base position size without trend filter.
+        prices (pd.Series): Price series for trend calculation.
+        fast_span (int): Fast EWMA span.
+        slow_span (int): Slow EWMA span.
     
     Returns:
-        float: Number of contracts for this instrument.
+        pd.Series: Filtered position (zero when bearish, base position when bullish).
     """
-    if np.isnan(volatility) or volatility <= 0 or np.isnan(trend_signal):
-        return 0
+    from copy import copy
     
-    # Calculate base position size (same as Strategy 4)
-    base_position = calculate_portfolio_position_size(
-        symbol, capital, weight, idm, price, volatility, 
-        multiplier, risk_target, fx_rate
-    )
+    # Start with copy of base position
+    filtered_position = copy(base_position)
     
-    # Apply trend filter: multiply by 1 (long) or 0 (flat)
-    position_with_trend = base_position * trend_signal
+    # Calculate EWMAC values
+    ewmac_values = calculate_ewma_trend(prices, fast_span, slow_span)
     
-    return position_with_trend
+    # Identify bearish periods (EWMAC < 0)
+    bearish = ewmac_values < 0
+    
+    # Zero out positions during bearish periods
+    filtered_position[bearish] = 0
+    
+    return filtered_position
+
+# Note: calculate_strategy5_position_size function removed - now using new approach:
+# 1. Calculate base position using calculate_portfolio_position_size
+# 2. Apply trend filter by zeroing out bearish positions using apply_trend_filter_to_position
 
 def backtest_trend_following_strategy(data_dir='Data', capital=50000000, risk_target=0.2,
                                     short_span=32, long_years=10, min_vol_floor=0.05,
@@ -138,6 +136,11 @@ def backtest_trend_following_strategy(data_dir='Data', capital=50000000, risk_ta
     print("=" * 60)
     print("STRATEGY 5: SLOW TREND FOLLOWING, LONG ONLY")
     print("=" * 60)
+    
+    # Load FX data
+    print("\nLoading FX data...")
+    fx_data = load_fx_data(data_dir)
+    currency_mapping = get_instrument_currency_mapping()
     
     # Load all instrument data using the same function as chapter 4
     all_instruments_specs_df = load_instrument_data()
@@ -179,9 +182,7 @@ def backtest_trend_following_strategy(data_dir='Data', capital=50000000, risk_ta
         df['vol_forecast'] = blended_vol_series.shift(1).reindex(df.index).ffill().fillna(min_vol_floor)
         
         # Calculate trend signal using EWMAC (no lookahead bias)
-        trend_signal_series = calculate_trend_signal(df['Last'], trend_fast_span, trend_slow_span)
-        # Shift to prevent lookahead bias - trend signal for day T uses data up to T-1
-        df['trend_signal'] = trend_signal_series.shift(1).reindex(df.index).fillna(0)
+        # No need to shift here since we'll apply the filter directly to positions later
         
         # Ensure critical data is present
         df.dropna(subset=['Last', 'vol_forecast', 'daily_price_change_pct'], inplace=True)
@@ -312,43 +313,75 @@ def backtest_trend_following_strategy(data_dir='Data', capital=50000000, risk_ta
 
             # Get data for sizing (from previous_trading_date) and P&L (current_date)
             try:
-                # Sizing based on previous day's close price and vol/trend forecasts
+                # Sizing based on previous day's close price and vol forecasts
                 price_for_sizing = df_instrument.loc[previous_trading_date, 'Last']
                 vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast']
-                trend_for_sizing = df_instrument.loc[current_date, 'trend_signal']
                 
                 # Data for P&L calculation for current_date
                 price_at_start_of_trading = df_instrument.loc[previous_trading_date, 'Last']
                 price_at_end_of_trading = df_instrument.loc[current_date, 'Last']
                 
                 if (pd.isna(price_for_sizing) or pd.isna(vol_for_sizing) or 
-                    pd.isna(price_at_start_of_trading) or pd.isna(price_at_end_of_trading) or
-                    pd.isna(trend_for_sizing)):
+                    pd.isna(price_at_start_of_trading) or pd.isna(price_at_end_of_trading)):
                     num_contracts = 0.0
                     instrument_pnl_today = 0.0
+                    trend_signal_value = 0.0
                 else:
                     vol_for_sizing = vol_for_sizing if vol_for_sizing > 0 else min_vol_floor
                     
-                    # Calculate position size with trend filter (Strategy 5 modification)
-                    num_contracts = calculate_strategy5_position_size(
-                        symbol=symbol, capital=capital_at_start_of_day, weight=instrument_weight, 
-                        idm=idm, price=price_for_sizing, volatility=vol_for_sizing, 
-                        multiplier=instrument_multiplier, trend_signal=trend_for_sizing, 
-                        risk_target=risk_target
-                    )
+                    # Get FX rate for position sizing
+                    instrument_currency = currency_mapping.get(symbol, 'USD')
+                    fx_rate = get_fx_rate_for_date_and_currency(current_date, instrument_currency, fx_data)
                     
-                    instrument_pnl_today = num_contracts * instrument_multiplier * (price_at_end_of_trading - price_at_start_of_trading)
-                    
-                    # Count active instruments and long signals
-                    if abs(num_contracts) > 0.01:
-                        num_active_instruments += 1
-                    if trend_for_sizing > 0.5:
-                        num_long_signals += 1
+                    # Skip KRW instruments as requested
+                    if fx_rate is None:
+                        num_contracts = 0.0
+                        instrument_pnl_today = 0.0
+                        trend_signal_value = 0.0
+                    else:
+                        # Step 1: Calculate base position (without trend filter) using Strategy 4 logic
+                        base_position = calculate_portfolio_position_size(
+                            symbol=symbol, capital=capital_at_start_of_day, weight=instrument_weight, 
+                            idm=idm, price=price_for_sizing, volatility=vol_for_sizing, 
+                            multiplier=instrument_multiplier, risk_target=risk_target, fx_rate=fx_rate
+                        )
+                        
+                        # Step 2: Apply trend filter - calculate EWMAC for current date using data up to previous date
+                        # Get price data up to previous trading date to avoid lookahead bias
+                        price_data_for_trend = df_instrument[df_instrument.index <= previous_trading_date]['Last']
+                        
+                        if len(price_data_for_trend) >= max(trend_fast_span, trend_slow_span):
+                            # Calculate EWMAC using historical data only
+                            ewmac_values = calculate_ewma_trend(price_data_for_trend, trend_fast_span, trend_slow_span)
+                            current_ewmac = ewmac_values.iloc[-1] if not ewmac_values.empty else 0.0
+                            
+                            # Apply trend filter: zero out position if bearish (EWMAC < 0)
+                            if current_ewmac < 0:
+                                num_contracts = 0.0  # Bearish - no position
+                                trend_signal_value = 0.0
+                            else:
+                                num_contracts = base_position  # Bullish - full position
+                                trend_signal_value = 1.0
+                        else:
+                            # Insufficient data for trend calculation
+                            num_contracts = 0.0
+                            trend_signal_value = 0.0
+                        
+                        # P&L calculation with FX rate to convert to base currency (USD)
+                        price_change_in_local_currency = price_at_end_of_trading - price_at_start_of_trading
+                        price_change_in_base_currency = price_change_in_local_currency * fx_rate
+                        instrument_pnl_today = num_contracts * instrument_multiplier * price_change_in_base_currency
+                        
+                        # Count active instruments and long signals
+                        if abs(num_contracts) > 0.01:
+                            num_active_instruments += 1
+                        if trend_signal_value > 0.5:
+                            num_long_signals += 1
             
             except KeyError:  # Date not found for this instrument
                 num_contracts = 0.0
                 instrument_pnl_today = 0.0
-                trend_for_sizing = 0.0
+                trend_signal_value = 0.0
             
             current_day_positions[symbol] = num_contracts
             daily_total_pnl += instrument_pnl_today
@@ -367,13 +400,34 @@ def backtest_trend_following_strategy(data_dir='Data', capital=50000000, risk_ta
         
         for symbol_k, contracts_k in current_day_positions.items(): 
             record[f'{symbol_k}_contracts'] = contracts_k
+        # Store trend signals calculated during position sizing
+        trend_signals_today = {}
+        for symbol_k, contracts_k in current_day_positions.items():
+            # Get trend signal from the position calculation above
+            if contracts_k > 0.01:
+                trend_signals_today[f'{symbol_k}_trend'] = 1.0  # Was bullish
+            else:
+                # Need to check if zero due to bearish signal or other reasons
+                try:
+                    df_instrument = processed_instrument_data[symbol_k]
+                    if current_date in df_instrument.index and previous_trading_date in df_instrument.index:
+                        price_data_for_trend = df_instrument[df_instrument.index <= previous_trading_date]['Last']
+                        if len(price_data_for_trend) >= max(trend_fast_span, trend_slow_span):
+                            ewmac_values = calculate_ewma_trend(price_data_for_trend, trend_fast_span, trend_slow_span)
+                            current_ewmac = ewmac_values.iloc[-1] if not ewmac_values.empty else 0.0
+                            trend_signals_today[f'{symbol_k}_trend'] = 1.0 if current_ewmac >= 0 else 0.0
+                        else:
+                            trend_signals_today[f'{symbol_k}_trend'] = 0.0
+                    else:
+                        trend_signals_today[f'{symbol_k}_trend'] = 0.0
+                except:
+                    trend_signals_today[f'{symbol_k}_trend'] = 0.0
+
         for symbol in processed_instrument_data.keys():
             if symbol not in current_day_positions:
                 record[f'{symbol}_contracts'] = 0.0
-            try:
-                record[f'{symbol}_trend'] = processed_instrument_data[symbol].loc[current_date, 'trend_signal']
-            except:
-                record[f'{symbol}_trend'] = 0.0
+            # Use calculated trend signals
+            record[f'{symbol}_trend'] = trend_signals_today.get(f'{symbol}_trend', 0.0)
                 
         portfolio_daily_records.append(record)
 

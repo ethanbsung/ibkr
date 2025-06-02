@@ -10,6 +10,146 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 warnings.filterwarnings('ignore')
 
+#####   FX RATE HANDLING   #####
+
+def load_fx_data(data_dir='Data'):
+    """
+    Load FX rate data for non-USD currencies.
+    
+    Parameters:
+        data_dir (str): Directory containing FX data files.
+    
+    Returns:
+        dict: Dictionary with currency code as key and DataFrame as value.
+    """
+    fx_data = {}
+    
+    # Define FX files and their properties
+    fx_files = {
+        'EUR': {'file': 'eur_daily_data.csv', 'invert': False},  # EUR/USD
+        'JPY': {'file': 'jpy_daily_data.csv', 'invert': False},  # JPY/USD  
+        'GBP': {'file': 'gbp_daily_data.csv', 'invert': False},  # GBP/USD
+        'CNH': {'file': 'uc_daily_data.csv', 'invert': True},    # USD/CNH -> CNH/USD
+        'SGD': {'file': 'snd_daily_data.csv', 'invert': True}    # USD/SGD -> SGD/USD
+    }
+    
+    for currency, config in fx_files.items():
+        filepath = os.path.join(data_dir, config['file'])
+        
+        if os.path.exists(filepath):
+            try:
+                df = pd.read_csv(filepath, parse_dates=['Time'])
+                df.set_index('Time', inplace=True)
+                df = df.dropna()
+                
+                if not df.empty and 'Last' in df.columns:
+                    # Get the FX rate series
+                    fx_series = df['Last'].copy()
+                    
+                    # Invert if needed (for USD/XXX -> XXX/USD)
+                    if config['invert']:
+                        fx_series = 1.0 / fx_series
+                    
+                    fx_data[currency] = fx_series
+                    print(f"Loaded FX data for {currency}: {len(fx_series)} records from {fx_series.index.min().date()} to {fx_series.index.max().date()}")
+                
+            except Exception as e:
+                print(f"Warning: Could not load FX data for {currency}: {e}")
+        else:
+            print(f"Warning: FX file not found for {currency}: {filepath}")
+    
+    return fx_data
+
+def get_instrument_currency_mapping():
+    """
+    Map instrument symbols to their base currencies.
+    
+    Returns:
+        dict: Dictionary mapping instrument symbols to currency codes.
+    """
+    # This mapping is based on typical futures contract currencies
+    # You may need to adjust this based on your specific instruments
+    currency_mapping = {
+        # EUR-based instruments
+        'DAX': 'EUR', 'GBS': 'EUR', 'GBM': 'EUR', 'GBL': 'EUR', 'GBX': 'EUR',
+        'BTS': 'EUR', 'BTP': 'EUR', 'FBON': 'EUR', 'CAC40': 'EUR', 'ESTX50': 'EUR',
+        'SXAP': 'EUR', 'SXPP': 'EUR', 'SXDP': 'EUR', 'SXIP': 'EUR', 'SX8P': 'EUR',
+        'SXTP': 'EUR', 'SX6P': 'EUR', 'V2TX': 'EUR', 'EURO': 'EUR',
+        
+        # JPY-based instruments  
+        'JPY': 'JPY', 'NIK': 'JPY',
+        
+        # GBP-based instruments
+        'GBP': 'GBP', 'Z': 'GBP',
+        
+        # CNH-based instruments
+        'UC': 'CNH', 'XINA50': 'CNH',
+        
+        # SGD-based instruments
+        'SIR': 'SGD', 'SND': 'SGD', 'SSG': 'SGD',
+        
+        # KRW-based instruments (skip these)
+        'KRW': 'KRW', 'RP': 'KRW', 'RY': 'KRW',
+        
+        # All other instruments default to USD
+        # This includes: MES, MNQ, MYM, RSV, M2K, ZT, Z3N, ZF, ZN, TN, TWE, ZB, YE,
+        # ALI, HG, MGC, SCI, PA, PL, SI, QM, HH, RB, QG, HO, AIGCI,
+        # CSC, ZC, GF, HE, LE, ZO, KE, ZR, ZS, ZM, ZL, ZW, VIX, MBT, ETHUSDRR, etc.
+    }
+    
+    return currency_mapping
+
+def get_fx_rate_for_date_and_currency(date, currency, fx_data):
+    """
+    Get FX rate for a specific date and currency.
+    
+    Parameters:
+        date (pd.Timestamp): The date for which to get the FX rate.
+        currency (str): Currency code (e.g., 'EUR', 'JPY').
+        fx_data (dict): Dictionary of FX data series.
+    
+    Returns:
+        float: FX rate to convert from currency to USD (currency/USD).
+    """
+    if currency == 'USD' or currency is None:
+        return 1.0
+    
+    if currency == 'KRW':
+        # Skip KRW instruments as requested
+        return None
+    
+    if currency not in fx_data:
+        print(f"Warning: No FX data available for {currency}, using 1.0")
+        return 1.0
+    
+    fx_series = fx_data[currency]
+    
+    if fx_series.empty:
+        return 1.0
+    
+    # Try to get exact date
+    if date in fx_series.index:
+        return fx_series.loc[date]
+    
+    # If date is before first available data, use first available rate
+    if date < fx_series.index.min():
+        return fx_series.iloc[0]
+    
+    # If date is after last available data, use last available rate
+    if date > fx_series.index.max():
+        return fx_series.iloc[-1]
+    
+    # For dates in between, use forward fill (next closest date)
+    try:
+        # Reindex with forward fill
+        extended_series = fx_series.reindex(fx_series.index.union([date]))
+        extended_series = extended_series.fillna(method='ffill')
+        return extended_series.loc[date]
+    except:
+        # Fallback to nearest available rate
+        idx = fx_series.index.get_indexer([date], method='nearest')[0]
+        return fx_series.iloc[idx]
+
 #####   STRATEGY 4: MULTI-INSTRUMENT VARIABLE RISK PORTFOLIO   #####
 
 def load_all_instrument_data(data_dir='Data'):
@@ -358,6 +498,11 @@ def backtest_multi_instrument_strategy(data_dir='Data', capital=50000000, risk_t
     print("STRATEGY 4: MULTI-INSTRUMENT VARIABLE RISK PORTFOLIO (Daily Rebalance)")
     print("=" * 60)
     
+    # Load FX data
+    print("\nLoading FX data...")
+    fx_data = load_fx_data(data_dir)
+    currency_mapping = get_instrument_currency_mapping()
+    
     all_instruments_specs_df = load_instrument_data() # For multipliers etc.
     raw_instrument_data = load_all_instrument_data(data_dir) # Loads DFs with 'Last', 'returns'
     
@@ -453,6 +598,10 @@ def backtest_multi_instrument_strategy(data_dir='Data', capital=50000000, risk_t
     known_eligible_instruments = set()
     weights = {} 
     idm = 1.0 # Default IDM
+
+    # Load FX data
+    fx_data = load_fx_data(data_dir)
+    currency_mapping = get_instrument_currency_mapping()
 
     # Main time-stepping loop
     for idx, current_date in enumerate(trading_days_range):
@@ -560,12 +709,24 @@ def backtest_multi_instrument_strategy(data_dir='Data', capital=50000000, risk_t
                     instrument_pnl_today = 0.0
                 else:
                     vol_for_sizing = vol_for_sizing if vol_for_sizing > 0 else min_vol_floor
-                    num_contracts = calculate_portfolio_position_size(
-                        symbol=symbol, capital=capital_at_start_of_day, weight=instrument_weight, idm=idm,
-                        price=price_for_sizing, volatility=vol_for_sizing, multiplier=instrument_multiplier,
-                        risk_target=risk_target
-                    )
-                    instrument_pnl_today = num_contracts * instrument_multiplier * (price_at_end_of_trading - price_at_start_of_trading)
+                    # Get FX rate for position sizing
+                    instrument_currency = currency_mapping.get(symbol, 'USD')
+                    fx_rate = get_fx_rate_for_date_and_currency(current_date, instrument_currency, fx_data)
+                    
+                    # Skip KRW instruments as requested
+                    if fx_rate is None:
+                        num_contracts = 0.0
+                        instrument_pnl_today = 0.0
+                    else:
+                        num_contracts = calculate_portfolio_position_size(
+                            symbol=symbol, capital=capital_at_start_of_day, weight=instrument_weight, idm=idm,
+                            price=price_for_sizing, volatility=vol_for_sizing, multiplier=instrument_multiplier,
+                            risk_target=risk_target, fx_rate=fx_rate
+                        )
+                        # P&L calculation with FX rate to convert to base currency (USD)
+                        price_change_in_local_currency = price_at_end_of_trading - price_at_start_of_trading
+                        price_change_in_base_currency = price_change_in_local_currency * fx_rate
+                        instrument_pnl_today = num_contracts * instrument_multiplier * price_change_in_base_currency
             
             except KeyError: # Date not found for this instrument
                 num_contracts = 0.0
@@ -819,11 +980,11 @@ def test_idm_calculation():
     
     test_cases = [
         (1, 1.0),
-        (3, 1.5),
-        (8, 2.0),
-        (15, 2.5),
-        (30, 3.0),
-        (100, 3.5)
+        (3, 1.48),
+        (8, 2.2),
+        (15, 2.3),
+        (30, 2.5),
+        (100, 2.5)
     ]
     
     for num_instruments, expected_idm in test_cases:
@@ -984,9 +1145,9 @@ def compare_weighting_methods():
 
 def main():
     """
-    Test Strategy 4 implementation with unit tests.
+    Test Strategy 4 implementation with unit tests and FX functionality.
     """
-    # First run unit tests
+    # Run unit tests
     tests_passed, instrument_data = run_unit_tests()
     
     if not tests_passed:

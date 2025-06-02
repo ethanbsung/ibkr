@@ -4,6 +4,8 @@ from chapter4 import *
 from chapter3 import *
 from chapter2 import *
 from chapter1 import *
+# Import FX functions from chapter 4
+from chapter4 import load_fx_data, get_instrument_currency_mapping, get_fx_rate_for_date_and_currency
 import numpy as np
 import pandas as pd
 import os
@@ -115,45 +117,139 @@ def calculate_forecast_for_instrument(prices: pd.Series, fast_span: int = 64, sl
     
     return capped_forecast
 
-def calculate_strategy7_position_size(symbol, capital, weight, idm, price, volatility, 
-                                    multiplier, forecast, risk_target=0.2, fx_rate=1.0):
+# Note: calculate_strategy7_position_size function removed - now using new approach:
+# 1. Calculate base position using calculate_portfolio_position_size  
+# 2. Apply forecast as multiplier: forecast * base_position / 10
+
+def get_forecast_scalar_for_ewmac(fast_span: int) -> float:
     """
-    Calculate position size for Strategy 7 with forecast scaling.
+    Get forecast scalar for EWMAC based on fast span.
     
-    From book:
-        N = Capped forecast × Capital × IDM × Weight × τ ÷ (10 × Multiplier × Price × FX × σ%)
-    
-    The key difference is the division by 10 and multiplication by forecast instead of ±1.
+    From author's code:
+        scalar_dict = {64: 1.91, 32: 2.79, 16: 4.1, 8: 5.95, 4: 8.53, 2: 12.1}
     
     Parameters:
-        symbol (str): Instrument symbol.
-        capital (float): Total portfolio capital.
-        weight (float): Weight allocated to this instrument.
-        idm (float): Instrument Diversification Multiplier.
-        price (float): Current price.
-        volatility (float): Annualized volatility forecast.
-        multiplier (float): Contract multiplier.
-        forecast (float): Capped forecast value.
-        risk_target (float): Target risk fraction.
-        fx_rate (float): FX rate for currency conversion.
+        fast_span (int): Fast EWMA span.
     
     Returns:
-        float: Number of contracts for this instrument.
+        float: Forecast scalar for this span.
     """
-    if np.isnan(volatility) or volatility <= 0 or np.isnan(forecast):
-        return 0
+    scalar_dict = {64: 1.91, 32: 2.79, 16: 4.1, 8: 5.95, 4: 8.53, 2: 12.1}
+    return scalar_dict.get(fast_span, 1.91)  # Default to 64-span scalar
+
+def calculate_risk_adjusted_forecast_for_ewmac(prices: pd.Series, volatility_series: pd.Series, 
+                                             fast_span: int = 64, slow_span: int = 256) -> pd.Series:
+    """
+    Calculate risk-adjusted forecast for EWMAC.
     
-    # Calculate position size with forecast scaling
-    numerator = forecast * capital * idm * weight * risk_target
-    denominator = 10 * multiplier * price * fx_rate * volatility
+    From author's code:
+        ewmac_values = ewmac(adjusted_price, fast_span=fast_span, slow_span=fast_span * 4)
+        daily_price_vol = stdev_ann_perc.daily_risk_price_terms()
+        risk_adjusted_ewmac = ewmac_values / daily_price_vol
     
-    position_size = numerator / denominator
+    Parameters:
+        prices (pd.Series): Price series.
+        volatility_series (pd.Series): Daily price volatility series.
+        fast_span (int): Fast EWMA span.
+        slow_span (int): Slow EWMA span.
     
-    # Protect against infinite or extremely large position sizes
-    if np.isinf(position_size) or abs(position_size) > 100000:
-        return 0
+    Returns:
+        pd.Series: Risk-adjusted forecast values.
+    """
+    # Calculate EWMAC 
+    ewmac_values = calculate_ewma_trend(prices, fast_span, slow_span)
     
-    return position_size
+    # Convert percentage volatility to daily price volatility
+    # daily_price_vol = price * vol_percentage / 16
+    daily_price_vol = prices * volatility_series / 16
+    
+    # Reindex to match EWMAC
+    daily_price_vol = daily_price_vol.reindex(ewmac_values.index, method='ffill')
+    
+    # Calculate risk-adjusted forecast
+    risk_adjusted_forecast = ewmac_values / daily_price_vol
+    
+    # Handle division by zero or very small volatility
+    risk_adjusted_forecast = risk_adjusted_forecast.replace([np.inf, -np.inf], 0)
+    risk_adjusted_forecast = risk_adjusted_forecast.fillna(0)
+    
+    return risk_adjusted_forecast
+
+def calculate_scaled_forecast_for_ewmac(prices: pd.Series, volatility_series: pd.Series,
+                                      fast_span: int = 64, slow_span: int = 256) -> pd.Series:
+    """
+    Calculate scaled forecast for EWMAC.
+    
+    From author's code:
+        risk_adjusted_ewmac = calculate_risk_adjusted_forecast_for_ewmac(...)
+        forecast_scalar = scalar_dict[fast_span]
+        scaled_ewmac = risk_adjusted_ewmac * forecast_scalar
+    
+    Parameters:
+        prices (pd.Series): Price series.
+        volatility_series (pd.Series): Daily volatility series.
+        fast_span (int): Fast EWMA span.
+        slow_span (int): Slow EWMA span.
+    
+    Returns:
+        pd.Series: Scaled forecast values.
+    """
+    risk_adjusted_forecast = calculate_risk_adjusted_forecast_for_ewmac(prices, volatility_series, fast_span, slow_span)
+    forecast_scalar = get_forecast_scalar_for_ewmac(fast_span)
+    scaled_forecast = risk_adjusted_forecast * forecast_scalar
+    
+    return scaled_forecast
+
+def calculate_forecast_for_ewmac(prices: pd.Series, volatility_series: pd.Series,
+                               fast_span: int = 64, slow_span: int = 256, cap: float = 20.0) -> pd.Series:
+    """
+    Calculate complete forecast for EWMAC.
+    
+    From author's code:
+        scaled_ewmac = calculate_scaled_forecast_for_ewmac(...)
+        capped_ewmac = scaled_ewmac.clip(-20, 20)
+    
+    Parameters:
+        prices (pd.Series): Price series.
+        volatility_series (pd.Series): Daily volatility series.
+        fast_span (int): Fast EWMA span.
+        slow_span (int): Slow EWMA span.
+        cap (float): Maximum absolute forecast value.
+    
+    Returns:
+        pd.Series: Capped forecast values.
+    """
+    scaled_forecast = calculate_scaled_forecast_for_ewmac(prices, volatility_series, fast_span, slow_span)
+    capped_forecast = calculate_capped_forecast(scaled_forecast, cap)
+    
+    return capped_forecast
+
+def apply_forecast_to_position(base_position: pd.Series, prices: pd.Series, volatility_series: pd.Series,
+                             fast_span: int = 64, slow_span: int = 256, cap: float = 20.0) -> pd.Series:
+    """
+    Apply trend forecast to base position using author's approach.
+    
+    From author's code:
+        forecast = calculate_forecast_for_ewmac(...)
+        return forecast * average_position / 10
+    
+    Parameters:
+        base_position (pd.Series): Base position size without forecast.
+        prices (pd.Series): Price series for forecast calculation.
+        volatility_series (pd.Series): Daily volatility series.
+        fast_span (int): Fast EWMA span.
+        slow_span (int): Slow EWMA span.
+        cap (float): Maximum absolute forecast value.
+    
+    Returns:
+        pd.Series: Position with forecast applied.
+    """
+    forecast = calculate_forecast_for_ewmac(prices, volatility_series, fast_span, slow_span, cap)
+    
+    # Apply forecast to base position with division by 10 (as per author's code)
+    position_with_forecast = forecast * base_position / 10
+    
+    return position_with_forecast
 
 def backtest_forecast_trend_strategy(data_dir='Data', capital=50000000, risk_target=0.2,
                                    short_span=32, long_years=10, min_vol_floor=0.05,
@@ -193,6 +289,11 @@ def backtest_forecast_trend_strategy(data_dir='Data', capital=50000000, risk_tar
     print("=" * 60)
     print("STRATEGY 7: SLOW TREND FOLLOWING WITH TREND STRENGTH")
     print("=" * 60)
+    
+    # Load FX data
+    print("\nLoading FX data...")
+    fx_data = load_fx_data(data_dir)
+    currency_mapping = get_instrument_currency_mapping()
     
     # Load all instrument data using the same function as chapter 4-6
     all_instruments_specs_df = load_instrument_data()
@@ -235,12 +336,7 @@ def backtest_forecast_trend_strategy(data_dir='Data', capital=50000000, risk_tar
         # Shift to prevent lookahead bias - forecast for day T uses data up to T-1
         df['vol_forecast'] = blended_vol_series.shift(1).reindex(df.index).ffill().fillna(min_vol_floor)
         
-        # Calculate forecast using trend strength (no lookahead bias)
-        forecast_series = calculate_forecast_for_instrument(
-            df['Last'], trend_fast_span, trend_slow_span, forecast_scalar, forecast_cap, short_span, long_years, min_vol_floor
-        )
-        # Shift to prevent lookahead bias - forecast for day T uses data up to T-1
-        df['forecast'] = forecast_series.shift(1).reindex(df.index).fillna(0)
+        # No pre-calculation of forecasts - will calculate on-the-fly during backtest to prevent lookahead bias
         
         # Ensure critical data is present
         df.dropna(subset=['Last', 'vol_forecast', 'daily_price_change_pct'], inplace=True)
@@ -370,39 +466,71 @@ def backtest_forecast_trend_strategy(data_dir='Data', capital=50000000, risk_tar
 
             if instrument_weight > 1e-6:
                 try:
-                    # Sizing based on previous day's close price and current day's forecasts
+                    # Sizing based on previous day's close price and current day's vol forecasts
                     price_for_sizing = df_instrument.loc[previous_trading_date, 'Last']
                     vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast']
-                    forecast_for_sizing = df_instrument.loc[current_date, 'forecast']
-                    actual_forecast_used = forecast_for_sizing
                     
                     # Data for P&L calculation for current_date
                     price_at_start_of_trading = df_instrument.loc[previous_trading_date, 'Last']
                     price_at_end_of_trading = df_instrument.loc[current_date, 'Last']
                     
                     if (pd.isna(price_for_sizing) or pd.isna(vol_for_sizing) or 
-                        pd.isna(price_at_start_of_trading) or pd.isna(price_at_end_of_trading) or
-                        pd.isna(forecast_for_sizing)):
+                        pd.isna(price_at_start_of_trading) or pd.isna(price_at_end_of_trading)):
                         num_contracts = 0.0
                         instrument_pnl_today = 0.0
+                        actual_forecast_used = 0.0
                     else:
                         vol_for_sizing = max(vol_for_sizing, min_vol_floor)
                         
-                        # Calculate position size with forecast scaling (Strategy 7)
-                        num_contracts = calculate_strategy7_position_size(
-                            symbol=symbol, capital=capital_at_start_of_day, weight=instrument_weight, 
-                            idm=idm, price=price_for_sizing, volatility=vol_for_sizing, 
-                            multiplier=instrument_multiplier, forecast=forecast_for_sizing, 
-                            risk_target=risk_target
-                        )
+                        # Get FX rate for position sizing
+                        instrument_currency = currency_mapping.get(symbol, 'USD')
+                        fx_rate = get_fx_rate_for_date_and_currency(current_date, instrument_currency, fx_data)
                         
-                        instrument_pnl_today = num_contracts * instrument_multiplier * (price_at_end_of_trading - price_at_start_of_trading)
+                        # Skip KRW instruments as requested
+                        if fx_rate is None:
+                            num_contracts = 0.0
+                            instrument_pnl_today = 0.0
+                            actual_forecast_used = 0.0
+                        else:
+                            # Step 1: Calculate base position (without forecast) using Strategy 4 logic
+                            base_position = calculate_portfolio_position_size(
+                                symbol=symbol, capital=capital_at_start_of_day, weight=instrument_weight, 
+                                idm=idm, price=price_for_sizing, volatility=vol_for_sizing, 
+                                multiplier=instrument_multiplier, risk_target=risk_target, fx_rate=fx_rate
+                            )
+                            
+                            # Step 2: Calculate forecast for current date using data up to previous date (no lookahead bias)
+                            # Get price and volatility data up to previous trading date to avoid lookahead bias
+                            price_data_for_forecast = df_instrument[df_instrument.index <= previous_trading_date]['Last']
+                            vol_data_for_forecast = df_instrument[df_instrument.index <= previous_trading_date]['vol_forecast']
+                            
+                            if len(price_data_for_forecast) >= max(trend_fast_span, trend_slow_span) and len(vol_data_for_forecast) > 0:
+                                # Calculate forecast using historical data only (as per author's approach)
+                                # Use the lookup table approach from the author
+                                forecast_scalar_from_table = get_forecast_scalar_for_ewmac(trend_fast_span)
+                                forecast_values = calculate_forecast_for_ewmac(
+                                    price_data_for_forecast, vol_data_for_forecast, trend_fast_span, trend_slow_span, forecast_cap
+                                )
+                                current_forecast = forecast_values.iloc[-1] if not forecast_values.empty else 0.0
+                                actual_forecast_used = current_forecast
+                                
+                                # Apply forecast to base position with division by 10 (as per author's code)
+                                num_contracts = current_forecast * base_position / 10
+                            else:
+                                # Insufficient data for forecast calculation
+                                num_contracts = 0.0
+                                actual_forecast_used = 0.0
+                            
+                            # P&L calculation with FX rate to convert to base currency (USD)
+                            price_change_in_local_currency = price_at_end_of_trading - price_at_start_of_trading
+                            price_change_in_base_currency = price_change_in_local_currency * fx_rate
+                            instrument_pnl_today = num_contracts * instrument_multiplier * price_change_in_base_currency
                         
                         # Count active instruments and collect forecasts
                         if abs(num_contracts) > 0.01:
                             num_active_instruments += 1
-                        if not pd.isna(forecast_for_sizing):
-                            daily_forecasts.append(forecast_for_sizing)
+                        if actual_forecast_used is not None and not pd.isna(actual_forecast_used):
+                            daily_forecasts.append(actual_forecast_used)
                 
                 except KeyError:  # Date not found for this instrument
                     num_contracts = 0.0
@@ -441,11 +569,20 @@ def backtest_forecast_trend_strategy(data_dir='Data', capital=50000000, risk_tar
             if f'{s_proc}_contracts' not in record:
                 record[f'{s_proc}_contracts'] = 0.0
             if f'{s_proc}_forecast' not in record:
-                forecast_val_fill = 0.0
-                if current_date in processed_instrument_data[s_proc].index:
-                    sig = processed_instrument_data[s_proc].loc[current_date, 'forecast']
-                    if pd.notna(sig):
-                        forecast_val_fill = sig
+                # Calculate forecast for this instrument if not already recorded
+                try:
+                    df_proc = processed_instrument_data[s_proc]
+                    price_data_for_forecast = df_proc[df_proc.index <= previous_trading_date]['Last']
+                    vol_data_for_forecast = df_proc[df_proc.index <= previous_trading_date]['vol_forecast']
+                    if len(price_data_for_forecast) >= max(trend_fast_span, trend_slow_span) and len(vol_data_for_forecast) > 0:
+                        forecast_values = calculate_forecast_for_ewmac(
+                            price_data_for_forecast, vol_data_for_forecast, trend_fast_span, trend_slow_span, forecast_cap
+                        )
+                        forecast_val_fill = forecast_values.iloc[-1] if not forecast_values.empty else 0.0
+                    else:
+                        forecast_val_fill = 0.0  # No forecast due to insufficient data
+                except:
+                    forecast_val_fill = 0.0  # Default neutral forecast
                 record[f'{s_proc}_forecast'] = forecast_val_fill
                 
         portfolio_daily_records.append(record)
@@ -865,7 +1002,7 @@ def main():
         plot_strategy7_equity_curve(results)
         
         # Compare all strategies
-        # comparison = compare_all_forecast_strategies()
+        comparison = compare_all_forecast_strategies()
         
         print(f"\nStrategy 7 backtest completed successfully!")
         return results
