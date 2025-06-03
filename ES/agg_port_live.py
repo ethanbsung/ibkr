@@ -167,6 +167,92 @@ def get_account_equity(ib):
         pass
     return None
 
+def get_positions_from_ibkr(ib, contracts):
+    """Get current positions from IBKR API and map them to our strategy names"""
+    logger = logging.getLogger()
+    
+    try:
+        # Get all positions from IBKR
+        positions = ib.positions()
+        
+        # Create a mapping from contract to strategy
+        contract_to_strategy = {}
+        for symbol, contract in contracts.items():
+            if symbol == 'ES':  # ES contract is used for both IBS_ES and Williams
+                contract_to_strategy[contract.conId] = ['IBS_ES', 'Williams']
+            else:
+                contract_to_strategy[contract.conId] = [f'IBS_{symbol}']
+        
+        # Initialize position tracking
+        ibkr_positions = {
+            'IBS_ES': {'in_position': False, 'position': None},
+            'IBS_YM': {'in_position': False, 'position': None},
+            'IBS_GC': {'in_position': False, 'position': None},
+            'IBS_NQ': {'in_position': False, 'position': None},
+            'IBS_ZQ': {'in_position': False, 'position': None},
+            'Williams': {'in_position': False, 'position': None}
+        }
+        
+        # Process IBKR positions
+        for position in positions:
+            if position.contract.conId in contract_to_strategy:
+                strategies = contract_to_strategy[position.contract.conId]
+                
+                if position.position != 0:  # Non-zero position
+                    # Get the current market price for entry_price estimation
+                    symbol = position.contract.symbol
+                    if symbol == 'MES':
+                        symbol = 'ES'
+                    elif symbol == 'MYM':
+                        symbol = 'YM'
+                    elif symbol == 'MGC':
+                        symbol = 'GC'
+                    elif symbol == 'MNQ':
+                        symbol = 'NQ'
+                    
+                    # Estimate entry price from average cost or use market price
+                    entry_price = position.avgCost if position.avgCost > 0 else position.marketPrice
+                    if entry_price <= 0:
+                        entry_price = position.marketPrice
+                    
+                    position_info = {
+                        'entry_price': entry_price,
+                        'entry_time': datetime.now().isoformat(),  # We don't know actual entry time
+                        'contracts': int(abs(position.position))  # Use absolute value for long positions
+                    }
+                    
+                    # For ES, we need to determine if it's IBS or Williams position
+                    if len(strategies) > 1:  # ES case
+                        # Check position size to determine strategy
+                        # Williams gets 50% allocation, IBS gets 10%
+                        # So Williams positions should be ~5x larger than IBS
+                        if position_info['contracts'] >= 8:  # Rough threshold for Williams
+                            ibkr_positions['Williams'] = {
+                                'in_position': True,
+                                'position': position_info
+                            }
+                            logger.info(f"Found Williams ES position: {position_info['contracts']} contracts")
+                        else:  # Smaller position likely IBS
+                            ibkr_positions['IBS_ES'] = {
+                                'in_position': True,
+                                'position': position_info
+                            }
+                            logger.info(f"Found IBS_ES position: {position_info['contracts']} contracts")
+                    else:
+                        # Single strategy mapping
+                        strategy = strategies[0]
+                        ibkr_positions[strategy] = {
+                            'in_position': True,
+                            'position': position_info
+                        }
+                        logger.info(f"Found {strategy} position: {position_info['contracts']} contracts")
+        
+        return ibkr_positions
+        
+    except Exception as e:
+        logger.error(f"Error getting positions from IBKR: {e}")
+        return None
+
 def compute_ibs(bar):
     """Calculate IBS with safety check for zero range (matching aggregate_port.py exactly)"""
     range_val = bar.high - bar.low
@@ -228,12 +314,22 @@ def qualify_contracts(ib):
         logging.error(f"Contract qualification error: {e}")
         return None
 
-def place_order_with_fallback(ib, contract, action, quantity, symbol):
+def place_order_with_fallback(ib, contract, action, quantity, symbol, dry_run=False):
     """
     Place an order with fallback from MOC to limit order if MOC is not supported.
     Returns the trade object if successful, None if failed.
     """
     logger = logging.getLogger()
+    
+    # Check if markets are closed - use dry run mode
+    if not is_market_hours() or dry_run:
+        logger.info(f"DRY RUN: Would place {action} order for {quantity} {symbol} contracts")
+        if symbol == 'ZQ':
+            logger.info(f"DRY RUN: Would use limit order for {symbol} (MOC not supported)")
+        else:
+            logger.info(f"DRY RUN: Would place MOC {action} order for {quantity} {symbol} contracts")
+        # Return a mock trade object for state management
+        return type('MockTrade', (), {'orderStatus': type('MockStatus', (), {'status': 'Filled'})})()
     
     # ZQ is known to not support MOC orders, so go straight to limit order
     if symbol == 'ZQ':
@@ -264,6 +360,12 @@ def place_order_with_fallback(ib, contract, action, quantity, symbol):
 def place_limit_order(ib, contract, action, quantity, symbol):
     """Place a limit order near current market price"""
     logger = logging.getLogger()
+    
+    # Check if markets are closed - use dry run mode
+    if not is_market_hours():
+        logger.info(f"DRY RUN: Would place LMT {action} order for {quantity} {symbol} contracts")
+        # Return a mock trade object for state management
+        return type('MockTrade', (), {'orderStatus': type('MockStatus', (), {'status': 'Filled'})})()
     
     # Get current price
     ticker = ib.reqMktData(contract, '', False, False)
@@ -307,9 +409,55 @@ def place_limit_order(ib, contract, action, quantity, symbol):
         logger.error(f"Could not get current price for {symbol} limit order")
         return None
 
+def is_market_hours(timezone='US/Eastern'):
+    """Check if futures markets are currently open (6 PM Sunday - 5 PM Friday Eastern)"""
+    tz = pytz.timezone(timezone)
+    now = datetime.now(tz)
+    
+    # Market hours: Sunday 6 PM - Friday 5 PM Eastern (futures markets)
+    weekday = now.weekday()  # 0=Monday, 6=Sunday
+    hour = now.hour
+    minute = now.minute
+    
+    # Saturday - market closed all day
+    if weekday == 5:  # Saturday
+        return False
+    
+    # Sunday before 6 PM - market closed
+    if weekday == 6 and hour < 18:  # Sunday
+        return False
+    
+    # Monday-Thursday after 5 PM - market closed until 6 PM
+    if weekday in [0, 1, 2, 3] and hour >= 17:  # Monday-Thursday
+        if hour > 18 or (hour == 18 and minute >= 0):  # After 6 PM, market reopens
+            return True
+        else:  # Between 5 PM and 6 PM, market closed
+            return False
+    
+    # Friday after 5 PM - market closed for weekend
+    if weekday == 4 and hour >= 17:  # Friday
+        return False
+    
+    # Sunday after 6 PM - market open
+    if weekday == 6 and hour >= 18:
+        return True
+    
+    # Monday-Friday during regular hours (before 5 PM) - market open
+    if weekday in [0, 1, 2, 3, 4] and hour < 17:
+        return True
+    
+    return False
+
 def wait_until_close(target_hour=17, target_minute=0, timezone='US/Eastern', lead_seconds=10):
     """Wait until the specified time minus lead_seconds."""
     tz = pytz.timezone(timezone)
+    logger = logging.getLogger()
+    
+    # Check if markets are open
+    if not is_market_hours(timezone):
+        logger.warning("Markets are currently closed. Running in test mode.")
+        return
+    
     while True:
         now = datetime.now(tz)
         close_today = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
@@ -352,6 +500,38 @@ def run_daily_signals(ib):
     else:
         state['current_equity'] = current_equity
         logger.info(f"Current account equity: ${current_equity:,.2f}")
+    
+    # Synchronize positions with IBKR
+    logger.info("Synchronizing positions with IBKR...")
+    ibkr_positions = get_positions_from_ibkr(ib, contracts)
+    if ibkr_positions is not None:
+        # Compare with local state and update
+        position_changes = []
+        for strategy in state['positions']:
+            local_pos = state['positions'][strategy]
+            ibkr_pos = ibkr_positions[strategy]
+            
+            # Check for differences
+            if local_pos['in_position'] != ibkr_pos['in_position']:
+                position_changes.append(f"{strategy}: Local={local_pos['in_position']}, IBKR={ibkr_pos['in_position']}")
+                state['positions'][strategy] = ibkr_pos
+            elif local_pos['in_position'] and ibkr_pos['in_position']:
+                # Both have positions, check contract count
+                local_contracts = local_pos['position']['contracts']
+                ibkr_contracts = ibkr_pos['position']['contracts']
+                if local_contracts != ibkr_contracts:
+                    position_changes.append(f"{strategy}: Local={local_contracts} contracts, IBKR={ibkr_contracts} contracts")
+                    state['positions'][strategy] = ibkr_pos
+        
+        if position_changes:
+            logger.warning("Position differences found between local state and IBKR:")
+            for change in position_changes:
+                logger.warning(f"  {change}")
+            logger.info("Local state updated to match IBKR positions")
+        else:
+            logger.info("Local positions match IBKR positions")
+    else:
+        logger.warning("Could not retrieve positions from IBKR, using local state")
     
     tz = pytz.timezone('US/Eastern')
     current_dt = datetime.now(tz)
@@ -406,6 +586,8 @@ def run_daily_signals(ib):
                     # Update state only if order was placed successfully
                     strategy_state['in_position'] = False
                     strategy_state['position'] = None
+            else:
+                logger.info(f"{symbol} - Holding position (IBS: {ibs:.3f}, exit threshold: {ibs_exit_threshold})")
         else:
             if ibs < ibs_entry_threshold:
                 # Enter position
@@ -421,6 +603,8 @@ def run_daily_signals(ib):
                         'entry_time': current_dt.isoformat(),
                         'contracts': target_contracts
                     }
+            else:
+                logger.info(f"{symbol} - No entry signal (IBS: {ibs:.3f}, entry threshold: {ibs_entry_threshold})")
     
     # Process Williams %R strategy (ES only, matching aggregate_port.py logic exactly)
     logger.info(f"\nProcessing Williams strategy...")
@@ -532,6 +716,21 @@ def print_portfolio_summary(ib):
     # Qualify contracts and get recent data
     contracts = qualify_contracts(ib)
     if contracts:
+        # Show current positions from IBKR
+        logger.info("\nCurrent Positions (from IBKR):")
+        ibkr_positions = get_positions_from_ibkr(ib, contracts)
+        if ibkr_positions:
+            any_positions = False
+            for strategy, pos_state in ibkr_positions.items():
+                if pos_state['in_position']:
+                    pos = pos_state['position']
+                    logger.info(f"  {strategy}: {pos['contracts']} contracts @ ${pos['entry_price']:.2f}")
+                    any_positions = True
+            if not any_positions:
+                logger.info("  No positions found")
+        else:
+            logger.warning("  Could not retrieve positions from IBKR")
+        
         tz = pytz.timezone('US/Eastern')
         end_datetime_str = format_end_datetime(datetime.now(tz), tz)
         
@@ -547,6 +746,16 @@ def main():
                         format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger()
     
+    # Check market status
+    if is_market_hours():
+        logger.info("Markets are OPEN - Live trading mode")
+    else:
+        logger.warning("Markets are CLOSED - Running in DRY RUN mode for testing")
+        tz = pytz.timezone('US/Eastern')
+        now = datetime.now(tz)
+        logger.info(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        logger.info("Market hours: Sunday 6 PM - Friday 5 PM Eastern")
+    
     ib = IB()
     
     # Connect to IBKR
@@ -560,9 +769,12 @@ def main():
     # Print portfolio summary on startup
     print_portfolio_summary(ib)
 
-    # Wait until 5 seconds before market close (5 PM Eastern)
-    logger.info("Waiting until 5 seconds before market close...")
-    wait_until_close(target_hour=17, target_minute=0, timezone='US/Eastern', lead_seconds=5)
+    # Wait until 5 seconds before market close (5 PM Eastern) or run immediately if markets closed
+    if is_market_hours():
+        logger.info("Waiting until 5 seconds before market close...")
+        wait_until_close(target_hour=17, target_minute=0, timezone='US/Eastern', lead_seconds=5)
+    else:
+        logger.info("Markets closed - proceeding immediately with dry run...")
 
     # Run daily signals with exact logic from aggregate_port.py
     logger.info("Running daily signal generation...")
