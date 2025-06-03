@@ -49,3 +49,5 @@ trade_entries.csv
 trade_exits.csv
 complete_pinescript_trade_visualization.pine
 Data/
+
+ES/positions.json

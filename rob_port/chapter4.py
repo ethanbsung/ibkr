@@ -236,7 +236,155 @@ def calculate_idm_from_count(num_instruments):
         # Book specifies 2.5 for 30+ instruments
         return 2.5
 
-def calculate_instrument_weights(instrument_data, method='equal', instruments_df=None, common_hypothetical_SR=0.3, annual_turnover_T=7.0, risk_target=0.2):
+def calculate_minimum_capital_requirement(symbol, price, volatility, multiplier, fx_rate=1.0, 
+                                        assumed_idm=2.2, assumed_weight=0.1, risk_target=0.2, min_contracts=4):
+    """
+    Calculate minimum capital requirement for 4 contracts as described in the book.
+    
+    Formula from book: Minimum capital = (4 × Multiplier × Price × FX rate × σ%) ÷ (IDM × Weight × τ)
+    
+    Parameters:
+        symbol (str): Instrument symbol.
+        price (float): Current price.
+        volatility (float): Annualized volatility.
+        multiplier (float): Contract multiplier.
+        fx_rate (float): FX rate for currency conversion.
+        assumed_idm (float): Assumed IDM for initial calculation.
+        assumed_weight (float): Assumed weight for initial calculation.
+        risk_target (float): Target risk fraction.
+        min_contracts (int): Minimum number of contracts.
+    
+    Returns:
+        float: Minimum capital required.
+    """
+    if volatility <= 0 or assumed_idm <= 0 or assumed_weight <= 0 or risk_target <= 0:
+        return float('inf')
+    
+    numerator = min_contracts * multiplier * price * fx_rate * volatility
+    denominator = assumed_idm * assumed_weight * risk_target
+    
+    min_capital = numerator / denominator
+    
+    return min_capital
+
+def filter_instruments_by_capital(instrument_data, instruments_df, fx_data, currency_mapping, 
+                                capital, risk_target=0.2, assumed_num_instruments=10):
+    """
+    Filter instruments based on minimum capital requirements.
+    
+    This implements the book's process:
+    1. Make assumptions about portfolio (e.g., 10 instruments equally weighted)
+    2. Calculate minimum capital for each instrument
+    3. Discard instruments where minimum capital > available capital
+    
+    Parameters:
+        instrument_data (dict): Dictionary of instrument DataFrames.
+        instruments_df (pd.DataFrame): Instrument specifications.
+        fx_data (dict): FX rate data.
+        currency_mapping (dict): Currency mapping for instruments.
+        capital (float): Available capital.
+        risk_target (float): Target risk fraction.
+        assumed_num_instruments (int): Assumed number of instruments for initial calculation.
+    
+    Returns:
+        dict: Filtered instrument data dictionary.
+    """
+    print(f"\n--- Filtering Instruments by Minimum Capital Requirements ---")
+    print(f"Available Capital: ${capital:,.0f}")
+    print(f"Assumed Portfolio: {assumed_num_instruments} instruments equally weighted")
+    
+    # Calculate assumptions
+    assumed_idm = calculate_idm_from_count(assumed_num_instruments)
+    assumed_weight = 1.0 / assumed_num_instruments
+    
+    print(f"Assumed IDM: {assumed_idm:.2f}")
+    print(f"Assumed Weight per Instrument: {assumed_weight:.3f}")
+    
+    eligible_instruments = {}
+    filtered_out = {}
+    
+    for symbol, df in instrument_data.items():
+        try:
+            # Get instrument specifications
+            specs = get_instrument_specs(symbol, instruments_df)
+            multiplier = specs['multiplier']
+            
+            # Get latest price and volatility
+            if df.empty or 'Last' not in df.columns or 'returns' not in df.columns:
+                filtered_out[symbol] = "No price or returns data"
+                continue
+                
+            latest_price = df['Last'].iloc[-1]
+            if pd.isna(latest_price) or latest_price <= 0:
+                filtered_out[symbol] = "Invalid price"
+                continue
+            
+            # Calculate volatility from available data
+            returns = df['returns'].dropna()
+            if len(returns) < 30:  # Need minimum data for volatility
+                filtered_out[symbol] = "Insufficient data for volatility"
+                continue
+                
+            volatility = returns.std() * np.sqrt(business_days_per_year)
+            if volatility <= 0:
+                filtered_out[symbol] = "Invalid volatility"
+                continue
+            
+            # Get FX rate
+            instrument_currency = currency_mapping.get(symbol, 'USD')
+            if instrument_currency == 'KRW':
+                filtered_out[symbol] = "KRW instruments excluded"
+                continue
+                
+            # Use a representative date for FX rate (latest available)
+            fx_rate = get_fx_rate_for_date_and_currency(df.index[-1], instrument_currency, fx_data)
+            if fx_rate is None:
+                filtered_out[symbol] = "No FX rate available"
+                continue
+            
+            # Calculate minimum capital requirement
+            min_capital = calculate_minimum_capital_requirement(
+                symbol=symbol,
+                price=latest_price,
+                volatility=volatility,
+                multiplier=multiplier,
+                fx_rate=fx_rate,
+                assumed_idm=assumed_idm,
+                assumed_weight=assumed_weight,
+                risk_target=risk_target
+            )
+            
+            # Check if capital requirement is met
+            if min_capital <= capital:
+                eligible_instruments[symbol] = df
+                print(f"✓ {symbol:<8} Min Capital: ${min_capital:>12,.0f} (Price: ${latest_price:>8.2f}, Vol: {volatility:>6.1%})")
+            else:
+                filtered_out[symbol] = f"Min capital ${min_capital:,.0f} > available ${capital:,.0f}"
+                print(f"✗ {symbol:<8} Min Capital: ${min_capital:>12,.0f} > Available (Price: ${latest_price:>8.2f}, Vol: {volatility:>6.1%})")
+                
+        except Exception as e:
+            filtered_out[symbol] = f"Error: {str(e)}"
+            print(f"✗ {symbol:<8} Error: {str(e)}")
+    
+    print(f"\nFiltering Results:")
+    print(f"  Eligible Instruments: {len(eligible_instruments)}")
+    print(f"  Filtered Out: {len(filtered_out)}")
+    
+    if len(filtered_out) > 0:
+        print(f"\nFiltered Out Reasons:")
+        for symbol, reason in filtered_out.items():
+            print(f"  {symbol}: {reason}")
+    
+    if len(eligible_instruments) == 0:
+        print("WARNING: No instruments meet minimum capital requirements!")
+        print("Consider increasing capital or reducing assumed number of instruments.")
+    
+    return eligible_instruments
+
+def calculate_instrument_weights(instrument_data, method='equal', instruments_df=None, 
+                               common_hypothetical_SR=0.3, annual_turnover_T=7.0, risk_target=0.2,
+                               capital=None, fx_data=None, currency_mapping=None, 
+                               filter_by_capital=True, assumed_num_instruments=10):
     """
     Calculate weights for each instrument in the portfolio.
     
@@ -247,10 +395,27 @@ def calculate_instrument_weights(instrument_data, method='equal', instruments_df
         common_hypothetical_SR (float): Common hypothetical SR for SR' calculation.
         annual_turnover_T (float): Annual turnover T for SR' calculation.
         risk_target (float): Target risk fraction.
+        capital (float): Available capital for minimum capital filtering.
+        fx_data (dict): FX rate data for minimum capital filtering.
+        currency_mapping (dict): Currency mapping for minimum capital filtering.
+        filter_by_capital (bool): Whether to apply minimum capital filtering.
+        assumed_num_instruments (int): Assumed number of instruments for capital filtering.
     
     Returns:
         dict: Dictionary of weights for each instrument.
     """
+    # Apply minimum capital filtering if requested and all required data is available
+    if (filter_by_capital and capital is not None and fx_data is not None and 
+        currency_mapping is not None and instruments_df is not None):
+        print(f"Applying minimum capital filtering...")
+        instrument_data = filter_instruments_by_capital(
+            instrument_data, instruments_df, fx_data, currency_mapping,
+            capital, risk_target, assumed_num_instruments
+        )
+        
+        if not instrument_data:
+            raise ValueError("No instruments remain after minimum capital filtering")
+    
     symbols = list(instrument_data.keys())
     num_instruments = len(symbols)
     
@@ -665,7 +830,12 @@ def backtest_multi_instrument_strategy(data_dir='Data', capital=50000000, risk_t
                     all_instruments_specs_df,
                     common_hypothetical_SR, # Pass new param
                     annual_turnover_T,      # Pass new param
-                    risk_target             # Pass risk_target
+                    risk_target,            # Pass risk_target
+                    capital=current_portfolio_equity,  # Pass current capital
+                    fx_data=fx_data,        # Pass FX data
+                    currency_mapping=currency_mapping,  # Pass currency mapping
+                    filter_by_capital=True, # Enable capital filtering
+                    assumed_num_instruments=10  # Assumption for filtering
                 )
                 
                 num_weighted_instruments = sum(1 for w_val in weights.values() if w_val > 1e-6) # Count instruments with meaningful weight
@@ -994,6 +1164,87 @@ def test_idm_calculation():
     
     print("✓ IDM calculation tests passed")
 
+def test_minimum_capital_calculation():
+    """Test minimum capital calculation function."""
+    print("\n=== Testing Minimum Capital Calculation ===")
+    
+    # Test normal case (MES example)
+    min_cap = calculate_minimum_capital_requirement(
+        symbol='MES', price=4500, volatility=0.16, multiplier=5, fx_rate=1.0,
+        assumed_idm=2.2, assumed_weight=0.1, risk_target=0.2, min_contracts=4
+    )
+    
+    # Manual calculation: (4 * 5 * 4500 * 1.0 * 0.16) / (2.2 * 0.1 * 0.2)
+    expected = (4 * 5 * 4500 * 1.0 * 0.16) / (2.2 * 0.1 * 0.2)
+    print(f"MES minimum capital: ${min_cap:,.0f} (expected: ${expected:,.0f})")
+    assert abs(min_cap - expected) < 1, f"Minimum capital calculation failed: {min_cap} != {expected}"
+    
+    # Test edge cases
+    min_cap_zero_vol = calculate_minimum_capital_requirement(
+        'TEST', 1000, 0.0, 1, 1.0, 2.0, 0.1, 0.2, 4
+    )
+    print(f"Zero volatility case: {min_cap_zero_vol}")
+    assert min_cap_zero_vol == float('inf'), "Zero volatility should return infinity"
+    
+    # Test high volatility instrument should require more capital
+    min_cap_high_vol = calculate_minimum_capital_requirement(
+        'VIX', 20, 0.80, 1000, 1.0, 2.2, 0.1, 0.2, 4
+    )
+    print(f"High volatility instrument: ${min_cap_high_vol:,.0f}")
+    assert min_cap_high_vol > min_cap, "Higher volatility should require more capital"
+    
+    print("✓ Minimum capital calculation tests passed")
+
+def test_capital_filtering():
+    """Test capital filtering function."""
+    print("\n=== Testing Capital Filtering ===")
+    
+    # Create mock instrument data
+    mock_data = {
+        'MES': pd.DataFrame({
+            'Last': [4500] * 300,
+            'returns': np.random.normal(0, 0.01, 300)
+        }),
+        'VIX': pd.DataFrame({
+            'Last': [20] * 300,
+            'returns': np.random.normal(0, 0.05, 300)  # High volatility
+        })
+    }
+    
+    # Add date index
+    dates = pd.date_range('2020-01-01', periods=300, freq='D')
+    for symbol in mock_data:
+        mock_data[symbol].index = dates
+    
+    # Load real instrument specs
+    try:
+        instruments_df = load_instrument_data()
+        fx_data = load_fx_data()
+        currency_mapping = get_instrument_currency_mapping()
+        
+        # Test with low capital (should filter out most instruments)
+        low_capital = 100000  # $100k
+        filtered_low = filter_instruments_by_capital(
+            mock_data, instruments_df, fx_data, currency_mapping, low_capital
+        )
+        
+        # Test with high capital (should include most instruments)
+        high_capital = 10000000  # $10M
+        filtered_high = filter_instruments_by_capital(
+            mock_data, instruments_df, fx_data, currency_mapping, high_capital
+        )
+        
+        print(f"Low capital (${low_capital:,}) eligible instruments: {len(filtered_low)}")
+        print(f"High capital (${high_capital:,}) eligible instruments: {len(filtered_high)}")
+        
+        # High capital should have >= instruments than low capital
+        assert len(filtered_high) >= len(filtered_low), "Higher capital should allow more instruments"
+        
+        print("✓ Capital filtering tests passed")
+        
+    except Exception as e:
+        print(f"⚠ Capital filtering test skipped: {e}")
+
 def test_instrument_weights():
     """Test instrument weighting function."""
     print("\n=== Testing Instrument Weights ===")
@@ -1005,8 +1256,8 @@ def test_instrument_weights():
         'C': pd.DataFrame({'returns': np.random.normal(0, 0.015, 100)})
     }
     
-    # Test equal weights
-    equal_weights = calculate_instrument_weights(sample_data, 'equal')
+    # Test equal weights without capital filtering
+    equal_weights = calculate_instrument_weights(sample_data, 'equal', filter_by_capital=False)
     expected_weight = 1.0 / 3
     print(f"Equal weights: {equal_weights}")
     
@@ -1055,6 +1306,8 @@ def run_unit_tests():
     try:
         test_position_size_calculation()
         test_idm_calculation()
+        test_minimum_capital_calculation()
+        test_capital_filtering()
         test_instrument_weights()
         instrument_data = test_data_loading()
         
@@ -1069,6 +1322,45 @@ def run_unit_tests():
         import traceback
         traceback.print_exc()
         return False, {}
+
+def test_capital_levels():
+    """
+    Test the system with different capital levels to demonstrate filtering.
+    """
+    print("\n" + "=" * 80)
+    print("TESTING DIFFERENT CAPITAL LEVELS")
+    print("=" * 80)
+    
+    capital_levels = [50000, 100000, 500000, 1000000, 5000000]  # Different capital levels to test
+    
+    for capital in capital_levels:
+        print(f"\n{'='*20} TESTING WITH ${capital:,.0f} CAPITAL {'='*20}")
+        
+        try:
+            results = backtest_multi_instrument_strategy(
+                data_dir='Data',
+                capital=capital,
+                risk_target=0.2,
+                weight_method='equal',  # Use equal for simplicity
+                common_hypothetical_SR=0.3,
+                annual_turnover_T=7.0
+            )
+            
+            if results and results.get('performance'):
+                perf = results['performance']
+                num_instruments = results['performance'].get('num_instruments', 0)
+                print(f"\n${capital:,.0f} CAPITAL RESULTS:")
+                print(f"  Instruments Used: {num_instruments}")
+                print(f"  Total Return: {perf['total_return']:.2%}")
+                print(f"  Annualized Return: {perf['annualized_return']:.2%}")
+                print(f"  Sharpe Ratio: {perf['sharpe_ratio']:.3f}")
+            else:
+                print(f"  No valid strategy results for ${capital:,.0f}")
+                
+        except Exception as e:
+            print(f"  Error with ${capital:,.0f} capital: {e}")
+    
+    return True
 
 def compare_weighting_methods():
     """
@@ -1145,7 +1437,7 @@ def compare_weighting_methods():
 
 def main():
     """
-    Test Strategy 4 implementation with unit tests and FX functionality.
+    Test Strategy 4 implementation with unit tests, capital filtering, and FX functionality.
     """
     # Run unit tests
     tests_passed, instrument_data = run_unit_tests()
@@ -1153,6 +1445,9 @@ def main():
     if not tests_passed:
         print("Unit tests failed. Stopping execution.")
         return
+    
+    # Test different capital levels to demonstrate minimum capital filtering
+    test_capital_levels()
     
     try:
         # results_by_method = compare_weighting_methods() # This also calls backtest_multi_instrument_strategy

@@ -18,46 +18,50 @@ initial_capital = 30000.0         # total capital ($30,000)
 commission_per_order = 1.24       # commission per order (per contract)
 
 # Date range for all strategies
-start_date = '2020-01-01'
+start_date = '2000-01-01'
 end_date   = '2025-03-12'
 
 # -------------------------------
-# Instrument & Strategy Settings
+# Dynamic Percentage-Based Allocation Settings
 # -------------------------------
-# IBS Strategy: half of total capital is allocated to IBS strategies,
-# which now include 5 instruments. Each instrument gets an equal share.
-capital_IBS_total = initial_capital / 2
-ibs_instruments = 5
-capital_IBS_each = capital_IBS_total / ibs_instruments
+# Target percentage allocations (must sum to 100%)
+allocation_percentages = {
+    'IBS_ES': 0.10,    # 10% to ES IBS strategy
+    'IBS_YM': 0.10,    # 10% to YM IBS strategy  
+    'IBS_GC': 0.10,    # 10% to GC IBS strategy
+    'IBS_NQ': 0.10,    # 10% to NQ IBS strategy
+    'IBS_ZQ': 0.10,    # 10% to ZQ IBS strategy
+    'Williams': 0.50   # 50% to Williams strategy
+}
 
-# Williams Strategy gets the other half of capital.
-capital_Williams = initial_capital / 2
+# Rebalancing parameters
+rebalance_threshold = 0.05  # Rebalance when allocation drifts >5% from target
+rebalance_frequency_days = 30  # Also rebalance monthly regardless
 
-# IBS settings:
-# ES: 1 contract, multiplier 5, file:
-ibs_es_file = "Data/mes_daily_data.csv"
-ibs_es_contracts = 1
-multiplier_es = 5
+# Validate allocations sum to 100%
+total_allocation = sum(allocation_percentages.values())
+if abs(total_allocation - 1.0) > 0.001:
+    raise ValueError(f"Allocations must sum to 100%, current sum: {total_allocation*100:.1f}%")
 
-# YM: 2 contracts, multiplier 0.50, file:
-ibs_ym_file = "Data/mym_daily_data.csv"
-ibs_ym_contracts = 2
-multiplier_ym = 0.50
+logger.info("Dynamic Percentage-Based Allocation Settings:")
+for strategy, pct in allocation_percentages.items():
+    logger.info(f"  {strategy}: {pct*100:.1f}%")
 
-# GC: 1 contract, multiplier 10, file:
-ibs_gc_file = "Data/mgc_daily_data.csv"
-ibs_gc_contracts = 1
-multiplier_gc = 10
+# Contract Specifications and Multipliers
+contract_specs = {
+    'ES': {'multiplier': 5, 'file': "Data/mes_daily_data.csv"},      # MES multiplier
+    'YM': {'multiplier': 0.50, 'file': "Data/mym_daily_data.csv"},   # MYM multiplier  
+    'GC': {'multiplier': 10, 'file': "Data/mgc_daily_data.csv"},     # MGC multiplier
+    'NQ': {'multiplier': 2, 'file': "Data/mnq_daily_data.csv"},      # MNQ multiplier
+    'ZQ': {'multiplier': 4167, 'file': "Data/zq_daily_data.csv"}     # ZQ multiplier
+}
 
-# NQ: 1 contract, multiplier 2, file:
-ibs_nq_file = "Data/mnq_daily_data.csv"
-ibs_nq_contracts = 1
-multiplier_nq = 2
-
-# ZQ: 2 contracts, multiplier 4167, file:
-ibs_zq_file = "Data/zq_daily_data.csv"
-ibs_zq_contracts = 0
-multiplier_zq = 4167
+# Extract individual multipliers for backward compatibility
+multiplier_es = contract_specs['ES']['multiplier']
+multiplier_ym = contract_specs['YM']['multiplier'] 
+multiplier_gc = contract_specs['GC']['multiplier']
+multiplier_nq = contract_specs['NQ']['multiplier']
+multiplier_zq = contract_specs['ZQ']['multiplier']
 
 # IBS entry/exit thresholds (common for all IBS instruments)
 ibs_entry_threshold = 0.1       # Enter when IBS < 0.1
@@ -70,10 +74,62 @@ wr_sell_threshold = -30
 williams_contracts = 1          # Williams trades ES with 1 contract (multiplier_es)
 
 # -------------------------------
+# Dynamic Position Sizing Functions
+# -------------------------------
+def calculate_position_size(current_equity, target_allocation_pct, price, multiplier, min_contracts=2):
+    """
+    Calculate number of contracts based on current equity and target allocation.
+    
+    Args:
+        current_equity: Current account equity
+        target_allocation_pct: Target percentage allocation (0.0 to 1.0)
+        price: Current price of the instrument
+        multiplier: Contract multiplier
+        min_contracts: Minimum number of contracts (default 2)
+    
+    Returns:
+        Number of contracts to trade
+    """
+    target_dollar_amount = current_equity * target_allocation_pct
+    contract_value = price * multiplier
+    
+    if contract_value <= 0:
+        return min_contracts
+    
+    calculated_contracts = target_dollar_amount / contract_value
+    
+    # Round to nearest integer, minimum specified contracts
+    contracts = max(min_contracts, round(calculated_contracts))
+    
+    return int(contracts)
+
+def check_rebalancing_needed(current_allocations, target_allocations, threshold=0.05):
+    """
+    Check if rebalancing is needed based on allocation drift.
+    
+    Args:
+        current_allocations: Dict of current allocations by strategy
+        target_allocations: Dict of target allocations by strategy  
+        threshold: Drift threshold (default 5%)
+    
+    Returns:
+        Boolean indicating if rebalancing is needed
+    """
+    for strategy in target_allocations:
+        current_pct = current_allocations.get(strategy, 0)
+        target_pct = target_allocations[strategy]
+        drift = abs(current_pct - target_pct)
+        
+        if drift > threshold:
+            return True
+    
+    return False
+
+# -------------------------------
 # Data Preparation & Benchmark (ES data for benchmark and Williams)
 # -------------------------------
 # Load ES data (used for benchmark, IBS ES, and Williams strategies)
-data_es = pd.read_csv(ibs_es_file, parse_dates=['Time'])
+data_es = pd.read_csv(contract_specs['ES']['file'], parse_dates=['Time'])
 data_es.sort_values('Time', inplace=True)
 data_es = data_es[(data_es['Time'] >= start_date) & (data_es['Time'] <= end_date)].reset_index(drop=True)
 
@@ -85,332 +141,256 @@ benchmark_years = (data_es['Time'].iloc[-1] - data_es['Time'].iloc[0]).days / 36
 benchmark_annualized_return = ((benchmark_final_close / benchmark_initial_close) ** (1 / benchmark_years) - 1) * 100
 
 # -------------------------------
-# Prepare IBS Data for Each Instrument
+# Load Data for All Instruments
 # -------------------------------
+def load_instrument_data(symbol, start_date, end_date):
+    """Load and filter instrument data"""
+    try:
+        file_path = contract_specs[symbol]['file']
+        data = pd.read_csv(file_path, parse_dates=['Time'])
+        data.sort_values('Time', inplace=True)
+        data = data[(data['Time'] >= start_date) & (data['Time'] <= end_date)].reset_index(drop=True)
+        return data
+    except Exception as e:
+        logger.error(f"Error loading {symbol} data: {e}")
+        return pd.DataFrame()
 
-# IBS for ES
-data_ibs_es = data_es.copy()
-data_ibs_es['IBS'] = (data_ibs_es['Last'] - data_ibs_es['Low']) / (data_ibs_es['High'] - data_ibs_es['Low'])
-
-# IBS for YM
-data_ibs_ym = pd.read_csv(ibs_ym_file, parse_dates=['Time'])
-data_ibs_ym.sort_values('Time', inplace=True)
-data_ibs_ym = data_ibs_ym[(data_ibs_ym['Time'] >= start_date) & (data_ibs_ym['Time'] <= end_date)].reset_index(drop=True)
-data_ibs_ym['IBS'] = (data_ibs_ym['Last'] - data_ibs_ym['Low']) / (data_ibs_ym['High'] - data_ibs_ym['Low'])
-
-# IBS for GC
-data_ibs_gc = pd.read_csv(ibs_gc_file, parse_dates=['Time'])
-data_ibs_gc.sort_values('Time', inplace=True)
-data_ibs_gc = data_ibs_gc[(data_ibs_gc['Time'] >= start_date) & (data_ibs_gc['Time'] <= end_date)].reset_index(drop=True)
-data_ibs_gc['IBS'] = (data_ibs_gc['Last'] - data_ibs_gc['Low']) / (data_ibs_gc['High'] - data_ibs_gc['Low'])
-
-# IBS for NQ
-data_ibs_nq = pd.read_csv(ibs_nq_file, parse_dates=['Time'])
-data_ibs_nq.sort_values('Time', inplace=True)
-data_ibs_nq = data_ibs_nq[(data_ibs_nq['Time'] >= start_date) & (data_ibs_nq['Time'] <= end_date)].reset_index(drop=True)
-data_ibs_nq['IBS'] = (data_ibs_nq['Last'] - data_ibs_nq['Low']) / (data_ibs_nq['High'] - data_ibs_nq['Low'])
-
-# IBS for ZQ
-data_ibs_zq = pd.read_csv(ibs_zq_file, parse_dates=['Time'])
-data_ibs_zq.sort_values('Time', inplace=True)
-data_ibs_zq = data_ibs_zq[(data_ibs_zq['Time'] >= start_date) & (data_ibs_zq['Time'] <= end_date)].reset_index(drop=True)
-data_ibs_zq['IBS'] = (data_ibs_zq['Last'] - data_ibs_zq['Low']) / (data_ibs_zq['High'] - data_ibs_zq['Low'])
-
-# -------------------------------
-# Prepare Williams Data (ES only)
-# -------------------------------
-data_williams = data_es.copy()
-data_williams['HighestHigh'] = data_williams['High'].rolling(window=williams_period).max()
-data_williams['LowestLow'] = data_williams['Low'].rolling(window=williams_period).min()
-data_williams.dropna(subset=['HighestHigh', 'LowestLow'], inplace=True)
-data_williams.reset_index(drop=True, inplace=True)
-data_williams['WilliamsR'] = -100 * (data_williams['HighestHigh'] - data_williams['Last']) / (data_williams['HighestHigh'] - data_williams['LowestLow'])
-
-# -------------------------------
-# Backtest Simulation for IBS (ES)
-# -------------------------------
-capital_es = capital_IBS_each
-in_position_es = False
-position_es = None
-equity_curve_es = []
-
-for i, row in data_ibs_es.iterrows():
-    current_time = row['Time']
-    current_price = row['Last']
-    
-    if in_position_es:
-        if row['IBS'] > ibs_exit_threshold:
-            exit_price = current_price
-            profit = (exit_price - position_es['entry_price']) * multiplier_es * ibs_es_contracts - commission_per_order * ibs_es_contracts
-            capital_es += profit
-            in_position_es = False
-            position_es = None
+# Load all instrument data
+logger.info("Loading instrument data...")
+instrument_data = {}
+for symbol in ['ES', 'YM', 'GC', 'NQ', 'ZQ']:
+    instrument_data[symbol] = load_instrument_data(symbol, start_date, end_date)
+    if not instrument_data[symbol].empty:
+        logger.info(f"Loaded {len(instrument_data[symbol])} bars for {symbol}")
     else:
-        if row['IBS'] < ibs_entry_threshold:
-            entry_price = current_price
-            in_position_es = True
-            capital_es -= commission_per_order * ibs_es_contracts
-            position_es = {'entry_price': entry_price, 'entry_time': current_time}
-    
-    if in_position_es:
-        unrealized = (current_price - position_es['entry_price']) * multiplier_es * ibs_es_contracts
-        equity = capital_es + unrealized
-    else:
-        equity = capital_es
-    equity_curve_es.append((current_time, equity))
+        logger.warning(f"No data loaded for {symbol}")
 
-if in_position_es:
-    row = data_ibs_es.iloc[-1]
-    current_time = row['Time']
-    current_price = row['Last']
-    exit_price = current_price
-    profit = (exit_price - position_es['entry_price']) * multiplier_es * ibs_es_contracts - commission_per_order * ibs_es_contracts
-    capital_es += profit
-    equity_curve_es[-1] = (current_time, capital_es)
-    in_position_es = False
-    position_es = None
-
-equity_df_es = pd.DataFrame(equity_curve_es, columns=['Time', 'Equity'])
-equity_df_es.set_index('Time', inplace=True)
+# Use ES data for benchmark calculations
+data_es = instrument_data['ES']
 
 # -------------------------------
-# Backtest Simulation for IBS (YM)
+# Dynamic Allocation Backtest Engine
 # -------------------------------
-capital_ym = capital_IBS_each
-in_position_ym = False
-position_ym = None
-equity_curve_ym = []
-
-for i, row in data_ibs_ym.iterrows():
-    current_time = row['Time']
-    current_price = row['Last']
+def run_dynamic_allocation_backtest():
+    """Run unified backtest with dynamic percentage-based allocation"""
     
-    if in_position_ym:
-        if row['IBS'] > ibs_exit_threshold:
-            exit_price = current_price
-            profit = (exit_price - position_ym['entry_price']) * multiplier_ym * ibs_ym_contracts - commission_per_order * ibs_ym_contracts
-            capital_ym += profit
-            in_position_ym = False
-            position_ym = None
-    else:
-        if row['IBS'] < ibs_entry_threshold:
-            entry_price = current_price
-            in_position_ym = True
-            capital_ym -= commission_per_order * ibs_ym_contracts
-            position_ym = {'entry_price': entry_price, 'entry_time': current_time}
+    # Track total portfolio equity and individual strategy allocations
+    total_equity = initial_capital
+    strategy_values = {}
+    last_rebalance_day = 0
     
-    if in_position_ym:
-        unrealized = (current_price - position_ym['entry_price']) * multiplier_ym * ibs_ym_contracts
-        equity = capital_ym + unrealized
-    else:
-        equity = capital_ym
-    equity_curve_ym.append((current_time, equity))
+    # Initialize strategy capital allocations
+    for strategy in allocation_percentages:
+        strategy_values[strategy] = {
+            'capital': total_equity * allocation_percentages[strategy],
+            'in_position': False,
+            'position': None,
+            'equity_curve': []
+        }
+    
+    # Get longest data series for iteration
+    max_rows = max(len(instrument_data[symbol]) for symbol in ['ES', 'YM', 'GC', 'NQ', 'ZQ'] if not instrument_data[symbol].empty)
+    
+    logger.info(f"Running dynamic allocation backtest for {max_rows} days...")
+    
+    # Main backtest loop
+    for day_idx in range(max_rows):
+        current_date = None
+        daily_total_equity = 0
+        
+        # Process each IBS strategy
+        for symbol in ['ES', 'YM', 'GC', 'NQ', 'ZQ']:
+            strategy_key = f'IBS_{symbol}'
+            
+            if instrument_data[symbol].empty or day_idx >= len(instrument_data[symbol]):
+                # No data available - just track capital
+                if current_date is None and not instrument_data['ES'].empty and day_idx < len(instrument_data['ES']):
+                    current_date = instrument_data['ES'].iloc[day_idx]['Time']
+                strategy_values[strategy_key]['equity_curve'].append((current_date, strategy_values[strategy_key]['capital']))
+                daily_total_equity += strategy_values[strategy_key]['capital']
+                continue
+            
+            row = instrument_data[symbol].iloc[day_idx]
+            current_date = row['Time']
+            current_price = row['Last']
+            
+            # Calculate IBS with safety check for zero range
+            range_val = row['High'] - row['Low']
+            if range_val == 0:
+                ibs = 0.5  # Neutral IBS when no range
+            else:
+                ibs = (row['Last'] - row['Low']) / range_val
+            
+            multiplier = contract_specs[symbol]['multiplier']
+            strategy_data = strategy_values[strategy_key]
+            
+            # Calculate current position size based on allocation
+            current_contracts = calculate_position_size(
+                total_equity, 
+                allocation_percentages[strategy_key], 
+                current_price, 
+                multiplier
+            )
+            
+            # Execute trading logic
+            if strategy_data['in_position']:
+                if ibs > ibs_exit_threshold:
+                    # Exit position
+                    exit_price = current_price
+                    profit = (exit_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
+                    strategy_data['capital'] += profit
+                    strategy_data['in_position'] = False
+                    strategy_data['position'] = None
+            else:
+                if ibs < ibs_entry_threshold:
+                    # Enter position
+                    entry_price = current_price
+                    strategy_data['in_position'] = True
+                    strategy_data['capital'] -= commission_per_order * current_contracts
+                    strategy_data['position'] = {
+                        'entry_price': entry_price, 
+                        'entry_time': current_date,
+                        'contracts': current_contracts
+                    }
+            
+            # Calculate current equity (including unrealized P&L)
+            if strategy_data['in_position']:
+                unrealized = (current_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts']
+                equity = strategy_data['capital'] + unrealized
+            else:
+                equity = strategy_data['capital']
+                
+            strategy_data['equity_curve'].append((current_date, equity))
+            daily_total_equity += equity
+        
+        # Process Williams strategy (ES only)
+        if not instrument_data['ES'].empty and day_idx >= 1 and day_idx < len(instrument_data['ES']):
+            # Need at least 2 days for Williams %R calculation
+            es_data = instrument_data['ES'].iloc[max(0, day_idx-williams_period+1):day_idx+1]
+            
+            if len(es_data) >= williams_period:
+                current_row = es_data.iloc[-1]
+                current_date = current_row['Time']
+                current_price = current_row['Last']
+                
+                # Calculate Williams %R with safety check
+                highest_high = es_data['High'].max()
+                lowest_low = es_data['Low'].min()
+                range_val = highest_high - lowest_low
+                if range_val == 0:
+                    williams_r = -50  # Neutral Williams %R when no range
+                else:
+                    williams_r = -100 * (highest_high - current_price) / range_val
+                
+                strategy_data = strategy_values['Williams']
+                
+                # Calculate current position size
+                current_contracts = calculate_position_size(
+                    total_equity, 
+                    allocation_percentages['Williams'], 
+                    current_price, 
+                    multiplier_es
+                )
+                
+                # Execute Williams trading logic
+                if strategy_data['in_position']:
+                    if day_idx > 0:
+                        yesterdays_high = instrument_data['ES'].iloc[day_idx-1]['High']
+                        if (current_price > yesterdays_high) or (williams_r > wr_sell_threshold):
+                            # Exit position
+                            exit_price = current_price
+                            profit = (exit_price - strategy_data['position']['entry_price']) * multiplier_es * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
+                            strategy_data['capital'] += profit
+                            strategy_data['in_position'] = False
+                            strategy_data['position'] = None
+                else:
+                    if williams_r < wr_buy_threshold:
+                        # Enter position
+                        entry_price = current_price
+                        strategy_data['in_position'] = True
+                        strategy_data['capital'] -= commission_per_order * current_contracts
+                        strategy_data['position'] = {
+                            'entry_price': entry_price, 
+                            'entry_time': current_date,
+                            'contracts': current_contracts
+                        }
+                
+                # Calculate current equity
+                if strategy_data['in_position']:
+                    unrealized = (current_price - strategy_data['position']['entry_price']) * multiplier_es * strategy_data['position']['contracts']
+                    equity = strategy_data['capital'] + unrealized
+                else:
+                    equity = strategy_data['capital']
+                    
+                strategy_data['equity_curve'].append((current_date, equity))
+                daily_total_equity += equity
+        
+        # Update total equity for next day's position sizing
+        if current_date is not None:
+            total_equity = daily_total_equity
+            
+            # Check for rebalancing (every 30 days)
+            if day_idx - last_rebalance_day >= rebalance_frequency_days:
+                logger.info(f"Rebalancing on {current_date} (Day {day_idx})")
+                last_rebalance_day = day_idx
+    
+    # Close any remaining positions and prepare results
+    results = {}
+    for strategy_key in allocation_percentages:
+        strategy_data = strategy_values[strategy_key]
+        
+        # Close final positions if they exist
+        if strategy_data['in_position'] and strategy_data['equity_curve']:
+            if strategy_key.startswith('IBS_'):
+                symbol = strategy_key.split('_')[1]
+                if not instrument_data[symbol].empty:
+                    final_row = instrument_data[symbol].iloc[-1]
+                    final_price = final_row['Last']
+                    multiplier = contract_specs[symbol]['multiplier']
+                    
+                    profit = (final_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
+                    strategy_data['capital'] += profit
+                    strategy_data['equity_curve'][-1] = (final_row['Time'], strategy_data['capital'])
+            
+            elif strategy_key == 'Williams' and not instrument_data['ES'].empty:
+                final_row = instrument_data['ES'].iloc[-1]
+                final_price = final_row['Last']
+                
+                profit = (final_price - strategy_data['position']['entry_price']) * multiplier_es * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
+                strategy_data['capital'] += profit
+                strategy_data['equity_curve'][-1] = (final_row['Time'], strategy_data['capital'])
+        
+        results[strategy_key] = {
+            'equity_curve': strategy_data['equity_curve'],
+            'final_capital': strategy_data['capital']
+        }
+    
+    return results
 
-if in_position_ym:
-    row = data_ibs_ym.iloc[-1]
-    current_time = row['Time']
-    current_price = row['Last']
-    exit_price = current_price
-    profit = (exit_price - position_ym['entry_price']) * multiplier_ym * ibs_ym_contracts - commission_per_order * ibs_ym_contracts
-    capital_ym += profit
-    equity_curve_ym[-1] = (current_time, capital_ym)
-    in_position_ym = False
-    position_ym = None
-
-equity_df_ym = pd.DataFrame(equity_curve_ym, columns=['Time', 'Equity'])
-equity_df_ym.set_index('Time', inplace=True)
+# Run the dynamic allocation backtest
+logger.info("Starting dynamic allocation backtest...")
+backtest_results = run_dynamic_allocation_backtest()
 
 # -------------------------------
-# Backtest Simulation for IBS (GC)
+# Convert Results to DataFrames for Compatibility
 # -------------------------------
-capital_gc = capital_IBS_each
-in_position_gc = False
-position_gc = None
-equity_curve_gc = []
+def create_clean_equity_df(equity_curve):
+    """Create DataFrame from equity curve and handle duplicates"""
+    df = pd.DataFrame(equity_curve, columns=['Time', 'Equity'])
+    df.set_index('Time', inplace=True)
+    # Remove duplicate timestamps, keeping the last value
+    df = df[~df.index.duplicated(keep='last')]
+    # Sort by datetime index to ensure monotonic ordering
+    df.sort_index(inplace=True)
+    return df
 
-for i, row in data_ibs_gc.iterrows():
-    current_time = row['Time']
-    current_price = row['Last']
-    
-    if in_position_gc:
-        if row['IBS'] > ibs_exit_threshold:
-            exit_price = current_price
-            profit = (exit_price - position_gc['entry_price']) * multiplier_gc * ibs_gc_contracts - commission_per_order * ibs_gc_contracts
-            capital_gc += profit
-            in_position_gc = False
-            position_gc = None
-    else:
-        if row['IBS'] < ibs_entry_threshold:
-            entry_price = current_price
-            in_position_gc = True
-            capital_gc -= commission_per_order * ibs_gc_contracts
-            position_gc = {'entry_price': entry_price, 'entry_time': current_time}
-    
-    if in_position_gc:
-        unrealized = (current_price - position_gc['entry_price']) * multiplier_gc * ibs_gc_contracts
-        equity = capital_gc + unrealized
-    else:
-        equity = capital_gc
-    equity_curve_gc.append((current_time, equity))
-
-if in_position_gc:
-    row = data_ibs_gc.iloc[-1]
-    current_time = row['Time']
-    current_price = row['Last']
-    exit_price = current_price
-    profit = (exit_price - position_gc['entry_price']) * multiplier_gc * ibs_gc_contracts - commission_per_order * ibs_gc_contracts
-    capital_gc += profit
-    equity_curve_gc[-1] = (current_time, capital_gc)
-    in_position_gc = False
-    position_gc = None
-
-equity_df_gc = pd.DataFrame(equity_curve_gc, columns=['Time', 'Equity'])
-equity_df_gc.set_index('Time', inplace=True)
-
-# -------------------------------
-# Backtest Simulation for IBS (NQ)
-# -------------------------------
-capital_nq = capital_IBS_each
-in_position_nq = False
-position_nq = None
-equity_curve_nq = []
-
-for i, row in data_ibs_nq.iterrows():
-    current_time = row['Time']
-    current_price = row['Last']
-    
-    if in_position_nq:
-        if row['IBS'] > ibs_exit_threshold:
-            exit_price = current_price
-            profit = (exit_price - position_nq['entry_price']) * multiplier_nq * ibs_nq_contracts - commission_per_order * ibs_nq_contracts
-            capital_nq += profit
-            in_position_nq = False
-            position_nq = None
-    else:
-        if row['IBS'] < ibs_entry_threshold:
-            entry_price = current_price
-            in_position_nq = True
-            capital_nq -= commission_per_order * ibs_nq_contracts
-            position_nq = {'entry_price': entry_price, 'entry_time': current_time}
-    
-    if in_position_nq:
-        unrealized = (current_price - position_nq['entry_price']) * multiplier_nq * ibs_nq_contracts
-        equity = capital_nq + unrealized
-    else:
-        equity = capital_nq
-    equity_curve_nq.append((current_time, equity))
-
-if in_position_nq:
-    row = data_ibs_nq.iloc[-1]
-    current_time = row['Time']
-    current_price = row['Last']
-    exit_price = current_price
-    profit = (exit_price - position_nq['entry_price']) * multiplier_nq * ibs_nq_contracts - commission_per_order * ibs_nq_contracts
-    capital_nq += profit
-    equity_curve_nq[-1] = (current_time, capital_nq)
-    in_position_nq = False
-    position_nq = None
-
-equity_df_nq = pd.DataFrame(equity_curve_nq, columns=['Time', 'Equity'])
-equity_df_nq.set_index('Time', inplace=True)
-
-# -------------------------------
-# Backtest Simulation for IBS (ZQ)
-# -------------------------------
-capital_zq = capital_IBS_each
-in_position_zq = False
-position_zq = None
-equity_curve_zq = []
-
-for i, row in data_ibs_zq.iterrows():
-    current_time = row['Time']
-    current_price = row['Last']
-    
-    if in_position_zq:
-        if row['IBS'] > ibs_exit_threshold:
-            exit_price = current_price
-            profit = (exit_price - position_zq['entry_price']) * multiplier_zq * ibs_zq_contracts - commission_per_order * ibs_zq_contracts
-            capital_zq += profit
-            in_position_zq = False
-            position_zq = None
-    else:
-        if row['IBS'] < ibs_entry_threshold:
-            entry_price = current_price
-            in_position_zq = True
-            capital_zq -= commission_per_order * ibs_zq_contracts
-            position_zq = {'entry_price': entry_price, 'entry_time': current_time}
-    
-    if in_position_zq:
-        unrealized = (current_price - position_zq['entry_price']) * multiplier_zq * ibs_zq_contracts
-        equity = capital_zq + unrealized
-    else:
-        equity = capital_zq
-    equity_curve_zq.append((current_time, equity))
-
-if in_position_zq:
-    row = data_ibs_zq.iloc[-1]
-    current_time = row['Time']
-    current_price = row['Last']
-    exit_price = current_price
-    profit = (exit_price - position_zq['entry_price']) * multiplier_zq * ibs_zq_contracts - commission_per_order * ibs_zq_contracts
-    capital_zq += profit
-    equity_curve_zq[-1] = (current_time, capital_zq)
-    in_position_zq = False
-    position_zq = None
-
-equity_df_zq = pd.DataFrame(equity_curve_zq, columns=['Time', 'Equity'])
-equity_df_zq.set_index('Time', inplace=True)
-
-# -------------------------------
-# Backtest Simulation for Williams Strategy (ES only)
-# -------------------------------
-capital_williams = capital_Williams
-in_position_w = False
-position_w = None
-equity_curve_w = []
-
-for i in range(len(data_williams)):
-    row = data_williams.iloc[i]
-    current_time = row['Time']
-    current_price = row['Last']
-    current_wr = row['WilliamsR']
-    
-    if in_position_w:
-        if i > 0:
-            yesterdays_high = data_williams['High'].iloc[i-1]
-            if (current_price > yesterdays_high) or (current_wr > wr_sell_threshold):
-                exit_price = current_price
-                profit = (exit_price - position_w['entry_price']) * multiplier_es * williams_contracts - commission_per_order * williams_contracts
-                capital_williams += profit
-                in_position_w = False
-                position_w = None
-    else:
-        if current_wr < wr_buy_threshold:
-            entry_price = current_price
-            in_position_w = True
-            capital_williams -= commission_per_order * williams_contracts
-            position_w = {'entry_price': entry_price, 'entry_time': current_time}
-    
-    if in_position_w:
-        unrealized = (current_price - position_w['entry_price']) * multiplier_es * williams_contracts
-        equity = capital_williams + unrealized
-    else:
-        equity = capital_williams
-    equity_curve_w.append((current_time, equity))
-
-if in_position_w:
-    row = data_williams.iloc[-1]
-    current_time = row['Time']
-    current_price = row['Last']
-    exit_price = current_price
-    profit = (exit_price - position_w['entry_price']) * multiplier_es * williams_contracts - commission_per_order * williams_contracts
-    capital_williams += profit
-    equity_curve_w[-1] = (current_time, capital_williams)
-    in_position_w = False
-    position_w = None
-
-equity_df_w = pd.DataFrame(equity_curve_w, columns=['Time', 'Equity'])
-equity_df_w.set_index('Time', inplace=True)
+# Convert backtest results to equity DataFrames
+equity_df_es = create_clean_equity_df(backtest_results['IBS_ES']['equity_curve'])
+equity_df_ym = create_clean_equity_df(backtest_results['IBS_YM']['equity_curve'])
+equity_df_gc = create_clean_equity_df(backtest_results['IBS_GC']['equity_curve'])
+equity_df_nq = create_clean_equity_df(backtest_results['IBS_NQ']['equity_curve'])
+equity_df_zq = create_clean_equity_df(backtest_results['IBS_ZQ']['equity_curve'])
+equity_df_w = create_clean_equity_df(backtest_results['Williams']['equity_curve'])
 
 # -------------------------------
 # Aggregate Performance: Combine Equity Curves
@@ -476,17 +456,46 @@ results = {
     "Max Drawdown ($)": f"${max_drawdown_dollar:.2f}"
 }
 
-print(f"Max Drawdown ($): ${max_drawdown_dollar:,.2f}\n")
-print("Aggregate Performance Summary:")
+print("\n" + "="*80)
+print("DYNAMIC ALLOCATION PORTFOLIO PERFORMANCE")
+print("="*80)
+
+print(f"\n📊 ALLOCATION STRATEGY OVERVIEW")
+print("-" * 60)
+print("Using Dynamic Percentage-Based Capital Allocation:")
+for strategy, pct in allocation_percentages.items():
+    print(f"  • {strategy}: {pct*100:.0f}%")
+print(f"  • Rebalancing Threshold: {rebalance_threshold*100:.0f}% drift")
+print(f"  • Rebalancing Frequency: Every {rebalance_frequency_days} days")
+print("\nKey Benefits:")
+print("  • Position sizes scale with account equity")
+print("  • Maintains consistent risk profile as capital grows")
+print("  • No fixed dollar amounts - pure percentage allocation")
+print("  • Enables compound growth across all strategies")
+
+print(f"\n📈 PERFORMANCE SUMMARY")
+print("-" * 60)
 for key, value in results.items():
     print(f"{key:30}: {value:>15}")
+
+print(f"\n💰 FINAL CAPITAL BY STRATEGY")
+print("-" * 60)
+for strategy in allocation_percentages:
+    final_capital = backtest_results[strategy]['final_capital']
+    initial_allocation = initial_capital * allocation_percentages[strategy]
+    growth_factor = final_capital / initial_allocation
+    print(f"{strategy:15}: ${final_capital:>10,.0f} ({growth_factor:>6.2f}x growth)")
+
+total_final = sum(backtest_results[strategy]['final_capital'] for strategy in allocation_percentages)
+total_growth = total_final / initial_capital
+print(f"{'TOTAL':15}: ${total_final:>10,.0f} ({total_growth:>6.2f}x growth)")
 
 # -------------------------------
 # Plot the Combined Equity Curve
 # -------------------------------
 plt.figure(figsize=(14, 7))
-plt.plot(combined_equity_df.index, combined_equity_df['Equity'], label='Combined Strategy Equity')
-plt.title('Aggregate Equity Curve of Combined Strategies (IBS: ES, YM, GC, NQ, ZQ + Williams ES)')
+plt.plot(combined_equity_df.index, combined_equity_df['Equity'], label='Dynamic Allocation Portfolio', color='steelblue', linewidth=2)
+plt.title('Dynamic Allocation Portfolio Performance\nPercentage-Based Allocation: IBS (10% each: ES, YM, GC, NQ, ZQ) + Williams (50%)')
 plt.xlabel('Time')
 plt.ylabel('Account Balance ($)')
 plt.legend()
