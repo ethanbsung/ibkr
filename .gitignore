@@ -51,3 +51,4 @@ complete_pinescript_trade_visualization.pine
 Data/
 
 ES/positions.json
+portfolio_state.json

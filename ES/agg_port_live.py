@@ -120,11 +120,11 @@ def load_portfolio_state():
         except:
             pass
     
-    # Default state
+    # Default state - current_equity will be set from IBKR account
     return {
         'positions': {strategy: {'in_position': False, 'position': None} for strategy in allocation_percentages},
         'last_rebalance_date': None,
-        'current_equity': 30000.0  # Default starting equity
+        'current_equity': None  # Will be populated from IBKR account
     }
 
 def save_portfolio_state(state):
@@ -154,20 +154,7 @@ def get_daily_bar(ib, contract, end_datetime):
     )
     return bars if bars else []
 
-def get_current_price(ib, contract):
-    """Get current market price for a contract"""
-    ticker = ib.reqMktData(contract, '', snapshot=True, regulatorySnapshot=False)
-    ib.sleep(2)  # Allow time for market data to update
-    
-    current_price = ticker.last if ticker.last is not None else ticker.close
-    if current_price is None or current_price <= 0:
-        # Fallback to previous close if no current price
-        bars = get_daily_bar(ib, contract, format_end_datetime(datetime.now(pytz.timezone('US/Eastern')), pytz.timezone('US/Eastern')))
-        if bars:
-            current_price = bars[-1].close
-    
-    ib.cancelMktData(contract)
-    return current_price
+
 
 def get_account_equity(ib):
     """Get current account equity from IBKR"""
@@ -277,8 +264,12 @@ def run_daily_signals(ib):
     # Get current account equity
     current_equity = get_account_equity(ib)
     if current_equity is None:
-        logger.warning("Could not get account equity, using stored value")
-        current_equity = state['current_equity']
+        if state['current_equity'] is not None:
+            logger.warning("Could not get account equity from IBKR, using stored value")
+            current_equity = state['current_equity']
+        else:
+            logger.error("Could not get account equity from IBKR and no stored value available")
+            return
     else:
         state['current_equity'] = current_equity
         logger.info(f"Current account equity: ${current_equity:,.2f}")
@@ -454,7 +445,18 @@ def print_portfolio_summary(ib):
     for strategy, pct in allocation_percentages.items():
         logger.info(f"  • {strategy}: {pct*100:.0f}%")
     
-    logger.info(f"Current Equity: ${state['current_equity']:,.2f}")
+    # Get current equity from IBKR if not available in state
+    current_equity = state['current_equity']
+    if current_equity is None:
+        current_equity = get_account_equity(ib)
+        if current_equity is not None:
+            state['current_equity'] = current_equity
+            save_portfolio_state(state)
+    
+    if current_equity is not None:
+        logger.info(f"Current Equity: ${current_equity:,.2f}")
+    else:
+        logger.info("Current Equity: Unable to retrieve from IBKR")
     
     # Qualify contracts and get recent data
     contracts = qualify_contracts(ib)
