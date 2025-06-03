@@ -228,6 +228,85 @@ def qualify_contracts(ib):
         logging.error(f"Contract qualification error: {e}")
         return None
 
+def place_order_with_fallback(ib, contract, action, quantity, symbol):
+    """
+    Place an order with fallback from MOC to limit order if MOC is not supported.
+    Returns the trade object if successful, None if failed.
+    """
+    logger = logging.getLogger()
+    
+    # ZQ is known to not support MOC orders, so go straight to limit order
+    if symbol == 'ZQ':
+        logger.info(f"Using limit order for {symbol} (MOC not supported)")
+        return place_limit_order(ib, contract, action, quantity, symbol)
+    
+    # For other instruments, try MOC first
+    try:
+        order = Order(action=action, totalQuantity=quantity, orderType='MOC', tif='DAY')
+        trade = ib.placeOrder(contract, order)
+        logger.info(f"Placed MOC {action} order for {quantity} {symbol} contracts")
+        
+        # Wait a moment to see if there are any immediate errors
+        ib.sleep(1)
+        
+        # Check if order was rejected
+        if trade.orderStatus.status == 'Cancelled':
+            for log_entry in trade.log:
+                if '387' in log_entry.message or 'Unsupported order type' in log_entry.message:
+                    logger.warning(f"MOC order rejected for {symbol}, falling back to limit order")
+                    return place_limit_order(ib, contract, action, quantity, symbol)
+        
+        return trade
+    except Exception as e:
+        logger.error(f"Order placement failed for {symbol}: {e}")
+        return None
+
+def place_limit_order(ib, contract, action, quantity, symbol):
+    """Place a limit order near current market price"""
+    logger = logging.getLogger()
+    
+    # Get current price
+    ticker = ib.reqMktData(contract, '', False, False)
+    ib.sleep(2)  # Wait for price data
+    
+    current_price = None
+    if ticker.last and ticker.last > 0:
+        current_price = ticker.last
+    elif ticker.close and ticker.close > 0:
+        current_price = ticker.close
+    elif ticker.bid and ticker.ask:
+        current_price = (ticker.bid + ticker.ask) / 2
+    
+    # Cancel market data subscription
+    ib.cancelMktData(contract)
+    
+    if current_price:
+        # Set limit price slightly favorable (0.1% buffer)
+        if action == 'BUY':
+            limit_price = current_price * 1.001  # Slightly above current price
+        else:  # SELL
+            limit_price = current_price * 0.999  # Slightly below current price
+        
+        # Round to appropriate tick size for the instrument
+        if symbol == 'ZQ':
+            # ZQ trades in 0.0025 increments
+            limit_price = round(limit_price / 0.0025) * 0.0025
+        elif symbol in ['ES', 'YM', 'NQ']:
+            # These trade in 0.25 increments
+            limit_price = round(limit_price * 4) / 4
+        elif symbol == 'GC':
+            # GC trades in 0.1 increments
+            limit_price = round(limit_price * 10) / 10
+        
+        order = Order(action=action, totalQuantity=quantity, orderType='LMT', 
+                     lmtPrice=limit_price, tif='DAY')
+        trade = ib.placeOrder(contract, order)
+        logger.info(f"Placed LMT {action} order for {quantity} {symbol} contracts at {limit_price}")
+        return trade
+    else:
+        logger.error(f"Could not get current price for {symbol} limit order")
+        return None
+
 def wait_until_close(target_hour=17, target_minute=0, timezone='US/Eastern', lead_seconds=10):
     """Wait until the specified time minus lead_seconds."""
     tz = pytz.timezone(timezone)
@@ -321,31 +400,27 @@ def run_daily_signals(ib):
                 logger.info(f"{symbol} - IBS exit signal (IBS: {ibs:.3f} > {ibs_exit_threshold})")
                 current_contracts = strategy_state['position']['contracts']
                 
-                order = Order(action='SELL', totalQuantity=current_contracts, orderType='MOC', tif='DAY')
-                trade = ib.placeOrder(contract, order)
+                trade = place_order_with_fallback(ib, contract, 'SELL', current_contracts, symbol)
                 
-                logger.info(f"Placed IBS MOC SELL order for {current_contracts} {symbol} contracts")
-                
-                # Update state
-                strategy_state['in_position'] = False
-                strategy_state['position'] = None
+                if trade:
+                    # Update state only if order was placed successfully
+                    strategy_state['in_position'] = False
+                    strategy_state['position'] = None
         else:
             if ibs < ibs_entry_threshold:
                 # Enter position
                 logger.info(f"{symbol} - IBS entry signal (IBS: {ibs:.3f} < {ibs_entry_threshold})")
                 
-                order = Order(action='BUY', totalQuantity=target_contracts, orderType='MOC', tif='DAY')
-                trade = ib.placeOrder(contract, order)
+                trade = place_order_with_fallback(ib, contract, 'BUY', target_contracts, symbol)
                 
-                logger.info(f"Placed IBS MOC BUY order for {target_contracts} {symbol} contracts")
-                
-                # Update state
-                strategy_state['in_position'] = True
-                strategy_state['position'] = {
-                    'entry_price': current_price,
-                    'entry_time': current_dt.isoformat(),
-                    'contracts': target_contracts
-                }
+                if trade:
+                    # Update state only if order was placed successfully
+                    strategy_state['in_position'] = True
+                    strategy_state['position'] = {
+                        'entry_price': current_price,
+                        'entry_time': current_dt.isoformat(),
+                        'contracts': target_contracts
+                    }
     
     # Process Williams %R strategy (ES only, matching aggregate_port.py logic exactly)
     logger.info(f"\nProcessing Williams strategy...")
@@ -392,31 +467,27 @@ def run_daily_signals(ib):
             if exit_signal:
                 current_contracts = williams_state['position']['contracts']
                 
-                order = Order(action='SELL', totalQuantity=current_contracts, orderType='MOC', tif='DAY')
-                trade = ib.placeOrder(es_contract, order)
+                trade = place_order_with_fallback(ib, es_contract, 'SELL', current_contracts, 'ES')
                 
-                logger.info(f"Placed Williams MOC SELL order for {current_contracts} ES contracts")
-                
-                # Update state
-                williams_state['in_position'] = False
-                williams_state['position'] = None
+                if trade:
+                    # Update state only if order was placed successfully
+                    williams_state['in_position'] = False
+                    williams_state['position'] = None
         else:
             if williams_r < wr_buy_threshold:
                 # Enter position
                 logger.info(f"Williams entry signal - Williams %R {williams_r:.2f} < {wr_buy_threshold}")
                 
-                order = Order(action='BUY', totalQuantity=target_contracts, orderType='MOC', tif='DAY')
-                trade = ib.placeOrder(es_contract, order)
+                trade = place_order_with_fallback(ib, es_contract, 'BUY', target_contracts, 'ES')
                 
-                logger.info(f"Placed Williams MOC BUY order for {target_contracts} ES contracts")
-                
-                # Update state
-                williams_state['in_position'] = True
-                williams_state['position'] = {
-                    'entry_price': current_price,
-                    'entry_time': current_dt.isoformat(),
-                    'contracts': target_contracts
-                }
+                if trade:
+                    # Update state only if order was placed successfully
+                    williams_state['in_position'] = True
+                    williams_state['position'] = {
+                        'entry_price': current_price,
+                        'entry_time': current_dt.isoformat(),
+                        'contracts': target_contracts
+                    }
     else:
         logger.warning("Insufficient Williams data - need at least 2 bars")
     
