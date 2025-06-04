@@ -40,7 +40,7 @@ rebalance_frequency_days = 30  # Also rebalance monthly regardless
 contract_specs = {
     'ES': {'multiplier': 5, 'contract_month': '202506', 'exchange': 'CME'},      # MES multiplier
     'YM': {'multiplier': 0.50, 'contract_month': '202506', 'exchange': 'CBOT'},   # MYM multiplier  
-    'GC': {'multiplier': 10, 'contract_month': '202506', 'exchange': 'COMEX'},     # MGC multiplier
+    'GC': {'multiplier': 10, 'contract_month': '202508', 'exchange': 'COMEX'},     # MGC multiplier - moved to August to avoid delivery window
     'NQ': {'multiplier': 2, 'contract_month': '202506', 'exchange': 'CME'},      # MNQ multiplier
     'ZQ': {'multiplier': 4167, 'contract_month': '202506', 'exchange': 'CBOT'}    # ZQ multiplier
 }
@@ -317,19 +317,19 @@ def qualify_contracts(ib):
 def place_order_with_fallback(ib, contract, action, quantity, symbol, dry_run=False):
     """
     Place an order with fallback from MOC to limit order if MOC is not supported.
-    Returns the trade object if successful, None if failed.
+    Returns the trade object if successful, None if failed or in dry run mode.
     """
     logger = logging.getLogger()
     
-    # Check if markets are closed - use dry run mode
-    if not is_market_hours() or dry_run:
-        logger.info(f"DRY RUN: Would place {action} order for {quantity} {symbol} contracts")
+    # Check if we're outside the trading window (4:55-5:05 PM Eastern) - use dry run mode
+    if not is_trading_window() or dry_run:
+        logger.info(f"DRY RUN: Would place {action} order for {quantity} {symbol} contracts (outside trading window)")
         if symbol == 'ZQ':
             logger.info(f"DRY RUN: Would use limit order for {symbol} (MOC not supported)")
         else:
             logger.info(f"DRY RUN: Would place MOC {action} order for {quantity} {symbol} contracts")
-        # Return a mock trade object for state management
-        return type('MockTrade', (), {'orderStatus': type('MockStatus', (), {'status': 'Filled'})})()
+        # Return None for dry run mode - do not update position state
+        return None
     
     # ZQ is known to not support MOC orders, so go straight to limit order
     if symbol == 'ZQ':
@@ -351,6 +351,9 @@ def place_order_with_fallback(ib, contract, action, quantity, symbol, dry_run=Fa
                 if '387' in log_entry.message or 'Unsupported order type' in log_entry.message:
                     logger.warning(f"MOC order rejected for {symbol}, falling back to limit order")
                     return place_limit_order(ib, contract, action, quantity, symbol)
+                elif '201' in log_entry.message or 'physical delivery' in log_entry.message.lower():
+                    logger.error(f"Order rejected for {symbol}: Contract in delivery window or near expiration")
+                    return None
         
         return trade
     except Exception as e:
@@ -361,11 +364,11 @@ def place_limit_order(ib, contract, action, quantity, symbol):
     """Place a limit order near current market price"""
     logger = logging.getLogger()
     
-    # Check if markets are closed - use dry run mode
-    if not is_market_hours():
-        logger.info(f"DRY RUN: Would place LMT {action} order for {quantity} {symbol} contracts")
-        # Return a mock trade object for state management
-        return type('MockTrade', (), {'orderStatus': type('MockStatus', (), {'status': 'Filled'})})()
+    # Check if we're outside the trading window (4:55-5:05 PM Eastern) - use dry run mode
+    if not is_trading_window():
+        logger.info(f"DRY RUN: Would place LMT {action} order for {quantity} {symbol} contracts (outside trading window)")
+        # Return None for dry run mode - do not update position state
+        return None
     
     # Get current price
     ticker = ib.reqMktData(contract, '', False, False)
@@ -400,11 +403,26 @@ def place_limit_order(ib, contract, action, quantity, symbol):
             # GC trades in 0.1 increments
             limit_price = round(limit_price * 10) / 10
         
-        order = Order(action=action, totalQuantity=quantity, orderType='LMT', 
-                     lmtPrice=limit_price, tif='DAY')
-        trade = ib.placeOrder(contract, order)
-        logger.info(f"Placed LMT {action} order for {quantity} {symbol} contracts at {limit_price}")
-        return trade
+        try:
+            order = Order(action=action, totalQuantity=quantity, orderType='LMT', 
+                         lmtPrice=limit_price, tif='DAY')
+            trade = ib.placeOrder(contract, order)
+            logger.info(f"Placed LMT {action} order for {quantity} {symbol} contracts at {limit_price}")
+            
+            # Wait a moment to check for immediate rejection
+            ib.sleep(1)
+            
+            # Check if order was rejected due to delivery window or other issues
+            if trade.orderStatus.status == 'Cancelled':
+                for log_entry in trade.log:
+                    if '201' in log_entry.message or 'physical delivery' in log_entry.message.lower():
+                        logger.error(f"Limit order rejected for {symbol}: Contract in delivery window or near expiration")
+                        return None
+            
+            return trade
+        except Exception as e:
+            logger.error(f"Limit order placement failed for {symbol}: {e}")
+            return None
     else:
         logger.error(f"Could not get current price for {symbol} limit order")
         return None
@@ -448,14 +466,35 @@ def is_market_hours(timezone='US/Eastern'):
     
     return False
 
+def is_trading_window(timezone='US/Eastern'):
+    """Check if we're in the specific trading window (4:55-5:05 PM Eastern) for placing EOD orders"""
+    tz = pytz.timezone(timezone)
+    now = datetime.now(tz)
+    
+    weekday = now.weekday()  # 0=Monday, 6=Sunday
+    hour = now.hour
+    minute = now.minute
+    
+    # Only trade Monday-Friday
+    if weekday not in [0, 1, 2, 3, 4]:  # Monday-Friday
+        return False
+    
+    # Only trade between 4:55 PM and 5:05 PM Eastern
+    if hour == 16 and minute >= 55:  # 4:55-4:59 PM
+        return True
+    elif hour == 17 and minute <= 5:  # 5:00-5:05 PM
+        return True
+    
+    return False
+
 def wait_until_close(target_hour=17, target_minute=0, timezone='US/Eastern', lead_seconds=10):
     """Wait until the specified time minus lead_seconds."""
     tz = pytz.timezone(timezone)
     logger = logging.getLogger()
     
-    # Check if markets are open
-    if not is_market_hours(timezone):
-        logger.warning("Markets are currently closed. Running in test mode.")
+    # Check if we're in the trading window
+    if not is_trading_window(timezone):
+        logger.warning("Outside trading window. Running in dry run mode.")
         return
     
     while True:
@@ -582,10 +621,13 @@ def run_daily_signals(ib):
                 
                 trade = place_order_with_fallback(ib, contract, 'SELL', current_contracts, symbol)
                 
-                if trade:
-                    # Update state only if order was placed successfully
+                if trade is not None:
+                    # Update state only if order was placed successfully (not dry run)
                     strategy_state['in_position'] = False
                     strategy_state['position'] = None
+                    logger.info(f"{symbol} - Position state updated: EXIT")
+                else:
+                    logger.info(f"{symbol} - Order not placed (dry run mode), position state unchanged")
             else:
                 logger.info(f"{symbol} - Holding position (IBS: {ibs:.3f}, exit threshold: {ibs_exit_threshold})")
         else:
@@ -595,14 +637,17 @@ def run_daily_signals(ib):
                 
                 trade = place_order_with_fallback(ib, contract, 'BUY', target_contracts, symbol)
                 
-                if trade:
-                    # Update state only if order was placed successfully
+                if trade is not None:
+                    # Update state only if order was placed successfully (not dry run)
                     strategy_state['in_position'] = True
                     strategy_state['position'] = {
                         'entry_price': current_price,
                         'entry_time': current_dt.isoformat(),
                         'contracts': target_contracts
                     }
+                    logger.info(f"{symbol} - Position state updated: ENTRY")
+                else:
+                    logger.info(f"{symbol} - Order not placed (dry run mode), position state unchanged")
             else:
                 logger.info(f"{symbol} - No entry signal (IBS: {ibs:.3f}, entry threshold: {ibs_entry_threshold})")
     
@@ -653,10 +698,13 @@ def run_daily_signals(ib):
                 
                 trade = place_order_with_fallback(ib, es_contract, 'SELL', current_contracts, 'ES')
                 
-                if trade:
-                    # Update state only if order was placed successfully
+                if trade is not None:
+                    # Update state only if order was placed successfully (not dry run)
                     williams_state['in_position'] = False
                     williams_state['position'] = None
+                    logger.info(f"Williams - Position state updated: EXIT")
+                else:
+                    logger.info(f"Williams - Order not placed (dry run mode), position state unchanged")
         else:
             if williams_r < wr_buy_threshold:
                 # Enter position
@@ -664,14 +712,17 @@ def run_daily_signals(ib):
                 
                 trade = place_order_with_fallback(ib, es_contract, 'BUY', target_contracts, 'ES')
                 
-                if trade:
-                    # Update state only if order was placed successfully
+                if trade is not None:
+                    # Update state only if order was placed successfully (not dry run)
                     williams_state['in_position'] = True
                     williams_state['position'] = {
                         'entry_price': current_price,
                         'entry_time': current_dt.isoformat(),
                         'contracts': target_contracts
                     }
+                    logger.info(f"Williams - Position state updated: ENTRY")
+                else:
+                    logger.info(f"Williams - Order not placed (dry run mode), position state unchanged")
     else:
         logger.warning("Insufficient Williams data - need at least 2 bars")
     
@@ -746,15 +797,16 @@ def main():
                         format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger()
     
-    # Check market status
-    if is_market_hours():
-        logger.info("Markets are OPEN - Live trading mode")
+    # Check trading window status
+    tz = pytz.timezone('US/Eastern')
+    now = datetime.now(tz)
+    
+    if is_trading_window():
+        logger.info("LIVE TRADING MODE - Within trading window (4:55-5:05 PM Eastern)")
     else:
-        logger.warning("Markets are CLOSED - Running in DRY RUN mode for testing")
-        tz = pytz.timezone('US/Eastern')
-        now = datetime.now(tz)
+        logger.warning("DRY RUN MODE - Outside trading window (4:55-5:05 PM Eastern)")
         logger.info(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        logger.info("Market hours: Sunday 6 PM - Friday 5 PM Eastern")
+        logger.info("Trading window: Monday-Friday 4:55-5:05 PM Eastern only")
     
     ib = IB()
     
@@ -769,12 +821,12 @@ def main():
     # Print portfolio summary on startup
     print_portfolio_summary(ib)
 
-    # Wait until 5 seconds before market close (5 PM Eastern) or run immediately if markets closed
-    if is_market_hours():
-        logger.info("Waiting until 5 seconds before market close...")
-        wait_until_close(target_hour=17, target_minute=0, timezone='US/Eastern', lead_seconds=5)
+    # Wait until 10 seconds before market close (5 PM Eastern) or run immediately if outside trading window
+    if is_trading_window():
+        logger.info("Within trading window - waiting until 10 seconds before market close...")
+        wait_until_close(target_hour=17, target_minute=0, timezone='US/Eastern', lead_seconds=10)
     else:
-        logger.info("Markets closed - proceeding immediately with dry run...")
+        logger.info("Outside trading window - proceeding immediately with dry run...")
 
     # Run daily signals with exact logic from aggregate_port.py
     logger.info("Running daily signal generation...")
