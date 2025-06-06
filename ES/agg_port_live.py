@@ -487,28 +487,57 @@ def is_trading_window(timezone='US/Eastern'):
     
     return False
 
-def wait_until_close(target_hour=17, target_minute=0, timezone='US/Eastern', lead_seconds=10):
-    """Wait until the specified time minus lead_seconds."""
+def get_next_market_close(timezone='US/Eastern'):
+    """Get the next 5 PM Eastern market close on a trading day (Monday-Friday)"""
+    tz = pytz.timezone(timezone)
+    now = datetime.now(tz)
+    
+    # Start with today's 5 PM
+    target_time = now.replace(hour=17, minute=0, second=0, microsecond=0)
+    
+    # If it's already past 5 PM today, move to tomorrow
+    if now >= target_time:
+        target_time += timedelta(days=1)
+    
+    # Keep advancing until we hit a weekday (Monday=0, Sunday=6)
+    while target_time.weekday() > 4:  # Saturday=5, Sunday=6
+        target_time += timedelta(days=1)
+    
+    return target_time
+
+def wait_until_next_close(timezone='US/Eastern', lead_seconds=10):
+    """Wait until the next 5 PM Eastern market close minus lead_seconds."""
     tz = pytz.timezone(timezone)
     logger = logging.getLogger()
     
-    # Check if we're in the trading window
-    if not is_trading_window(timezone):
-        logger.warning("Outside trading window. Running in dry run mode.")
+    target_time = get_next_market_close(timezone) - timedelta(seconds=lead_seconds)
+    now = datetime.now(tz)
+    
+    if now >= target_time:
+        logger.info("Already at or past target time, proceeding immediately")
         return
     
+    wait_seconds = (target_time - now).total_seconds()
+    logger.info(f"Waiting until {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')} ({wait_seconds/3600:.1f} hours)")
+    
+    # Show periodic updates for long waits
     while True:
         now = datetime.now(tz)
-        close_today = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
-        target_time = close_today - timedelta(seconds=lead_seconds)
-        
         if now >= target_time:
-            return
+            break
+        
+        remaining_seconds = (target_time - now).total_seconds()
+        
+        # Sleep in chunks, showing progress for long waits
+        if remaining_seconds > 3600:  # More than 1 hour
+            logger.info(f"Waiting {remaining_seconds/3600:.1f} hours until market close...")
+            time.sleep(min(1800, remaining_seconds))  # Sleep up to 30 minutes at a time
+        elif remaining_seconds > 300:  # More than 5 minutes
+            logger.info(f"Waiting {remaining_seconds/60:.1f} minutes until market close...")
+            time.sleep(min(60, remaining_seconds))  # Sleep up to 1 minute at a time
         else:
-            sleep_time = (target_time - now).total_seconds()
-            if sleep_time < 0:
-                sleep_time = 30  # fallback
-            time.sleep(sleep_time)
+            time.sleep(remaining_seconds)
+            break
 
 # -------------------------------
 # Main Trading Logic (matching aggregate_port.py exactly)
@@ -797,16 +826,18 @@ def main():
                         format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger()
     
-    # Check trading window status
+    # Check current time and next market close
     tz = pytz.timezone('US/Eastern')
     now = datetime.now(tz)
+    next_close = get_next_market_close()
+    
+    logger.info(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    logger.info(f"Next market close: {next_close.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     
     if is_trading_window():
         logger.info("LIVE TRADING MODE - Within trading window (4:55-5:05 PM Eastern)")
     else:
-        logger.warning("DRY RUN MODE - Outside trading window (4:55-5:05 PM Eastern)")
-        logger.info(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        logger.info("Trading window: Monday-Friday 4:55-5:05 PM Eastern only")
+        logger.info("Will execute trades 10 seconds before next market close")
     
     ib = IB()
     
@@ -821,12 +852,9 @@ def main():
     # Print portfolio summary on startup
     print_portfolio_summary(ib)
 
-    # Wait until 10 seconds before market close (5 PM Eastern) or run immediately if outside trading window
-    if is_trading_window():
-        logger.info("Within trading window - waiting until 10 seconds before market close...")
-        wait_until_close(target_hour=17, target_minute=0, timezone='US/Eastern', lead_seconds=10)
-    else:
-        logger.info("Outside trading window - proceeding immediately with dry run...")
+    # Always wait until 10 seconds before next market close (5 PM Eastern)
+    logger.info("Waiting until 10 seconds before next market close...")
+    wait_until_next_close(timezone='US/Eastern', lead_seconds=10)
 
     # Run daily signals with exact logic from aggregate_port.py
     logger.info("Running daily signal generation...")
