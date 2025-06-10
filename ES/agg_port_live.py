@@ -223,16 +223,39 @@ def get_positions_from_ibkr(ib, contracts):
                     
                     # For ES, we need to determine if it's IBS or Williams position
                     if len(strategies) > 1:  # ES case
-                        # Check position size to determine strategy
-                        # Williams gets 50% allocation, IBS gets 10%
-                        # So Williams positions should be ~5x larger than IBS
-                        if position_info['contracts'] >= 8:  # Rough threshold for Williams
+                        # Load saved state to check which strategy should have the position
+                        # This is more reliable than trying to guess from position size
+                        saved_state = load_portfolio_state()
+                        
+                        # Check if either strategy expects to have a position
+                        ibs_es_expecting = saved_state['positions']['IBS_ES']['in_position']
+                        williams_expecting = saved_state['positions']['Williams']['in_position']
+                        
+                        if ibs_es_expecting and not williams_expecting:
+                            # IBS_ES should have the position
+                            ibkr_positions['IBS_ES'] = {
+                                'in_position': True,
+                                'position': position_info
+                            }
+                            logger.info(f"Found IBS_ES position: {position_info['contracts']} contracts")
+                        elif williams_expecting and not ibs_es_expecting:
+                            # Williams should have the position
                             ibkr_positions['Williams'] = {
                                 'in_position': True,
                                 'position': position_info
                             }
                             logger.info(f"Found Williams ES position: {position_info['contracts']} contracts")
-                        else:  # Smaller position likely IBS
+                        elif ibs_es_expecting and williams_expecting:
+                            # Both expect positions - we have a problem, warn user
+                            logger.warning(f"Both IBS_ES and Williams expect ES positions but only one exists. Assigning to IBS_ES by default.")
+                            ibkr_positions['IBS_ES'] = {
+                                'in_position': True,
+                                'position': position_info
+                            }
+                            logger.info(f"Found IBS_ES position: {position_info['contracts']} contracts")
+                        else:
+                            # Neither expects a position, default to IBS_ES (smaller allocation)
+                            logger.warning(f"Found unexpected ES position, assigning to IBS_ES by default.")
                             ibkr_positions['IBS_ES'] = {
                                 'in_position': True,
                                 'position': position_info
