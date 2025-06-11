@@ -23,7 +23,7 @@ SHORT_EMA_PERIOD = 64        # Short EMA period (e.g., 64-period EMA)
 LONG_EMA_PERIOD = 256        # Long EMA period (e.g., 256-period EMA)
 
 # --- Data File ---
-CSV_FILE_DAILY = 'Data/es_daily_data.csv'
+CSV_FILE_DAILY = 'Data/mes_daily_data.csv'
 
 # --- Setup Logging ---
 logging.basicConfig(

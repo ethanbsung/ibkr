@@ -16,13 +16,13 @@ logger = logging.getLogger()
 # -------------------------------
 
 # Input file path for ES futures daily data (replace with your file path)
-data_file = "Data/ge_daily_data.csv"  # File should include: Time, High, Low, Last, Volume (if available)
+data_file = "Data/mes_daily_data.csv"  # File should include: Time, High, Low, Last, Volume (if available)
 
 # Backtest parameters
 initial_capital = 10000.0         # starting account balance in dollars
 commission_per_order = 1.24       # commission per order (per contract)
 num_contracts = 1                 # number of contracts to trade
-multiplier = 2500                    # each point move is worth $5 per contract
+multiplier = 5                    # each point move is worth $5 per contract
 
 # Custom start and end date (format: 'YYYY-MM-DD')
 start_date = '2000-01-01'
@@ -41,7 +41,11 @@ data = data[(data['Time'] >= start_date) & (data['Time'] <= end_date)].reset_ind
 
 # Calculate Internal Bar Strength (IBS)
 # IBS = (Close - Low) / (High - Low)
-data['IBS'] = (data['Last'] - data['Low']) / (data['High'] - data['Low'])
+# Handle division by zero when High == Low
+data['range'] = data['High'] - data['Low']
+data['IBS'] = np.where(data['range'] > 0, 
+                       (data['Last'] - data['Low']) / data['range'], 
+                       0.5)  # Set to neutral 0.5 when no range
 
 # -------------------------------
 # Backtest Simulation
@@ -56,18 +60,31 @@ equity_curve = []          # list of (Time, mark-to-market Equity)
 # For benchmark: Buy and Hold ES (enter at first available close)
 initial_close = data['Last'].iloc[0]
 benchmark_equity = (data.set_index('Time')['Last'] / initial_close) * initial_capital
-benchmark_equity = benchmark_equity.reindex(data['Time'], method='ffill').fillna(method='ffill')
+benchmark_equity = benchmark_equity.reindex(data['Time']).ffill().fillna(method='bfill')
 
 for i, row in data.iterrows():
     current_time = row['Time']
     current_price = row['Last']
+    current_ibs = row['IBS']
+    
+    # Skip processing if IBS is NaN (shouldn't happen with new logic but safety check)
+    if pd.isna(current_ibs):
+        # Mark-to-market equity calculation for this day
+        if in_position:
+            unrealized = (current_price - position['entry_price']) * multiplier * num_contracts
+            equity = capital + unrealized
+        else:
+            equity = capital
+        equity_curve.append((current_time, equity))
+        continue
     
     # If already in a position, check for exit condition
     if in_position:
         # Exit condition: IBS above 0.9
-        if row['IBS'] > 0.9:
+        if current_ibs > 0.9:
             exit_price = current_price  # exit at the close price
-            # Calculate profit based on the multiplier and number of contracts.
+            # Calculate profit - DO NOT subtract commission here since it was already deducted at entry
+            # Only deduct exit commission
             profit = (exit_price - position['entry_price']) * multiplier * num_contracts - commission_per_order * num_contracts
             trade_results.append({
                 'entry_time': position['entry_time'],
@@ -83,7 +100,7 @@ for i, row in data.iterrows():
             position = None
     else:
         # Entry condition: IBS below 0.1
-        if row['IBS'] < 0.1:
+        if current_ibs < 0.1:
             entry_price = current_price  # enter at the close price
             in_position = True
             # Deduct entry commission based on number of contracts.
@@ -110,6 +127,7 @@ if in_position:
     current_time = row['Time']
     current_price = row['Last']
     exit_price = current_price
+    # Only deduct exit commission since entry commission was already deducted
     profit = (exit_price - position['entry_price']) * multiplier * num_contracts - commission_per_order * num_contracts
     trade_results.append({
         'entry_time': position['entry_time'],

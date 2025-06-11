@@ -14,7 +14,7 @@ logger = logging.getLogger()
 # -------------------------------
 # Parameters & User Settings
 # -------------------------------
-data_file = "Data/es_daily_data.csv"  # Path to your CSV file (format: Symbol,Time,Open,High,Low,Last,...)
+data_file = "Data/mes_daily_data.csv"  # Path to your CSV file (format: Symbol,Time,Open,High,Low,Last,...)
 initial_capital = 10000.0
 multiplier = 5
 commission_per_order = 1.24
@@ -29,7 +29,7 @@ atr_period = 14        # ATR lookback period
 atr_stop_multiplier = 5.0  # Stop loss will be set at 1 ATR away (change as needed)
 
 start_date = '2000-01-01'
-end_date   = '2024-12-31'
+end_date   = '2020-01-01'
 
 # -------------------------------
 # Data Preparation

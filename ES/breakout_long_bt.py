@@ -15,25 +15,37 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------------------
 #              CONFIGURATION & USER PARAMETERS
 # -------------------------------------------------------------
+
+# IMPORTANT FIXES APPLIED TO PREVENT LOOKAHEAD BIAS:
+# 1. Rolling High Timing: 30m rolling high values are now only available 
+#    to 1m bars AFTER the 30m period completes (timestamp shifted by +30min)
+# 2. Entry Price Modeling: Added slippage to entry price for more realistic fills
+# 3. Continuous Equity Tracking: Added unrealized P&L tracking for better drawdown analysis
+# 4. PnL Calculation: Fixed to properly account for slippage without double-counting
+# 
+# REMAINING LIMITATIONS:
+# - Assumes perfect execution at breakout level when 1m high touches trigger
+# - May still be optimistic due to intrabar execution assumptions
+
 INTRADAY_1M_DATA_FILE = 'Data/es_1m_data.csv'    # Path to 1-minute CSV data
 INTRADAY_30M_DATA_FILE = 'Data/es_30m_data.csv'  # Path to 30-minute CSV data
 
 # General Backtesting Parameters
-INITIAL_CASH        = 5000
+INITIAL_CASH        = 10000
 ES_MULTIPLIER       = 5       # 1 ES point = $5 per contract
 STOP_LOSS_POINTS    = 8       # Stop loss in points
 TAKE_PROFIT_POINTS  = 23      # Take profit in points
 POSITION_SIZE       = 1       # Number of contracts per trade
 COMMISSION          = 1.24    # Commission per trade
 ONE_TICK            = 0.25    # Tick size for ES
-SLIPPAGE            = 0       # Slippage in points
+SLIPPAGE            = 0.25    # Slippage in points
 
 # Rolling window for the 30-minute bars
 ROLLING_WINDOW = 30  # Number of 30-minute bars in the rolling window
 
 # Backtest date range
-BACKTEST_START = "2018-01-08"
-BACKTEST_END   = "2024-12-23"
+BACKTEST_START = "2000-01-01"
+BACKTEST_END   = "2020-01-01"
 
 # -------------------------------------------------------------
 #              STEP 1: LOAD DATA
@@ -100,7 +112,7 @@ def prepare_data(df_1m, df_30m, rolling_window=ROLLING_WINDOW):
     """
     1) Computes Rolling_High over the previous 'rolling_window' 30-minute bars, excluding the current bar.
     2) Computes Prev_30m_High as the High of the previous 30-minute bar.
-    3) Merges Rolling_High and Prev_30m_High into the 1-minute DataFrame via forward-fill.
+    3) Merges Rolling_High and Prev_30m_High into the 1-minute DataFrame properly without lookahead bias.
     4) Adds a '30m_bar' column to track the corresponding 30-minute bar for each 1-minute bar.
 
     Parameters:
@@ -127,17 +139,20 @@ def prepare_data(df_1m, df_30m, rolling_window=ROLLING_WINDOW):
     
     logger.info(f"Computed Rolling_High and Prev_30m_High with {len(df_30m)} valid 30-minute bars.")
     
-    # Merge Rolling_High and Prev_30m_High into 1-minute data using forward-fill
-    df_1m['Rolling_High'] = df_30m['Rolling_High'].reindex(df_1m.index, method='pad')
-    df_1m['Prev_30m_High'] = df_30m['Prev_30m_High'].reindex(df_1m.index, method='pad')
+    # FIXED: Proper merge without lookahead bias
+    # Create a copy of 30m data with timestamps shifted to the END of each 30m bar
+    # This ensures rolling high is only available AFTER the 30m bar completes
+    df_30m_shifted = df_30m[['Rolling_High', 'Prev_30m_High']].copy()
     
-    logger.debug("Forward-filled Rolling_High and Prev_30m_High into 1-minute data.")
+    # Shift timestamps to the end of each 30-minute period (next bar start)
+    # This ensures rolling high calculated at 9:30 is only available at 10:00
+    df_30m_shifted.index = df_30m_shifted.index + pd.Timedelta('30min')
     
-    # Remove the resetting of Rolling_High and Prev_30m_High before backtest_start_date
-    # This is the primary fix to ensure Rolling_High has historical data
-    # Removed the following lines:
-    # backtest_start = pd.to_datetime(BACKTEST_START)
-    # df_1m.loc[:backtest_start, ['Rolling_High', 'Prev_30m_High']] = np.nan
+    # Use reindex with forward fill, but now without lookahead bias
+    df_1m['Rolling_High'] = df_30m_shifted['Rolling_High'].reindex(df_1m.index, method='pad')
+    df_1m['Prev_30m_High'] = df_30m_shifted['Prev_30m_High'].reindex(df_1m.index, method='pad')
+    
+    logger.debug("Forward-filled Rolling_High and Prev_30m_High into 1-minute data without lookahead bias.")
     
     # Add a '30m_bar' column indicating the 30-minute bar each 1-minute bar belongs to
     df_1m['30m_bar'] = df_1m.index.floor('30min')
@@ -247,8 +262,9 @@ def backtest_1m(df_1m,
             
             # Check Stop Loss
             if current_low <= position['stop_loss']:
-                exit_price = position['stop_loss']  # Slippage reduces exit price
-                pnl = ((exit_price - (position['entry_price'] + SLIPPAGE)) 
+                exit_price = position['stop_loss']
+                # Entry price already includes slippage, so use it directly
+                pnl = ((exit_price - position['entry_price']) 
                        * position_size * es_multiplier) - commission
                 cash += pnl
                 trade_results.append(pnl)
@@ -262,7 +278,8 @@ def backtest_1m(df_1m,
             # If still open, check Take Profit
             elif current_high >= position['take_profit']:
                 exit_price = position['take_profit']
-                pnl = ((exit_price - (position['entry_price'] + SLIPPAGE)) 
+                # Entry price already includes slippage, so use it directly
+                pnl = ((exit_price - position['entry_price']) 
                        * position_size * es_multiplier) - commission
                 cash += pnl
                 trade_results.append(pnl)
@@ -278,10 +295,12 @@ def backtest_1m(df_1m,
             if time(9, 30) <= current_time.time() < time(16, 0):
                 # Entry Condition: High price >= breakout_price
                 if row['High'] >= breakout_price:
-                    # Debugging: Mark the attempt to enter trade
+                    # NOTE: This assumes we can get filled when high touches breakout level
+                    # In reality, execution might be worse due to momentum and market impact
                     logger.debug(f"Attempting to enter trade at {current_time} with breakout_price {breakout_price}")
                     
-                    entry_price = breakout_price
+                    # More realistic entry: assume we get filled with some slippage above breakout
+                    entry_price = breakout_price + SLIPPAGE
                     stop_price  = entry_price - stop_loss_points
                     target_price= entry_price + take_profit_points
                     
@@ -304,11 +323,19 @@ def backtest_1m(df_1m,
             else:
                 logger.debug(f"No entry: Outside Regular Trading Hours at {current_time.time()}")
         
-        # Record equity if no position or if we just closed
-        if position is None:
-            if len(balance_series) == len(balance_dates):
-                balance_series.append(cash)
-                balance_dates.append(current_time)
+        # Record equity for every bar (including unrealized P&L when in position)
+        if position is not None:
+            # Calculate unrealized P&L using current close price
+            current_close = row['Close']
+            unrealized_pnl = ((current_close - position['entry_price']) 
+                             * position_size * es_multiplier)
+            current_equity = cash + unrealized_pnl
+        else:
+            current_equity = cash
+        
+        # Always update equity curve
+        balance_series.append(current_equity)
+        balance_dates.append(current_time)
     
     exposure_time_percentage = (active_trades / total_bars) * 100
     logger.info(f"Total Bars: {total_bars}, Active Trades (Trades Entered): {active_trades}")

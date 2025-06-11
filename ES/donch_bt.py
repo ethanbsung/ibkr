@@ -16,14 +16,14 @@ TAKE_PROFIT_MULTIPLIER = 3  # Multiplier for ATR-based take-profit
 COMMISSION = 1.24  # USD per trade
 
 # Custom Backtest Period (Optional)
-START_DATE = '2021-01-01'  # Set to None to include all data
-END_DATE = '2024-12-25'    # Set to None to include all data
+START_DATE = '2000-01-01'  # Set to None to include all data
+END_DATE = '2020-01-01'    # Set to None to include all data
 
 # ----------------------------
 # Load Data
 # ----------------------------
 # Adjust the file path as needed
-data = pd.read_csv('es_1h_data.csv', parse_dates=['Time'])
+data = pd.read_csv('Data/mes_daily_data.csv', parse_dates=['Time'])
 
 # Set 'Time' as the index
 data.set_index('Time', inplace=True)
