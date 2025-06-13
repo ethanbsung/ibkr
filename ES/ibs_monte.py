@@ -21,7 +21,7 @@ logger = logging.getLogger()
 # -------------------------------
 # Parameters & User Settings
 # -------------------------------
-data_file = "Data/es_daily_data.csv"  # Must include: Time, High, Low, Last, Volume (if available)
+data_file = "Data/mes_daily_data.csv"  # Must include: Time, High, Low, Last, Volume (if available)
 initial_capital = 10000.0
 commission_per_order = 1.24
 num_contracts = 1

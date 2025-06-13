@@ -146,10 +146,23 @@ def get_daily_bar(ib, contract, end_datetime):
     bars = ib.reqHistoricalData(
         contract,
         endDateTime=end_datetime,
-        durationStr='2 D',  # Get 2 days to ensure we have yesterday's data
+        durationStr='5 D',  # Get 5 days to ensure we have enough data including weekends
         barSizeSetting='1 day',
         whatToShow='TRADES',
-        useRTH=True,
+        useRTH=False,  # Use full futures trading session (6PM-5PM ET) instead of RTH (9:30AM-4:15PM ET)
+        formatDate=1
+    )
+    return bars if bars else []
+
+def get_williams_bars(ib, contract, end_datetime):
+    """Request sufficient daily bars for Williams %R calculation (minimum 2 bars needed)."""
+    bars = ib.reqHistoricalData(
+        contract,
+        endDateTime=end_datetime,
+        durationStr='1 W',  # Get 1 week of data to ensure we have enough trading days
+        barSizeSetting='1 day',
+        whatToShow='TRADES',
+        useRTH=False,  # Use full futures trading session (6PM-5PM ET) instead of RTH (9:30AM-4:15PM ET)
         formatDate=1
     )
     return bars if bars else []
@@ -174,6 +187,21 @@ def get_positions_from_ibkr(ib, contracts):
     try:
         # Get all positions from IBKR
         positions = ib.positions()
+        
+        # Get current market prices from daily bars (same reliable source as signals)
+        tz = pytz.timezone('US/Eastern')
+        current_dt = datetime.now(tz)
+        end_datetime_str = format_end_datetime(current_dt, tz)
+        
+        current_prices = {}
+        for symbol, contract in contracts.items():
+            try:
+                bars = get_daily_bar(ib, contract, end_datetime_str)
+                if bars and len(bars) > 0:
+                    current_prices[symbol] = bars[-1].close
+                    logger.info(f"Current {symbol} price from daily bar: {current_prices[symbol]}")
+            except Exception as e:
+                logger.warning(f"Could not get current price for {symbol}: {e}")
         
         # Create a mapping from contract to strategy
         contract_to_strategy = {}
@@ -210,10 +238,15 @@ def get_positions_from_ibkr(ib, contracts):
                     elif symbol == 'MNQ':
                         symbol = 'NQ'
                     
-                    # Estimate entry price from average cost or use market price
-                    entry_price = position.avgCost if position.avgCost > 0 else position.marketPrice
-                    if entry_price <= 0:
-                        entry_price = position.marketPrice
+                    # Use current price from daily bars we already retrieved
+                    if symbol in current_prices:
+                        entry_price = current_prices[symbol]
+                        logger.info(f"Using current market price {entry_price} for {symbol} position")
+                    else:
+                        # Fallback to reasonable estimates if daily bar data not available
+                        logger.warning(f"No current price data for {symbol}, using default estimate")
+                        default_prices = {'ES': 6000, 'GC': 3300, 'ZQ': 95, 'YM': 42000, 'NQ': 21000}
+                        entry_price = default_prices.get(symbol, 1000)
                     
                     position_info = {
                         'entry_price': entry_price,
@@ -707,7 +740,11 @@ def run_daily_signals(ib):
     logger.info(f"\nProcessing Williams strategy...")
     
     es_contract = contracts['ES']
-    es_bars = get_daily_bar(ib, es_contract, end_datetime_str)
+    es_bars = get_williams_bars(ib, es_contract, end_datetime_str)
+    
+    logger.info(f"Williams - Retrieved {len(es_bars)} bars, need {williams_period}")
+    if len(es_bars) > 0:
+        logger.info(f"Williams - Recent bars: {[f'{bar.date}' for bar in es_bars[-min(3, len(es_bars)):]]}") 
     
     if len(es_bars) >= williams_period:
         current_bar = es_bars[-1]

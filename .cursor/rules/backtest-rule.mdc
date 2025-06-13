@@ -1,0 +1,199 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Trading Strategy Backtesting Standards
+
+## Core Backtesting Principles
+
+### 1. Data Integrity and Timing
+- **ALWAYS use actual market data from CSV files** - never simulate or generate artificial data
+- **Respect market timing conventions**: For CT timezone data, daily bars run 5PM-4PM CT (open at 5PM, close at 4PM)
+- Sort data chronologically: `data.sort_values('Time', inplace=True)`
+- Handle date filtering properly with inclusive bounds: `data[(data['Time'] >= start_date) & (data['Time'] <= end_date)]`
+- Reset index after filtering: `.reset_index(drop=True)`
+
+### 2. Signal Calculation and Safety Checks
+- Calculate all technical indicators BEFORE entering the main backtest loop
+- Handle edge cases gracefully (e.g., division by zero in range calculations)
+- Use `np.where()` for conditional calculations with fallback values
+- Always check for NaN values before processing signals: `if pd.isna(signal_value): continue`
+- Implement neutral default values when calculations fail (e.g., IBS = 0.5 when High == Low)
+
+### 3. Position and Trade Management Structure
+```python
+# Essential state variables
+capital = initial_capital     # realized account equity
+in_position = False          # boolean flag for active trades
+position = None              # dictionary holding trade details
+trade_results = []           # list of completed trade records
+equity_curve = []            # time series of mark-to-market equity
+```
+
+### 4. Commission and Cost Handling
+- **Deduct entry commission immediately when entering position**: `capital -= commission_per_order * num_contracts`
+- **Deduct exit commission only on trade closure**: `profit = price_difference * multiplier * contracts - exit_commission`
+- **NEVER double-count commissions** - entry commission is separate from exit commission
+- Use realistic commission rates based on actual broker fees
+
+### 5. Trade Entry and Exit Logic
+```python
+# Entry logic (when not in position)
+if not in_position and entry_condition_met:
+    entry_price = current_price
+    in_position = True
+    capital -= commission_per_order * num_contracts  # deduct entry commission
+    position = {
+        'entry_price': entry_price,
+        'entry_time': current_time,
+        'contracts': num_contracts
+    }
+
+# Exit logic (when in position)
+if in_position and exit_condition_met:
+    exit_price = current_price
+    profit = (exit_price - position['entry_price']) * multiplier * num_contracts - commission_per_order * num_contracts
+    trade_results.append({
+        'entry_time': position['entry_time'],
+        'exit_time': current_time,
+        'entry_price': position['entry_price'],
+        'exit_price': exit_price,
+        'profit': profit,
+        'contracts': num_contracts
+    })
+    capital += profit
+    in_position = False
+    position = None
+```
+
+### 6. Mark-to-Market Equity Calculation
+- Calculate unrealized P&L for open positions: `unrealized = (current_price - entry_price) * multiplier * contracts`
+- Total equity = realized capital + unrealized P&L
+- Record equity curve EVERY day: `equity_curve.append((current_time, equity))`
+- Handle both in-position and flat scenarios in equity calculation
+
+### 7. End-of-Period Position Closure
+```python
+# Close any open position at backtest end
+if in_position:
+    row = data.iloc[-1]
+    exit_price = row['Last']
+    profit = (exit_price - position['entry_price']) * multiplier * num_contracts - commission_per_order * num_contracts
+    # Record final trade and update capital
+    trade_results.append({...})
+    capital += profit
+    equity_curve[-1] = (current_time, capital)  # update final equity
+```
+
+### 8. Performance Metrics Requirements
+
+#### Essential Metrics
+- **Total Return**: `((final_balance / initial_capital) - 1) * 100`
+- **Annualized Return**: `((final_balance / initial_capital) ** (1 / years) - 1) * 100`
+- **Volatility**: `returns.std() * np.sqrt(252) * 100` (use 252 trading days)
+- **Sharpe Ratio**: `(mean_return / std_return) * np.sqrt(252)`
+- **Sortino Ratio**: `(mean_return / downside_std) * np.sqrt(252)`
+
+#### Drawdown Analysis
+```python
+equity_df['EquityPeak'] = equity_df['Equity'].cummax()
+equity_df['Drawdown'] = (equity_df['Equity'] - equity_df['EquityPeak']) / equity_df['EquityPeak']
+max_drawdown_percentage = equity_df['Drawdown'].min() * 100
+```
+
+#### Trade Analysis
+- **Win Rate**: `(winning_trades / total_trades) * 100`
+- **Profit Factor**: `sum(winning_profits) / abs(sum(losing_profits))`
+- **Average Win/Loss**: `np.mean([profit for profitable/losing trades])`
+- **Calmar Ratio**: `annualized_return / abs(max_drawdown)`
+
+### 9. Benchmark Comparison
+- Implement buy-and-hold benchmark using first available price
+- Calculate benchmark returns: `(data['Last'] / initial_close) * initial_capital`
+- Use proper indexing and forward-fill for alignment: `.reindex(data['Time']).ffill()`
+
+### 10. Logging and Debugging Standards
+```python
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger()
+
+# Log all trade entries and exits
+logger.info(f"BUY signal at {current_time} | Entry Price: {entry_price:.2f} | Contracts: {num_contracts}")
+logger.info(f"SELL signal at {current_time} | Exit Price: {exit_price:.2f} | Profit: {profit:.2f}")
+```
+
+### 11. Data Structure Best Practices
+- Convert equity curve to DataFrame: `equity_df = pd.DataFrame(equity_curve, columns=['Time', 'Equity'])`
+- Set time as index: `equity_df.set_index('Time', inplace=True)`
+- Calculate returns properly: `equity_df['returns'] = equity_df['Equity'].pct_change()`
+- Handle missing data with appropriate fallbacks
+
+### 12. Visualization Standards
+```python
+plt.figure(figsize=(14, 7))
+plt.plot(equity_df.index, equity_df['Equity'], label='Strategy Equity')
+plt.title('Equity Curve: [Strategy Name] vs Benchmark')
+plt.xlabel('Time')
+plt.ylabel('Account Balance ($)')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+```
+
+### 13. Parameter Management
+- Define all parameters at the top of the file in a clear section
+- Include data file paths, commission rates, contract specifications
+- Use descriptive variable names: `initial_capital`, `commission_per_order`, `multiplier`
+- Allow for custom date ranges with clear format: `'YYYY-MM-DD'`
+
+### 14. Error Prevention Checklist
+- [ ] Data sorted chronologically
+- [ ] Proper date filtering with reset index
+- [ ] Safe division with zero-check fallbacks
+- [ ] NaN handling in signal calculations
+- [ ] Commission deducted correctly (entry and exit separate)
+- [ ] Mark-to-market equity calculated daily
+- [ ] Open positions closed at backtest end
+- [ ] Performance metrics use consistent day-count (252)
+- [ ] Benchmark properly aligned with strategy data
+- [ ] All trade details recorded in trade_results
+
+### 15. Required Output Format
+```python
+results = {
+    "Start Date": start_date,
+    "End Date": end_date,
+    "Final Account Balance": f"${final_account_balance:,.2f}",
+    "Total Return": f"{total_return_percentage:.2f}%",
+    "Annualized Return": f"{annualized_return_percentage:.2f}%",
+    "Benchmark Return": f"{benchmark_return:.2f}%",
+    "Volatility (Annual)": f"{volatility_annual:.2f}%",
+    "Sharpe Ratio": f"{sharpe_ratio:.2f}",
+    "Max Drawdown (%)": f"{max_drawdown_percentage:.2f}%",
+    "Win Rate": f"{win_rate:.2f}%",
+    "Profit Factor": f"{profit_factor:.2f}",
+    # ... additional metrics
+}
+```
+
+## Market-Specific Considerations
+
+### Futures Contracts
+- Use correct contract multipliers (e.g., MES = $5 per point)
+- Account for proper commission structure per contract
+- Handle contract specifications from instrument data files when available
+
+### Time Zone Awareness
+- **Central Time (CT) Convention**: Daily bars 5PM-4PM CT
+- Ensure consistent time zone handling across all data sources
+- Document time zone assumptions clearly in code comments
+
+### Data Quality Assurance
+- Validate data ranges and check for gaps
+- Handle holidays and non-trading days appropriately  
+- Implement data integrity checks before beginning backtest loop
+
+This backtesting framework ensures realistic, robust, and reproducible strategy testing with proper handling of costs, timing, and performance measurement.
