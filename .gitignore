@@ -22,6 +22,9 @@ Data/es_15m_data.csv
 Data/es_30m_data.csv
 Data/es_1h_data.csv
 Data/es_4h_data.csv
+es_1h_data.csv
+es_1m_data.csv
+es_5m_data.csv
 backtest.log
 launch_ibgateway.sh
 venv/
