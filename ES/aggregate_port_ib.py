@@ -43,12 +43,14 @@ ibkr_end_date = datetime.now().strftime('%Y-%m-%d')  # To present
 # -------------------------------
 # Target percentage allocations (must sum to 100%)
 allocation_percentages = {
-    'IBS_ES': 0.10,    # 10% to ES IBS strategy
-    'IBS_YM': 0.10,    # 10% to YM IBS strategy  
-    'IBS_GC': 0.10,    # 10% to GC IBS strategy
-    'IBS_NQ': 0.10,    # 10% to NQ IBS strategy
-    'IBS_ZQ': 0.10,    # 10% to ZQ IBS strategy
-    'Williams': 0.50   # 50% to Williams strategy
+    'IBS_ES': 0.125,      # 12.5% to ES IBS strategy
+    'IBS_YM': 0.125,      # 12.5% to YM IBS strategy  
+    'IBS_GC': 0.125,      # 12.5% to GC IBS strategy
+    'IBS_NQ': 0.125,      # 12.5% to NQ IBS strategy
+    'Williams_ES': 0.125, # 12.5% to ES Williams strategy
+    'Williams_YM': 0.125, # 12.5% to YM Williams strategy
+    'Williams_GC': 0.125, # 12.5% to GC Williams strategy
+    'Williams_NQ': 0.125  # 12.5% to NQ Williams strategy
 }
 
 # Rebalancing parameters
@@ -60,17 +62,26 @@ total_allocation = sum(allocation_percentages.values())
 if abs(total_allocation - 1.0) > 0.001:
     raise ValueError(f"Allocations must sum to 100%, current sum: {total_allocation*100:.1f}%")
 
-logger.info("Dynamic Percentage-Based Allocation Settings:")
-for strategy, pct in allocation_percentages.items():
-    logger.info(f"  {strategy}: {pct*100:.1f}%")
+logger.info("50/50 IBS/Williams Split with Equal Instrument Weighting:")
+
+# Group by strategy type for cleaner display
+ibs_strategies = {k: v for k, v in allocation_percentages.items() if k.startswith('IBS_')}
+williams_strategies = {k: v for k, v in allocation_percentages.items() if k.startswith('Williams_')}
+
+logger.info("  IBS Strategies (50% total):")
+for strategy, pct in sorted(ibs_strategies.items()):
+    logger.info(f"    • {strategy}: {pct*100:.1f}%")
+
+logger.info("  Williams Strategies (50% total):")
+for strategy, pct in sorted(williams_strategies.items()):
+    logger.info(f"    • {strategy}: {pct*100:.1f}%")
 
 # Contract Specifications and Multipliers
 contract_specs = {
     'ES': {'multiplier': 5, 'contract_month': '202506'},      # MES multiplier
     'YM': {'multiplier': 0.50, 'contract_month': '202506'},   # MYM multiplier  
     'GC': {'multiplier': 10, 'contract_month': '202506'},     # MGC multiplier
-    'NQ': {'multiplier': 2, 'contract_month': '202506'},      # MNQ multiplier
-    'ZQ': {'multiplier': 4167, 'contract_month': '202506'}    # ZQ multiplier
+    'NQ': {'multiplier': 2, 'contract_month': '202506'}      # MNQ multiplier
 }
 
 # Extract individual multipliers for backward compatibility
@@ -78,17 +89,15 @@ multiplier_es = contract_specs['ES']['multiplier']
 multiplier_ym = contract_specs['YM']['multiplier'] 
 multiplier_gc = contract_specs['GC']['multiplier']
 multiplier_nq = contract_specs['NQ']['multiplier']
-multiplier_zq = contract_specs['ZQ']['multiplier']
 
 # IBS entry/exit thresholds (common for all IBS instruments)
 ibs_entry_threshold = 0.1       # Enter when IBS < 0.1
 ibs_exit_threshold  = 0.9       # Exit when IBS > 0.9
 
-# Williams %R strategy parameters (applied to ES only)
+# Williams %R strategy parameters (applied to all instruments)
 williams_period = 2             # 2-day lookback
 wr_buy_threshold  = -90
 wr_sell_threshold = -30
-williams_contracts = 1          # Williams trades ES with 1 contract (multiplier_es)
 
 # -------------------------------
 # Dynamic Position Sizing Functions
@@ -226,8 +235,7 @@ local_files = {
     'ES': "Data/mes_daily_data.csv",
     'YM': "Data/mym_daily_data.csv", 
     'GC': "Data/mgc_daily_data.csv",
-    'NQ': "Data/mnq_daily_data.csv",
-    'ZQ': "Data/zq_daily_data.csv"
+    'NQ': "Data/mnq_daily_data.csv"
 }
 
 # Load all local datasets
@@ -264,7 +272,7 @@ def run_original_backtest():
         }
     
     # Get longest data series for iteration
-    max_rows = max(len(local_data[symbol]) for symbol in ['ES', 'YM', 'GC', 'NQ', 'ZQ'] if not local_data[symbol].empty)
+    max_rows = max(len(local_data[symbol]) for symbol in ['ES', 'YM', 'GC', 'NQ'] if not local_data[symbol].empty)
     
     # Main backtest loop
     for day_idx in range(max_rows):
@@ -272,7 +280,7 @@ def run_original_backtest():
         daily_total_equity = 0
         
         # Process each IBS strategy
-        for symbol in ['ES', 'YM', 'GC', 'NQ', 'ZQ']:
+        for symbol in ['ES', 'YM', 'GC', 'NQ']:
             strategy_key = f'IBS_{symbol}'
             
             if local_data[symbol].empty or day_idx >= len(local_data[symbol]):
@@ -334,63 +342,71 @@ def run_original_backtest():
             strategy_data['equity_curve'].append((current_date, equity))
             daily_total_equity += equity
         
-        # Process Williams strategy (ES only)
-        if not local_data['ES'].empty and day_idx >= 1 and day_idx < len(local_data['ES']):
-            # Need at least 2 days for Williams %R calculation
-            es_data = local_data['ES'].iloc[max(0, day_idx-williams_period+1):day_idx+1]
+        # Process Williams strategies for all instruments
+        for symbol in ['ES', 'YM', 'GC', 'NQ']:
+            strategy_key = f'Williams_{symbol}'
             
-            if len(es_data) >= williams_period:
-                current_row = es_data.iloc[-1]
-                current_date = current_row['Time']
-                current_price = current_row['Last']
+            if not local_data[symbol].empty and day_idx >= 1 and day_idx < len(local_data[symbol]):
+                # Need at least 2 days for Williams %R calculation
+                symbol_data = local_data[symbol].iloc[max(0, day_idx-williams_period+1):day_idx+1]
                 
-                # Calculate Williams %R
-                highest_high = es_data['High'].max()
-                lowest_low = es_data['Low'].min()
-                williams_r = -100 * (highest_high - current_price) / (highest_high - lowest_low)
-                
-                strategy_data = strategy_values['Williams']
-                
-                # Calculate current position size
-                current_contracts = calculate_position_size(
-                    total_equity, 
-                    allocation_percentages['Williams'], 
-                    current_price, 
-                    multiplier_es
-                )
-                
-                # Execute Williams trading logic
-                if strategy_data['in_position']:
-                    if day_idx > 0:
-                        yesterdays_high = local_data['ES'].iloc[day_idx-1]['High']
-                        if (current_price > yesterdays_high) or (williams_r > wr_sell_threshold):
-                            # Exit position
-                            exit_price = current_price
-                            profit = (exit_price - strategy_data['position']['entry_price']) * multiplier_es * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
-                            strategy_data['capital'] += profit
-                            strategy_data['in_position'] = False
-                            strategy_data['position'] = None
-                else:
-                    if williams_r < wr_buy_threshold:
-                        # Enter position
-                        entry_price = current_price
-                        strategy_data['in_position'] = True
-                        strategy_data['capital'] -= commission_per_order * current_contracts
-                        strategy_data['position'] = {
-                            'entry_price': entry_price, 
-                            'entry_time': current_date,
-                            'contracts': current_contracts
-                        }
-                
-                # Calculate current equity
-                if strategy_data['in_position']:
-                    unrealized = (current_price - strategy_data['position']['entry_price']) * multiplier_es * strategy_data['position']['contracts']
-                    equity = strategy_data['capital'] + unrealized
-                else:
-                    equity = strategy_data['capital']
+                if len(symbol_data) >= williams_period:
+                    current_row = symbol_data.iloc[-1]
+                    current_date = current_row['Time']
+                    current_price = current_row['Last']
                     
-                strategy_data['equity_curve'].append((current_date, equity))
-                daily_total_equity += equity
+                    # Calculate Williams %R
+                    highest_high = symbol_data['High'].max()
+                    lowest_low = symbol_data['Low'].min()
+                    range_val = highest_high - lowest_low
+                    if range_val == 0:
+                        williams_r = -50  # Neutral Williams %R when no range
+                    else:
+                        williams_r = -100 * (highest_high - current_price) / range_val
+                    
+                    strategy_data = strategy_values[strategy_key]
+                    multiplier = contract_specs[symbol]['multiplier']
+                    
+                    # Calculate current position size
+                    current_contracts = calculate_position_size(
+                        total_equity, 
+                        allocation_percentages[strategy_key], 
+                        current_price, 
+                        multiplier
+                    )
+                    
+                    # Execute Williams trading logic
+                    if strategy_data['in_position']:
+                        if day_idx > 0:
+                            yesterdays_high = local_data[symbol].iloc[day_idx-1]['High']
+                            if (current_price > yesterdays_high) or (williams_r > wr_sell_threshold):
+                                # Exit position
+                                exit_price = current_price
+                                profit = (exit_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
+                                strategy_data['capital'] += profit
+                                strategy_data['in_position'] = False
+                                strategy_data['position'] = None
+                    else:
+                        if williams_r < wr_buy_threshold:
+                            # Enter position
+                            entry_price = current_price
+                            strategy_data['in_position'] = True
+                            strategy_data['capital'] -= commission_per_order * current_contracts
+                            strategy_data['position'] = {
+                                'entry_price': entry_price, 
+                                'entry_time': current_date,
+                                'contracts': current_contracts
+                            }
+                    
+                    # Calculate current equity
+                    if strategy_data['in_position']:
+                        unrealized = (current_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts']
+                        equity = strategy_data['capital'] + unrealized
+                    else:
+                        equity = strategy_data['capital']
+                        
+                    strategy_data['equity_curve'].append((current_date, equity))
+                    daily_total_equity += equity
         
         # Update total equity for next day's position sizing
         if current_date is not None:
@@ -419,13 +435,16 @@ def run_original_backtest():
                     strategy_data['capital'] += profit
                     strategy_data['equity_curve'][-1] = (final_row['Time'], strategy_data['capital'])
             
-            elif strategy_key == 'Williams' and not local_data['ES'].empty:
-                final_row = local_data['ES'].iloc[-1]
-                final_price = final_row['Last']
-                
-                profit = (final_price - strategy_data['position']['entry_price']) * multiplier_es * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
-                strategy_data['capital'] += profit
-                strategy_data['equity_curve'][-1] = (final_row['Time'], strategy_data['capital'])
+            elif strategy_key.startswith('Williams_'):
+                symbol = strategy_key.split('_')[1]
+                if not local_data[symbol].empty:
+                    final_row = local_data[symbol].iloc[-1]
+                    final_price = final_row['Last']
+                    multiplier = contract_specs[symbol]['multiplier']
+                    
+                    profit = (final_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
+                    strategy_data['capital'] += profit
+                    strategy_data['equity_curve'][-1] = (final_row['Time'], strategy_data['capital'])
         
         results[strategy_key] = {
             'equity_curve': strategy_data['equity_curve'],
@@ -441,7 +460,7 @@ original_results = run_original_backtest()
 
 # Extract final capital values for each strategy
 final_capitals = {}
-for strategy in ['IBS_ES', 'IBS_YM', 'IBS_GC', 'IBS_NQ', 'IBS_ZQ', 'Williams']:
+for strategy in ['IBS_ES', 'IBS_YM', 'IBS_GC', 'IBS_NQ', 'Williams_ES', 'Williams_YM', 'Williams_GC', 'Williams_NQ']:
     final_capitals[strategy] = original_results[strategy]['final_capital']
 
 logger.info("Original backtest completed!")
@@ -475,18 +494,17 @@ try:
     ym_contract = Future(symbol='MYM', lastTradeDateOrContractMonth=contract_specs['YM']['contract_month'], exchange='CBOT', currency='USD') 
     gc_contract = Future(symbol='MGC', lastTradeDateOrContractMonth=contract_specs['GC']['contract_month'], exchange='COMEX', currency='USD')
     nq_contract = Future(symbol='MNQ', lastTradeDateOrContractMonth=contract_specs['NQ']['contract_month'], exchange='CME', currency='USD')
-    zq_contract = Future(symbol='ZQ', lastTradeDateOrContractMonth=contract_specs['ZQ']['contract_month'], exchange='CBOT', currency='USD')
     
     # Qualify all contracts
-    contracts_to_qualify = [es_contract, ym_contract, gc_contract, nq_contract, zq_contract]
+    contracts_to_qualify = [es_contract, ym_contract, gc_contract, nq_contract]
     qualified_contracts = ib.qualifyContracts(*contracts_to_qualify)
     
-    if len(qualified_contracts) != 5:
-        logger.error(f"Only {len(qualified_contracts)} out of 5 contracts qualified")
+    if len(qualified_contracts) != 4:
+        logger.error(f"Only {len(qualified_contracts)} out of 4 contracts qualified")
         ib.disconnect()
         exit(1)
     
-    es_contract, ym_contract, gc_contract, nq_contract, zq_contract = qualified_contracts
+    es_contract, ym_contract, gc_contract, nq_contract = qualified_contracts
     logger.info("All contracts qualified successfully")
     
 except Exception as e:
@@ -518,12 +536,11 @@ benchmark_annualized_return = ((benchmark_final_close / benchmark_initial_close)
 data_ym = fetch_daily_data(ib, ym_contract, ibkr_start_date, ibkr_end_date)
 data_gc = fetch_daily_data(ib, gc_contract, ibkr_start_date, ibkr_end_date)
 data_nq = fetch_daily_data(ib, nq_contract, ibkr_start_date, ibkr_end_date)
-data_zq = fetch_daily_data(ib, zq_contract, ibkr_start_date, ibkr_end_date)
 
 # Check if we have data for all instruments
 datasets = [
     (data_es, "ES"), (data_ym, "YM"), (data_gc, "GC"), 
-    (data_nq, "NQ"), (data_zq, "ZQ")
+    (data_nq, "NQ")
 ]
 
 for data, name in datasets:
@@ -558,11 +575,6 @@ data_ibs_nq = data_nq.copy()
 if not data_ibs_nq.empty:
     data_ibs_nq['IBS'] = (data_ibs_nq['Last'] - data_ibs_nq['Low']) / (data_ibs_nq['High'] - data_ibs_nq['Low'])
 
-# IBS for ZQ
-data_ibs_zq = data_zq.copy()
-if not data_ibs_zq.empty:
-    data_ibs_zq['IBS'] = (data_ibs_zq['Last'] - data_ibs_zq['Low']) / (data_ibs_zq['High'] - data_ibs_zq['Low'])
-
 # -------------------------------
 # Prepare Williams Data (ES only)
 # -------------------------------
@@ -583,16 +595,14 @@ ibkr_data_map = {
     'IBS_ES': data_es,
     'IBS_YM': data_ym, 
     'IBS_GC': data_gc,
-    'IBS_NQ': data_nq,
-    'IBS_ZQ': data_zq
+    'IBS_NQ': data_nq
 }
 
 symbol_map = {
     'IBS_ES': 'ES',
     'IBS_YM': 'YM', 
     'IBS_GC': 'GC',
-    'IBS_NQ': 'NQ',
-    'IBS_ZQ': 'ZQ'
+    'IBS_NQ': 'NQ'
 }
 
 # Start with ending capitals from original backtest
@@ -617,7 +627,7 @@ for day_idx in range(max_ibkr_rows):
     daily_total_equity = 0
     
     # Process IBS strategies
-    for strategy_key in ['IBS_ES', 'IBS_YM', 'IBS_GC', 'IBS_NQ', 'IBS_ZQ']:
+    for strategy_key in ['IBS_ES', 'IBS_YM', 'IBS_GC', 'IBS_NQ']:
         symbol = symbol_map[strategy_key]
         data = ibkr_data_map[strategy_key]
         
@@ -680,67 +690,79 @@ for day_idx in range(max_ibkr_rows):
         strategy_data['equity_curve'].append((current_date, equity))
         daily_total_equity += equity
     
-    # Process Williams strategy (uses ES data)
-    if not data_es.empty and day_idx >= 1:
-        # Need at least 2 days for Williams %R calculation
-        es_window = data_es.iloc[max(0, day_idx-williams_period+1):day_idx+1]
+    # Process Williams strategies for all instruments
+    ibkr_williams_data = {
+        'Williams_ES': data_es,
+        'Williams_YM': data_ym,
+        'Williams_GC': data_gc,
+        'Williams_NQ': data_nq
+    }
+    
+    for strategy_key in ['Williams_ES', 'Williams_YM', 'Williams_GC', 'Williams_NQ']:
+        symbol = strategy_key.split('_')[1]
+        data = ibkr_williams_data[strategy_key]
         
-        if len(es_window) >= williams_period:
-            current_row = es_window.iloc[-1]
-            current_date = current_row['Time']
-            current_price = current_row['Last']
+        if not data.empty and day_idx >= 1:
+            # Need at least 2 days for Williams %R calculation
+            window = data.iloc[max(0, day_idx-williams_period+1):day_idx+1]
             
-            # Calculate Williams %R with safety check
-            highest_high = es_window['High'].max()
-            lowest_low = es_window['Low'].min()
-            range_val = highest_high - lowest_low
-            if range_val == 0:
-                williams_r = -50  # Neutral Williams %R when no range
-            else:
-                williams_r = -100 * (highest_high - current_price) / range_val
-            
-            strategy_data = ibkr_strategy_values['Williams']
-            
-            # Calculate current position size
-            current_contracts = calculate_position_size(
-                total_ibkr_equity, 
-                allocation_percentages['Williams'], 
-                current_price, 
-                multiplier_es
-            )
-            
-            # Execute Williams trading logic
-            if strategy_data['in_position']:
-                if day_idx > 0:
-                    yesterdays_high = data_es.iloc[day_idx-1]['High']
-                    if (current_price > yesterdays_high) or (williams_r > wr_sell_threshold):
-                        # Exit position
-                        exit_price = current_price
-                        profit = (exit_price - strategy_data['position']['entry_price']) * multiplier_es * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
-                        strategy_data['capital'] += profit
-                        strategy_data['in_position'] = False
-                        strategy_data['position'] = None
-            else:
-                if williams_r < wr_buy_threshold:
-                    # Enter position
-                    entry_price = current_price
-                    strategy_data['in_position'] = True
-                    strategy_data['capital'] -= commission_per_order * current_contracts
-                    strategy_data['position'] = {
-                        'entry_price': entry_price, 
-                        'entry_time': current_date,
-                        'contracts': current_contracts
-                    }
-            
-            # Calculate current equity
-            if strategy_data['in_position']:
-                unrealized = (current_price - strategy_data['position']['entry_price']) * multiplier_es * strategy_data['position']['contracts']
-                equity = strategy_data['capital'] + unrealized
-            else:
-                equity = strategy_data['capital']
+            if len(window) >= williams_period:
+                current_row = window.iloc[-1]
+                current_date = current_row['Time']
+                current_price = current_row['Last']
                 
-            strategy_data['equity_curve'].append((current_date, equity))
-            daily_total_equity += equity
+                # Calculate Williams %R with safety check
+                highest_high = window['High'].max()
+                lowest_low = window['Low'].min()
+                range_val = highest_high - lowest_low
+                if range_val == 0:
+                    williams_r = -50  # Neutral Williams %R when no range
+                else:
+                    williams_r = -100 * (highest_high - current_price) / range_val
+                
+                strategy_data = ibkr_strategy_values[strategy_key]
+                multiplier = contract_specs[symbol]['multiplier']
+                
+                # Calculate current position size
+                current_contracts = calculate_position_size(
+                    total_ibkr_equity, 
+                    allocation_percentages[strategy_key], 
+                    current_price, 
+                    multiplier
+                )
+                
+                # Execute Williams trading logic
+                if strategy_data['in_position']:
+                    if day_idx > 0:
+                        yesterdays_high = data.iloc[day_idx-1]['High']
+                        if (current_price > yesterdays_high) or (williams_r > wr_sell_threshold):
+                            # Exit position
+                            exit_price = current_price
+                            profit = (exit_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
+                            strategy_data['capital'] += profit
+                            strategy_data['in_position'] = False
+                            strategy_data['position'] = None
+                else:
+                    if williams_r < wr_buy_threshold:
+                        # Enter position
+                        entry_price = current_price
+                        strategy_data['in_position'] = True
+                        strategy_data['capital'] -= commission_per_order * current_contracts
+                        strategy_data['position'] = {
+                            'entry_price': entry_price, 
+                            'entry_time': current_date,
+                            'contracts': current_contracts
+                        }
+                
+                # Calculate current equity
+                if strategy_data['in_position']:
+                    unrealized = (current_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts']
+                    equity = strategy_data['capital'] + unrealized
+                else:
+                    equity = strategy_data['capital']
+                    
+                strategy_data['equity_curve'].append((current_date, equity))
+                daily_total_equity += equity
     
     # Update total equity for next day
     if current_date is not None:
@@ -763,13 +785,24 @@ for strategy_key in allocation_percentages:
                 strategy_data['capital'] += profit
                 strategy_data['equity_curve'][-1] = (final_row['Time'], strategy_data['capital'])
         
-        elif strategy_key == 'Williams' and not data_es.empty:
-            final_row = data_es.iloc[-1]
-            final_price = final_row['Last']
-            
-            profit = (final_price - strategy_data['position']['entry_price']) * multiplier_es * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
-            strategy_data['capital'] += profit
-            strategy_data['equity_curve'][-1] = (final_row['Time'], strategy_data['capital'])
+        elif strategy_key.startswith('Williams_'):
+            symbol = strategy_key.split('_')[1]
+            # Get the appropriate data based on symbol
+            data_map = {
+                'ES': data_es,
+                'YM': data_ym,
+                'GC': data_gc,
+                'NQ': data_nq
+            }
+            data = data_map[symbol]
+            if not data.empty:
+                final_row = data.iloc[-1]
+                final_price = final_row['Last']
+                multiplier = contract_specs[symbol]['multiplier']
+                
+                profit = (final_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
+                strategy_data['capital'] += profit
+                strategy_data['equity_curve'][-1] = (final_row['Time'], strategy_data['capital'])
 
 # Convert to DataFrames for compatibility with existing code
 equity_df_es = pd.DataFrame(ibkr_strategy_values['IBS_ES']['equity_curve'], columns=['Time', 'Equity'])
@@ -784,11 +817,18 @@ equity_df_gc.set_index('Time', inplace=True)
 equity_df_nq = pd.DataFrame(ibkr_strategy_values['IBS_NQ']['equity_curve'], columns=['Time', 'Equity'])
 equity_df_nq.set_index('Time', inplace=True)
 
-equity_df_zq = pd.DataFrame(ibkr_strategy_values['IBS_ZQ']['equity_curve'], columns=['Time', 'Equity'])
-equity_df_zq.set_index('Time', inplace=True)
+# Williams strategy DataFrames
+equity_df_w_es = pd.DataFrame(ibkr_strategy_values['Williams_ES']['equity_curve'], columns=['Time', 'Equity'])
+equity_df_w_es.set_index('Time', inplace=True)
 
-equity_df_w = pd.DataFrame(ibkr_strategy_values['Williams']['equity_curve'], columns=['Time', 'Equity'])
-equity_df_w.set_index('Time', inplace=True)
+equity_df_w_ym = pd.DataFrame(ibkr_strategy_values['Williams_YM']['equity_curve'], columns=['Time', 'Equity'])
+equity_df_w_ym.set_index('Time', inplace=True)
+
+equity_df_w_gc = pd.DataFrame(ibkr_strategy_values['Williams_GC']['equity_curve'], columns=['Time', 'Equity'])
+equity_df_w_gc.set_index('Time', inplace=True)
+
+equity_df_w_nq = pd.DataFrame(ibkr_strategy_values['Williams_NQ']['equity_curve'], columns=['Time', 'Equity'])
+equity_df_w_nq.set_index('Time', inplace=True)
 
 # -------------------------------
 # Combine Original and IBKR Equity Curves
@@ -797,7 +837,7 @@ logger.info("Combining original and IBKR equity curves...")
 
 # Convert original results to DataFrames
 original_equity_dfs = {}
-for strategy in ['IBS_ES', 'IBS_YM', 'IBS_GC', 'IBS_NQ', 'IBS_ZQ', 'Williams']:
+for strategy in ['IBS_ES', 'IBS_YM', 'IBS_GC', 'IBS_NQ', 'Williams_ES', 'Williams_YM', 'Williams_GC', 'Williams_NQ']:
     equity_curve = original_results[strategy]['equity_curve']
     df = pd.DataFrame(equity_curve, columns=['Time', 'Equity'])
     df.set_index('Time', inplace=True)
@@ -809,13 +849,15 @@ ibkr_equity_dfs = {
     'IBS_YM': equity_df_ym, 
     'IBS_GC': equity_df_gc,
     'IBS_NQ': equity_df_nq,
-    'IBS_ZQ': equity_df_zq,
-    'Williams': equity_df_w
+    'Williams_ES': equity_df_w_es,
+    'Williams_YM': equity_df_w_ym,
+    'Williams_GC': equity_df_w_gc,
+    'Williams_NQ': equity_df_w_nq
 }
 
 # Combine original and IBKR periods for each strategy
 combined_equity_dfs = {}
-for strategy in ['IBS_ES', 'IBS_YM', 'IBS_GC', 'IBS_NQ', 'IBS_ZQ', 'Williams']:
+for strategy in ['IBS_ES', 'IBS_YM', 'IBS_GC', 'IBS_NQ', 'Williams_ES', 'Williams_YM', 'Williams_GC', 'Williams_NQ']:
     original_df = original_equity_dfs[strategy]
     ibkr_df = ibkr_equity_dfs[strategy]
     
@@ -839,10 +881,14 @@ for strategy in combined_equity_dfs:
 combined_IBS = (combined_equity_dfs['IBS_ES']['Equity'] + 
                 combined_equity_dfs['IBS_YM']['Equity'] +
                 combined_equity_dfs['IBS_GC']['Equity'] + 
-                combined_equity_dfs['IBS_NQ']['Equity'] +
-                combined_equity_dfs['IBS_ZQ']['Equity'])
+                combined_equity_dfs['IBS_NQ']['Equity'])
 
-combined_equity = combined_IBS + combined_equity_dfs['Williams']['Equity']
+combined_Williams = (combined_equity_dfs['Williams_ES']['Equity'] +
+                    combined_equity_dfs['Williams_YM']['Equity'] +
+                    combined_equity_dfs['Williams_GC']['Equity'] +
+                    combined_equity_dfs['Williams_NQ']['Equity'])
+
+combined_equity = combined_IBS + combined_Williams
 combined_equity_df = pd.DataFrame({'Equity': combined_equity}, index=common_dates)
 
 # -------------------------------
@@ -948,16 +994,28 @@ print("="*80)
 
 print(f"\n📊 ALLOCATION STRATEGY OVERVIEW")
 print("-" * 60)
-print("Using Dynamic Percentage-Based Capital Allocation with Enhanced Risk:")
-for strategy, pct in allocation_percentages.items():
-    print(f"  • {strategy}: {pct*100:.0f}%")
+print("50/50 IBS/Williams Split with Equal Instrument Weighting:")
+
+# Group by strategy type for cleaner display
+ibs_strategies = {k: v for k, v in allocation_percentages.items() if k.startswith('IBS_')}
+williams_strategies = {k: v for k, v in allocation_percentages.items() if k.startswith('Williams_')}
+
+print("  IBS Strategies (50% total):")
+for strategy, pct in sorted(ibs_strategies.items()):
+    print(f"    • {strategy}: {pct*100:.1f}%")
+
+print("  Williams Strategies (50% total):")
+for strategy, pct in sorted(williams_strategies.items()):
+    print(f"    • {strategy}: {pct*100:.1f}%")
+
 print(f"  • Risk Multiplier: {risk_multiplier}x (LARGER POSITION SIZES)")
 print(f"  • Rebalancing Threshold: {rebalance_threshold*100:.0f}% drift")
 print(f"  • Rebalancing Frequency: Every {rebalance_frequency_days} days")
 print("\nKey Benefits:")
 print("  • Position sizes scale with account equity")
 print("  • Enhanced risk/reward with larger position sizes")
-print("  • Maintains dynamic allocation structure")
+print("  • 50/50 split between IBS and Williams strategies")
+print("  • Equal weighting across all 4 instruments")
 print("  • No fixed dollar amounts - pure percentage allocation")
 print("  • Enables compound growth across all strategies")
 
@@ -983,7 +1041,7 @@ print(f"\n" + "="*80)
 print("DATA QUALITY REPORT")
 print("="*80)
 print(f"Original Period ({original_start_date} to {original_end_date}):")
-for symbol in ['ES', 'YM', 'GC', 'NQ', 'ZQ']:
+for symbol in ['ES', 'YM', 'GC', 'NQ']:
     bars_count = len(local_data[symbol]) if not local_data[symbol].empty else 0
     print(f"  {symbol} bars: {bars_count}")
 
@@ -992,7 +1050,6 @@ print(f"  ES bars retrieved: {len(data_es)}")
 print(f"  YM bars retrieved: {len(data_ym) if not data_ym.empty else 0}")
 print(f"  GC bars retrieved: {len(data_gc) if not data_gc.empty else 0}")
 print(f"  NQ bars retrieved: {len(data_nq) if not data_nq.empty else 0}")
-print(f"  ZQ bars retrieved: {len(data_zq) if not data_zq.empty else 0}")
 
 # Performance Comparison
 print(f"\n" + "="*80)
@@ -1044,7 +1101,7 @@ plt.plot(ibkr_equity.index, ibkr_equity['Equity'],
 plt.axvline(x=original_end, color='gray', linestyle='--', alpha=0.7, 
            label=f'Data Transition ({original_end_date})')
 
-plt.title(f'Enhanced Risk Dynamic Allocation Portfolio ({risk_multiplier}x Risk Multiplier) ({full_start_date} to {full_end_date})\nPercentage-Based Allocation: IBS (10% each: ES, YM, GC, NQ, ZQ) + Williams (50%)')
+plt.title(f'Enhanced Risk Dynamic Allocation Portfolio ({risk_multiplier}x Risk Multiplier) ({full_start_date} to {full_end_date})\n50/50 IBS/Williams Split: 12.5% Each (ES, YM, GC, NQ for both strategies)')
 plt.xlabel('Date')
 plt.ylabel('Account Balance ($)')
 plt.legend()
