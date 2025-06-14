@@ -448,16 +448,17 @@ def place_limit_order(ib, contract, action, quantity, symbol):
         else:  # SELL
             limit_price = current_price * 0.999  # Slightly below current price
         
-        # Round to appropriate tick size for the instrument
-        if symbol == 'ZQ':
-            # ZQ trades in 0.0025 increments
-            limit_price = round(limit_price / 0.0025) * 0.0025
-        elif symbol in ['ES', 'YM', 'NQ']:
-            # These trade in 0.25 increments
-            limit_price = round(limit_price * 4) / 4
-        elif symbol == 'GC':
-            # GC trades in 0.1 increments
-            limit_price = round(limit_price * 10) / 10
+        # Define minimum tick sizes for each symbol
+        tick_sizes = {
+            'ES': 0.25,      # MES / ES trades in 0.25-point increments
+            'NQ': 0.25,      # MNQ / NQ trades in 0.25-point increments
+            'YM': 1.0,       # MYM trades in whole-point increments (1-point = $0.50)
+            'GC': 0.1,       # MGC trades in 0.1-point increments
+            'ZQ': 0.0025     # ZQ trades in 0.0025-point increments
+        }
+
+        tick_size = tick_sizes.get(symbol, 0.25)  # Default to 0.25 if unknown
+        limit_price = round(limit_price / tick_size) * tick_size
         
         try:
             order = Order(action=action, totalQuantity=quantity, orderType='LMT', 
