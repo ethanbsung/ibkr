@@ -1,0 +1,40 @@
+name: Update Trading Metrics
+
+on:
+  schedule:
+    # Run every day at 6 PM ET (after markets close)
+    - cron: '0 23 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  update-metrics:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install dependencies
+      run: |
+        pip install pandas numpy
+        
+    - name: Update README with trading metrics
+      run: |
+        python scripts/update_readme_metrics.py
+        
+    - name: Commit and push changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add README.md
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "🤖 Auto-update trading metrics [$(date +'%Y-%m-%d %H:%M UTC')]"
+          git push
+        fi 
