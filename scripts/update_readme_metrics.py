@@ -82,7 +82,11 @@ def load_trading_metrics() -> Optional[Dict]:
             'realized_pnl': latest['realized_pnl'],
             'total_pnl': latest['unrealized_pnl'] + latest['realized_pnl'],
             'total_pnl_pct': 0,  # Will calculate if we have historical data
-            'trading_days': len(snapshots)
+            'trading_days': len(snapshots),
+            'sharpe_ratio': 0,  # Will calculate if enough data
+            'max_drawdown_pct': 0,  # Will calculate if enough data
+            'win_rate': 0,  # Placeholder for now
+            'total_trades': 0  # Placeholder for now
         }
         
         # Calculate performance over time if we have multiple snapshots
@@ -94,6 +98,38 @@ def load_trading_metrics() -> Optional[Dict]:
             if initial_value > 0:
                 total_return = (latest['net_liquidation'] - initial_value) / initial_value * 100
                 metrics['total_pnl_pct'] = total_return
+                
+                # Calculate advanced risk metrics if we have enough data
+                if len(snapshots) >= 7:  # Need at least a week of data
+                    daily_returns = []
+                    daily_values = []
+                    
+                    for i in range(1, len(snapshots)):
+                        prev_val = snapshots[i-1]['net_liquidation']
+                        curr_val = snapshots[i]['net_liquidation']
+                        if prev_val > 0:
+                            daily_return = (curr_val - prev_val) / prev_val
+                            daily_returns.append(daily_return)
+                            daily_values.append(curr_val)
+                    
+                    if daily_returns:
+                        import numpy as np
+                        
+                        # Calculate Sharpe Ratio (annualized)
+                        mean_return = np.mean(daily_returns)
+                        std_return = np.std(daily_returns)
+                        if std_return > 0:
+                            metrics['sharpe_ratio'] = (mean_return / std_return) * np.sqrt(252)  # Annualized
+                        
+                        # Calculate Maximum Drawdown
+                        peak = daily_values[0]
+                        max_dd = 0
+                        for value in daily_values:
+                            if value > peak:
+                                peak = value
+                            drawdown = (peak - value) / peak
+                            max_dd = max(max_dd, drawdown)
+                        metrics['max_drawdown_pct'] = max_dd * 100
                 
                 # Calculate period returns
                 periods = {'1_week': 7, '1_month': 30, '3_months': 90}
@@ -171,11 +207,24 @@ def generate_dynamic_badges(metrics: Dict) -> str:
     status_color = "brightgreen" if total_pnl >= 0 else "yellow"
     status_text = "LIVE" if metrics['trading_days'] > 0 else "PAPER"
     
+    # Advanced metrics badges
+    sharpe_badge = ""
+    if metrics.get('sharpe_ratio', 0) > 0:
+        sharpe_value = f"{metrics['sharpe_ratio']:.2f}"
+        sharpe_color = "brightgreen" if metrics['sharpe_ratio'] > 1.5 else "green" if metrics['sharpe_ratio'] > 1.0 else "yellow"
+        sharpe_badge = f"![Sharpe](https://img.shields.io/badge/Sharpe-{sharpe_value}-{sharpe_color})\n"
+    
+    drawdown_badge = ""
+    if metrics.get('max_drawdown_pct', 0) > 0:
+        dd_value = f"{metrics['max_drawdown_pct']:.1f}%25"
+        dd_color = "green" if metrics['max_drawdown_pct'] < 5 else "yellow" if metrics['max_drawdown_pct'] < 10 else "red"
+        drawdown_badge = f"![Max DD](https://img.shields.io/badge/Max_DD-{urllib.parse.quote(dd_value)}-{dd_color})\n"
+    
     badges = f"""[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ![Account Value](https://img.shields.io/badge/Account-{urllib.parse.quote(account_value)}-blue)
 ![P&L](https://img.shields.io/badge/P&L-{urllib.parse.quote(pnl_value)}-{pnl_color})
-{return_badge}![Status](https://img.shields.io/badge/Trading-{status_text}-{status_color})
+{return_badge}{sharpe_badge}{drawdown_badge}![Status](https://img.shields.io/badge/Trading-{status_text}-{status_color})
 ![Last Updated](https://img.shields.io/badge/Updated-{urllib.parse.quote(metrics['last_updated'].split()[0])}-lightgrey)"""
     
     return badges
@@ -203,6 +252,12 @@ def generate_metrics_section(metrics: Dict, positions: List[Dict]) -> str:
     if metrics.get('total_pnl_pct', 0) != 0:
         section += f"| **Total Return** | {format_percentage(metrics['total_pnl_pct'])} |\n"
     
+    # Add advanced risk metrics if available
+    if metrics.get('sharpe_ratio', 0) > 0:
+        section += f"| **Sharpe Ratio** | {metrics['sharpe_ratio']:.2f} |\n"
+    if metrics.get('max_drawdown_pct', 0) > 0:
+        section += f"| **Max Drawdown** | {metrics['max_drawdown_pct']:.1f}% |\n"
+    
     # Add current positions
     if positions:
         section += f"\n### Current Positions\n"
@@ -214,6 +269,34 @@ def generate_metrics_section(metrics: Dict, positions: List[Dict]) -> str:
     else:
         section += f"\n### Current Positions\n"
         section += f"*No positions currently open - waiting for entry signals*\n"
+    
+    # Add portfolio risk metrics
+    if positions:
+        # Calculate portfolio exposure
+        total_notional = 0
+        contract_multipliers = {
+            'MES': 5, 'MYM': 0.5, 'MGC': 10, 'MNQ': 2, 'ZQ': 2000
+        }
+        
+        section += f"\n### Portfolio Risk Metrics\n"
+        section += f"| Metric | Value |\n"
+        section += f"|--------|-------|\n"
+        
+        for pos in positions:
+            multiplier = contract_multipliers.get(pos['symbol'], 1)
+            notional = pos['contracts'] * pos['entry_price'] * multiplier
+            total_notional += notional
+        
+        leverage = total_notional / metrics['account_value'] if metrics['account_value'] > 0 else 0
+        section += f"| **Total Notional** | {format_currency(total_notional)} |\n"
+        section += f"| **Gross Leverage** | {leverage:.1f}x |\n"
+        section += f"| **Risk per Position** | {100/len(positions):.1f}% avg allocation |\n"
+        
+        # Calculate position concentration
+        largest_position = max(positions, key=lambda p: contract_multipliers.get(p['symbol'], 1) * p['contracts'] * p['entry_price'])
+        largest_notional = contract_multipliers.get(largest_position['symbol'], 1) * largest_position['contracts'] * largest_position['entry_price']
+        concentration = (largest_notional / total_notional) * 100 if total_notional > 0 else 0
+        section += f"| **Largest Position** | {concentration:.1f}% ({largest_position['symbol']}) |\n"
     
     # Add period returns if available
     if '1_week_return' in metrics:

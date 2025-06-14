@@ -35,7 +35,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Live Trading Performance
 
-> **Last Updated:** 2025-06-14 14:52 UTC | **Trading Days:** 1
+> **Last Updated:** 2025-06-14 14:59 UTC | **Trading Days:** 1
 
 ### Current Account Status
 | Metric | Value |
@@ -52,6 +52,14 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 | **IBS_ES** | MES | Long | 2 | $6028.25 | 2025-06-11 |
 | **IBS_YM** | MYM | Long | 2 | $42175.00 | 2025-06-13 |
 | **IBS_GC** | MGC | Long | 2 | $3376.20 | 2025-06-11 |
+
+### Portfolio Risk Metrics
+| Metric | Value |
+|--------|-------|
+| **Total Notional** | $169,981.50 |
+| **Gross Leverage** | 5.2x |
+| **Risk per Position** | 33.3% avg allocation |
+| **Largest Position** | 39.7% (MGC) |
 
 *📝 Metrics automatically updated via GitHub Actions from live IBKR account*
 ## 📊 Trading Strategies
