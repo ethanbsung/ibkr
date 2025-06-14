@@ -16,7 +16,7 @@ logger = logging.getLogger()
 # -------------------------------
 
 # Input file path for ES futures daily data (replace with your file path)
-data_file = "Data/mes_daily_data.csv"  # File should include: Time, High, Low, Last, Volume (if available)
+data_file = "Data/zq_daily_data.csv"  # File should include: Time, High, Low, Last, Volume (if available)
 
 # Backtest parameters
 initial_capital = 10000.0         # starting account balance in dollars

@@ -30,7 +30,7 @@ min_contracts = 1                 # minimum number of contracts
 
 # Custom start and end date (format: 'YYYY-MM-DD')
 start_date = '2000-01-01'
-end_date   = '2025-03-12'
+end_date   = '2020-01-01'
 
 # Williams %R parameters
 williams_period = 2  # 2-day lookback

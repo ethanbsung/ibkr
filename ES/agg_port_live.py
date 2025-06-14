@@ -28,13 +28,16 @@ CLIENT_ID = 1
 risk_multiplier = 3.0              # 3x larger positions for higher risk/reward
 
 # Target percentage allocations (must sum to 100%)
+# 50/50 split between IBS and Williams strategies, equal weighting within each
 allocation_percentages = {
-    'IBS_ES': 0.10,    # 10% to ES IBS strategy
-    'IBS_YM': 0.10,    # 10% to YM IBS strategy  
-    'IBS_GC': 0.10,    # 10% to GC IBS strategy
-    'IBS_NQ': 0.10,    # 10% to NQ IBS strategy
-    'IBS_ZQ': 0.10,    # 10% to ZQ IBS strategy
-    'Williams': 0.50   # 50% to Williams strategy
+    'IBS_ES': 0.125,      # 12.5% to ES IBS strategy
+    'IBS_YM': 0.125,      # 12.5% to YM IBS strategy  
+    'IBS_GC': 0.125,      # 12.5% to GC IBS strategy
+    'IBS_NQ': 0.125,      # 12.5% to NQ IBS strategy
+    'Williams_ES': 0.125, # 12.5% to ES Williams strategy
+    'Williams_YM': 0.125, # 12.5% to YM Williams strategy
+    'Williams_GC': 0.125, # 12.5% to GC Williams strategy
+    'Williams_NQ': 0.125  # 12.5% to NQ Williams strategy
 }
 
 # Rebalancing parameters
@@ -46,8 +49,7 @@ contract_specs = {
     'ES': {'multiplier': 5, 'contract_month': '202506', 'exchange': 'CME'},      # MES multiplier
     'YM': {'multiplier': 0.50, 'contract_month': '202506', 'exchange': 'CBOT'},   # MYM multiplier  
     'GC': {'multiplier': 10, 'contract_month': '202508', 'exchange': 'COMEX'},     # MGC multiplier - moved to August to avoid delivery window
-    'NQ': {'multiplier': 2, 'contract_month': '202506', 'exchange': 'CME'},      # MNQ multiplier
-    'ZQ': {'multiplier': 4167, 'contract_month': '202506', 'exchange': 'CBOT'}    # ZQ multiplier
+    'NQ': {'multiplier': 2, 'contract_month': '202506', 'exchange': 'CME'}      # MNQ multiplier
 }
 
 # IBS entry/exit thresholds (common for all IBS instruments)
@@ -211,20 +213,11 @@ def get_positions_from_ibkr(ib, contracts):
         # Create a mapping from contract to strategy
         contract_to_strategy = {}
         for symbol, contract in contracts.items():
-            if symbol == 'ES':  # ES contract is used for both IBS_ES and Williams
-                contract_to_strategy[contract.conId] = ['IBS_ES', 'Williams']
-            else:
-                contract_to_strategy[contract.conId] = [f'IBS_{symbol}']
+            # All contracts are used for both IBS and Williams strategies
+            contract_to_strategy[contract.conId] = [f'IBS_{symbol}', f'Williams_{symbol}']
         
         # Initialize position tracking
-        ibkr_positions = {
-            'IBS_ES': {'in_position': False, 'position': None},
-            'IBS_YM': {'in_position': False, 'position': None},
-            'IBS_GC': {'in_position': False, 'position': None},
-            'IBS_NQ': {'in_position': False, 'position': None},
-            'IBS_ZQ': {'in_position': False, 'position': None},
-            'Williams': {'in_position': False, 'position': None}
-        }
+        ibkr_positions = {strategy: {'in_position': False, 'position': None} for strategy in allocation_percentages}
         
         # Process IBKR positions
         for position in positions:
@@ -250,7 +243,7 @@ def get_positions_from_ibkr(ib, contracts):
                     else:
                         # Fallback to reasonable estimates if daily bar data not available
                         logger.warning(f"No current price data for {symbol}, using default estimate")
-                        default_prices = {'ES': 6000, 'GC': 3300, 'ZQ': 95, 'YM': 42000, 'NQ': 21000}
+                        default_prices = {'ES': 6000, 'GC': 3300, 'YM': 42000, 'NQ': 21000}
                         entry_price = default_prices.get(symbol, 1000)
                     
                     position_info = {
@@ -259,54 +252,48 @@ def get_positions_from_ibkr(ib, contracts):
                         'contracts': int(abs(position.position))  # Use absolute value for long positions
                     }
                     
-                    # For ES, we need to determine if it's IBS or Williams position
-                    if len(strategies) > 1:  # ES case
-                        # Load saved state to check which strategy should have the position
-                        # This is more reliable than trying to guess from position size
-                        saved_state = load_portfolio_state()
-                        
-                        # Check if either strategy expects to have a position
-                        ibs_es_expecting = saved_state['positions']['IBS_ES']['in_position']
-                        williams_expecting = saved_state['positions']['Williams']['in_position']
-                        
-                        if ibs_es_expecting and not williams_expecting:
-                            # IBS_ES should have the position
-                            ibkr_positions['IBS_ES'] = {
-                                'in_position': True,
-                                'position': position_info
-                            }
-                            logger.info(f"Found IBS_ES position: {position_info['contracts']} contracts")
-                        elif williams_expecting and not ibs_es_expecting:
-                            # Williams should have the position
-                            ibkr_positions['Williams'] = {
-                                'in_position': True,
-                                'position': position_info
-                            }
-                            logger.info(f"Found Williams ES position: {position_info['contracts']} contracts")
-                        elif ibs_es_expecting and williams_expecting:
-                            # Both expect positions - we have a problem, warn user
-                            logger.warning(f"Both IBS_ES and Williams expect ES positions but only one exists. Assigning to IBS_ES by default.")
-                            ibkr_positions['IBS_ES'] = {
-                                'in_position': True,
-                                'position': position_info
-                            }
-                            logger.info(f"Found IBS_ES position: {position_info['contracts']} contracts")
-                        else:
-                            # Neither expects a position, default to IBS_ES (smaller allocation)
-                            logger.warning(f"Found unexpected ES position, assigning to IBS_ES by default.")
-                            ibkr_positions['IBS_ES'] = {
-                                'in_position': True,
-                                'position': position_info
-                            }
-                            logger.info(f"Found IBS_ES position: {position_info['contracts']} contracts")
-                    else:
-                        # Single strategy mapping
-                        strategy = strategies[0]
-                        ibkr_positions[strategy] = {
+                    # For all instruments, we need to determine which strategy has the position
+                    # Load saved state to check which strategy should have the position
+                    saved_state = load_portfolio_state()
+                    
+                    # Check which strategies expect to have positions for this instrument
+                    ibs_strategy = f'IBS_{symbol}'
+                    williams_strategy = f'Williams_{symbol}'
+                    
+                    ibs_expecting = saved_state['positions'][ibs_strategy]['in_position']
+                    williams_expecting = saved_state['positions'][williams_strategy]['in_position']
+                    
+                    if ibs_expecting and not williams_expecting:
+                        # IBS strategy should have the position
+                        ibkr_positions[ibs_strategy] = {
                             'in_position': True,
                             'position': position_info
                         }
-                        logger.info(f"Found {strategy} position: {position_info['contracts']} contracts")
+                        logger.info(f"Found {ibs_strategy} position: {position_info['contracts']} contracts")
+                    elif williams_expecting and not ibs_expecting:
+                        # Williams strategy should have the position
+                        ibkr_positions[williams_strategy] = {
+                            'in_position': True,
+                            'position': position_info
+                        }
+                        logger.info(f"Found {williams_strategy} position: {position_info['contracts']} contracts")
+                    elif ibs_expecting and williams_expecting:
+                        # Both expect positions - distribute based on saved position sizes
+                        # This would be handled by the router state, but for now assign to IBS by default
+                        logger.warning(f"Both {ibs_strategy} and {williams_strategy} expect positions but only one exists. Assigning to {ibs_strategy} by default.")
+                        ibkr_positions[ibs_strategy] = {
+                            'in_position': True,
+                            'position': position_info
+                        }
+                        logger.info(f"Found {ibs_strategy} position: {position_info['contracts']} contracts")
+                    else:
+                        # Neither expects a position, default to IBS strategy
+                        logger.warning(f"Found unexpected {symbol} position, assigning to {ibs_strategy} by default.")
+                        ibkr_positions[ibs_strategy] = {
+                            'in_position': True,
+                            'position': position_info
+                        }
+                        logger.info(f"Found {ibs_strategy} position: {position_info['contracts']} contracts")
         
         return ibkr_positions
         
@@ -355,20 +342,17 @@ def qualify_contracts(ib):
                          exchange=contract_specs['GC']['exchange'], currency='USD')
     mnq_contract = Future(symbol='MNQ', lastTradeDateOrContractMonth=contract_specs['NQ']['contract_month'], 
                          exchange=contract_specs['NQ']['exchange'], currency='USD')
-    zq_contract = Future(symbol='ZQ', lastTradeDateOrContractMonth=contract_specs['ZQ']['contract_month'], 
-                        exchange=contract_specs['ZQ']['exchange'], currency='USD')
     
     # Qualify all contracts
     try:
-        qualified = ib.qualifyContracts(mes_contract, mym_contract, mgc_contract, mnq_contract, zq_contract)
-        if len(qualified) != 5:
-            raise ValueError(f"Only {len(qualified)} out of 5 contracts qualified")
+        qualified = ib.qualifyContracts(mes_contract, mym_contract, mgc_contract, mnq_contract)
+        if len(qualified) != 4:
+            raise ValueError(f"Only {len(qualified)} out of 4 contracts qualified")
         
         contracts['ES'] = qualified[0]
         contracts['YM'] = qualified[1] 
         contracts['GC'] = qualified[2]
         contracts['NQ'] = qualified[3]
-        contracts['ZQ'] = qualified[4]
         
         return contracts
     except Exception as e:
@@ -384,18 +368,9 @@ def place_order_with_fallback(ib, contract, action, quantity, symbol, dry_run=Fa
     
     # Check if we're outside the trading window (4:55-5:05 PM Eastern) - use dry run mode
     if not is_trading_window() or dry_run:
-        logger.info(f"DRY RUN: Would place {action} order for {quantity} {symbol} contracts (outside trading window)")
-        if symbol == 'ZQ':
-            logger.info(f"DRY RUN: Would use limit order for {symbol} (MOC not supported)")
-        else:
-            logger.info(f"DRY RUN: Would place MOC {action} order for {quantity} {symbol} contracts")
+        logger.info(f"DRY RUN: Would place MOC {action} order for {quantity} {symbol} contracts (outside trading window)")
         # Return None for dry run mode - do not update position state
         return None
-    
-    # ZQ is known to not support MOC orders, so go straight to limit order
-    if symbol == 'ZQ':
-        logger.info(f"Using limit order for {symbol} (MOC not supported)")
-        return place_limit_order(ib, contract, action, quantity, symbol)
     
     # For other instruments, try MOC first
     try:
@@ -458,8 +433,7 @@ def place_limit_order(ib, contract, action, quantity, symbol):
             'ES': 0.25,      # MES / ES trades in 0.25-point increments
             'NQ': 0.25,      # MNQ / NQ trades in 0.25-point increments
             'YM': 1.0,       # MYM trades in whole-point increments (1-point = $0.50)
-            'GC': 0.1,       # MGC trades in 0.1-point increments
-            'ZQ': 0.0025     # ZQ trades in 0.0025-point increments
+            'GC': 0.1        # MGC trades in 0.1-point increments
         }
 
         tick_size = tick_sizes.get(symbol, 0.25)  # Default to 0.25 if unknown
@@ -692,9 +666,13 @@ def run_daily_signals(ib):
     
     logger.info("All contracts qualified successfully")
 
-    # ---------- router for ES (shared by IBS_ES & Williams) ----------
-    es_router = PositionRouter(ib, contracts['ES'])
-    desired_es = {}  # will hold target lots per ES‑strategy
+    # ---------- routers for all instruments (each shared by IBS & Williams) ----------
+    routers = {}
+    desired_positions = {}  # will hold target lots per instrument per strategy
+    
+    for symbol in ['ES', 'YM', 'GC', 'NQ']:
+        routers[symbol] = PositionRouter(ib, contracts[symbol], symbol)
+        desired_positions[symbol] = {}  # will hold IBS and Williams target lots for this symbol
     
     # Get current account equity
     current_equity = get_account_equity(ib)
@@ -745,8 +723,8 @@ def run_daily_signals(ib):
     current_dt = datetime.now(tz)
     end_datetime_str = format_end_datetime(current_dt, tz)
     
-    # Process each IBS strategy (matching aggregate_port.py logic exactly)
-    for symbol in ['ES', 'YM', 'GC', 'NQ', 'ZQ']:
+    # Process each IBS strategy (router-only approach for all instruments)
+    for symbol in ['ES', 'YM', 'GC', 'NQ']:
         strategy_key = f'IBS_{symbol}'
         contract = contracts[symbol]
         multiplier = contract_specs[symbol]['multiplier']
@@ -785,125 +763,115 @@ def run_daily_signals(ib):
         # Get current position state
         strategy_state = state['positions'][strategy_key]
 
-        # Execute IBS trading logic (matching aggregate_port.py exactly)
-        if symbol == 'ES':
-            # ----- router‑only logic (no direct orders here) -----
-            if strategy_state['in_position']:
-                desired_qty = 0 if ibs > ibs_exit_threshold else strategy_state['position']['contracts']
+        # Execute IBS trading logic using router approach
+        if strategy_state['in_position']:
+            desired_qty = 0 if ibs > ibs_exit_threshold else strategy_state['position']['contracts']
+            if ibs > ibs_exit_threshold:
+                logger.info(f"{symbol} - IBS exit signal (IBS: {ibs:.3f} > {ibs_exit_threshold})")
             else:
-                desired_qty = target_contracts if ibs < ibs_entry_threshold else 0
-
-            desired_es[strategy_key] = desired_qty
-            continue  # skip direct execution – router will handle later
+                logger.info(f"{symbol} - Holding position (IBS: {ibs:.3f}, exit threshold: {ibs_exit_threshold})")
         else:
-            if strategy_state['in_position']:
-                if ibs > ibs_exit_threshold:
-                    # Exit position
-                    logger.info(f"{symbol} - IBS exit signal (IBS: {ibs:.3f} > {ibs_exit_threshold})")
-                    current_contracts = strategy_state['position']['contracts']
-
-                    trade = place_order_with_fallback(ib, contract, 'SELL', current_contracts, symbol)
-
-                    if trade is not None:
-                        # Update state only if order was placed successfully (not dry run)
-                        strategy_state['in_position'] = False
-                        strategy_state['position'] = None
-                        logger.info(f"{symbol} - Position state updated: EXIT")
-                    else:
-                        logger.info(f"{symbol} - Order not placed (dry run mode), position state unchanged")
-                else:
-                    logger.info(f"{symbol} - Holding position (IBS: {ibs:.3f}, exit threshold: {ibs_exit_threshold})")
+            desired_qty = target_contracts if ibs < ibs_entry_threshold else 0
+            if ibs < ibs_entry_threshold:
+                logger.info(f"{symbol} - IBS entry signal (IBS: {ibs:.3f} < {ibs_entry_threshold})")
             else:
-                if ibs < ibs_entry_threshold:
-                    # Enter position
-                    logger.info(f"{symbol} - IBS entry signal (IBS: {ibs:.3f} < {ibs_entry_threshold})")
+                logger.info(f"{symbol} - No entry signal (IBS: {ibs:.3f}, entry threshold: {ibs_entry_threshold})")
 
-                    trade = place_order_with_fallback(ib, contract, 'BUY', target_contracts, symbol)
-
-                    if trade is not None:
-                        # Update state only if order was placed successfully (not dry run)
-                        strategy_state['in_position'] = True
-                        strategy_state['position'] = {
-                            'entry_price': current_price,
-                            'entry_time': current_dt.isoformat(),
-                            'contracts': target_contracts
-                        }
-                        logger.info(f"{symbol} - Position state updated: ENTRY")
-                    else:
-                        logger.info(f"{symbol} - Order not placed (dry run mode), position state unchanged")
-                else:
-                    logger.info(f"{symbol} - No entry signal (IBS: {ibs:.3f}, entry threshold: {ibs_entry_threshold})")
+        desired_positions[symbol][strategy_key] = desired_qty
     
-    # Process Williams %R strategy (ES only, matching aggregate_port.py logic exactly)
-    logger.info(f"\nProcessing Williams strategy...")
+    # Process Williams %R strategy for all instruments
+    for symbol in ['ES', 'YM', 'GC', 'NQ']:
+        strategy_key = f'Williams_{symbol}'
+        contract = contracts[symbol]
+        multiplier = contract_specs[symbol]['multiplier']
+        
+        logger.info(f"\nProcessing {strategy_key}...")
 
-    es_contract = contracts['ES']
-    es_bars = get_williams_bars(ib, es_contract, end_datetime_str)
+        # Get bars for Williams %R calculation
+        bars = get_williams_bars(ib, contract, end_datetime_str)
 
-    logger.info(f"Williams - Retrieved {len(es_bars)} bars, need {williams_period}")
-    if len(es_bars) > 0:
-        logger.info(f"Williams - Recent bars: {[f'{bar.date}' for bar in es_bars[-min(3, len(es_bars)):]]}")
+        logger.info(f"{strategy_key} - Retrieved {len(bars)} bars, need {williams_period}")
+        if len(bars) > 0:
+            logger.info(f"{strategy_key} - Recent bars: {[f'{bar.date}' for bar in bars[-min(3, len(bars)):]]}")
 
-    if len(es_bars) >= williams_period:
-        current_bar = es_bars[-1]
-        current_price = current_bar.close
+        if len(bars) >= williams_period:
+            current_bar = bars[-1]
+            current_price = current_bar.close
 
-        # Calculate Williams %R with safety check (matching aggregate_port.py exactly)
-        williams_r = compute_williams_r(es_bars)
+            # Calculate Williams %R with safety check (matching aggregate_port.py exactly)
+            williams_r = compute_williams_r(bars)
 
-        logger.info(f"ES Williams - Price: {current_price}, Williams %R: {williams_r:.2f}")
+            logger.info(f"{symbol} Williams - Price: {current_price}, Williams %R: {williams_r:.2f}")
 
-        # Calculate position size
-        target_contracts = calculate_position_size(
-            current_equity,
-            allocation_percentages['Williams'],
-            current_price,
-            contract_specs['ES']['multiplier']
-        )
+            # Calculate position size
+            target_contracts = calculate_position_size(
+                current_equity,
+                allocation_percentages[strategy_key],
+                current_price,
+                multiplier
+            )
 
-        # Enhanced logging for position sizing
-        allocation_pct = allocation_percentages['Williams']
-        target_dollar = current_equity * allocation_pct * risk_multiplier
-        logger.info(f"Williams - Allocation: {allocation_pct*100:.0f}% * {risk_multiplier}x = ${target_dollar:,.0f} target")
-        logger.info(f"Williams - Target contracts: {target_contracts}")
+            # Enhanced logging for position sizing
+            allocation_pct = allocation_percentages[strategy_key]
+            target_dollar = current_equity * allocation_pct * risk_multiplier
+            logger.info(f"{strategy_key} - Allocation: {allocation_pct*100:.0f}% * {risk_multiplier}x = ${target_dollar:,.0f} target")
+            logger.info(f"{strategy_key} - Target contracts: {target_contracts}")
 
-        # Get current position state
-        williams_state = state['positions']['Williams']
+            # Get current position state
+            williams_state = state['positions'][strategy_key]
 
-        # ----- router‑only logic for ES Williams -----
-        if williams_state['in_position']:
-            exit_signal = False
-            if len(es_bars) >= 2 and current_price > es_bars[-2].high:
-                exit_signal = True
-            if williams_r > wr_sell_threshold:
-                exit_signal = True
-            desired_qty = 0 if exit_signal else williams_state['position']['contracts']
-        else:
-            desired_qty = target_contracts if williams_r < wr_buy_threshold else 0
-
-        desired_es['Williams'] = desired_qty
-    else:
-        logger.warning("Insufficient Williams data - need at least 2 bars")
-
-    # ---------- execute net ES order ----------
-    es_router.sync(desired_es)
-
-    # reflect router outcome in local state (simplified – optimistic)
-    for strat, lots in es_router.strategy_lots.items():
-        st = state['positions'][strat]
-        if lots == 0:
-            st['in_position'] = False
-            st['position'] = None
-        else:
-            st['in_position'] = True
-            if st['position'] is None:
-                st['position'] = {
-                    'entry_price': current_price,
-                    'entry_time': current_dt.isoformat(),
-                    'contracts': lots
-                }
+            # Execute Williams trading logic using router approach
+            if williams_state['in_position']:
+                exit_signal = False
+                if len(bars) >= 2 and current_price > bars[-2].high:
+                    exit_signal = True
+                    logger.info(f"{symbol} Williams - Exit signal: price above previous high")
+                if williams_r > wr_sell_threshold:
+                    exit_signal = True
+                    logger.info(f"{symbol} Williams - Exit signal: Williams %R > {wr_sell_threshold}")
+                
+                desired_qty = 0 if exit_signal else williams_state['position']['contracts']
+                if not exit_signal:
+                    logger.info(f"{symbol} Williams - Holding position (Williams %R: {williams_r:.2f})")
             else:
-                st['position']['contracts'] = lots
+                desired_qty = target_contracts if williams_r < wr_buy_threshold else 0
+                if williams_r < wr_buy_threshold:
+                    logger.info(f"{symbol} Williams - Entry signal (Williams %R: {williams_r:.2f} < {wr_buy_threshold})")
+                else:
+                    logger.info(f"{symbol} Williams - No entry signal (Williams %R: {williams_r:.2f}, threshold: {wr_buy_threshold})")
+
+            desired_positions[symbol][strategy_key] = desired_qty
+        else:
+            logger.warning(f"Insufficient Williams data for {symbol} - need at least {williams_period} bars")
+            desired_positions[symbol][strategy_key] = 0
+
+    # ---------- execute net orders for all instruments ----------
+    for symbol in ['ES', 'YM', 'GC', 'NQ']:
+        routers[symbol].sync(desired_positions[symbol])
+
+        # reflect router outcome in local state (simplified – optimistic)
+        current_price = 0  # Will be set from the last processed bar for this symbol
+        
+        # Get current price for state updates
+        bars = get_daily_bar(ib, contracts[symbol], end_datetime_str)
+        if bars:
+            current_price = bars[-1].close
+        
+        for strat, lots in routers[symbol].strategy_lots.items():
+            st = state['positions'][strat]
+            if lots == 0:
+                st['in_position'] = False
+                st['position'] = None
+            else:
+                st['in_position'] = True
+                if st['position'] is None:
+                    st['position'] = {
+                        'entry_price': current_price,
+                        'entry_time': current_dt.isoformat(),
+                        'contracts': lots
+                    }
+                else:
+                    st['position']['contracts'] = lots
     
     # Save updated state
     save_portfolio_state(state)
@@ -926,9 +894,20 @@ def print_portfolio_summary(ib):
     state = load_portfolio_state()
     
     logger.info("=== PORTFOLIO SUMMARY ===")
-    logger.info("Dynamic Percentage-Based Allocation with Enhanced Risk:")
-    for strategy, pct in allocation_percentages.items():
-        logger.info(f"  • {strategy}: {pct*100:.0f}%")
+    logger.info("50/50 IBS/Williams Split with Equal Instrument Weighting:")
+    
+    # Group by strategy type for cleaner display
+    ibs_strategies = {k: v for k, v in allocation_percentages.items() if k.startswith('IBS_')}
+    williams_strategies = {k: v for k, v in allocation_percentages.items() if k.startswith('Williams_')}
+    
+    logger.info("  IBS Strategies (50% total):")
+    for strategy, pct in sorted(ibs_strategies.items()):
+        logger.info(f"    • {strategy}: {pct*100:.1f}%")
+    
+    logger.info("  Williams Strategies (50% total):")
+    for strategy, pct in sorted(williams_strategies.items()):
+        logger.info(f"    • {strategy}: {pct*100:.1f}%")
+        
     logger.info(f"  • Risk Multiplier: {risk_multiplier}x (LARGER POSITION SIZES)")
     logger.info("  • Enhanced risk/reward with larger position sizes")
     

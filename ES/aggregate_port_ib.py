@@ -31,7 +31,7 @@ risk_multiplier = 3.0              # 3x larger positions for higher risk/reward
 
 # Date ranges for combined backtest
 # Original backtest period (local data)
-original_start_date = '2020-01-01'
+original_start_date = '2024-03-01'
 original_end_date = '2025-06-13'
 
 # IBKR data period (continuation)
