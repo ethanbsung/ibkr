@@ -19,10 +19,14 @@ logger = logging.getLogger()
 data_file = "Data/mes_daily_data.csv"  # File should include: Time, High, Low, Last, Volume (if available)
 
 # Backtest parameters
-initial_capital = 10000.0         # starting account balance in dollars
+initial_capital = 30000.0         # starting account balance in dollars
 commission_per_order = 1.24       # commission per order (per contract)
-num_contracts = 1                 # number of contracts to trade
-multiplier = 5                 # each point move is worth $5 per contract
+multiplier = 5                    # each point move is worth $5 per contract
+
+# Dynamic position sizing parameters (matching aggregate_port.py)
+risk_multiplier = 3.0             # 3x larger positions for higher risk/reward
+target_allocation_pct = 1.0       # 100% allocation for Williams strategy
+min_contracts = 1                 # minimum number of contracts
 
 # Custom start and end date (format: 'YYYY-MM-DD')
 start_date = '2000-01-01'
@@ -32,6 +36,36 @@ end_date   = '2025-03-12'
 williams_period = 2  # 2-day lookback
 buy_threshold = -90
 sell_threshold = -30
+
+# -------------------------------
+# Dynamic Position Sizing Function
+# -------------------------------
+def calculate_position_size(current_equity, target_allocation_pct, price, multiplier, min_contracts=1):
+    """
+    Calculate number of contracts based on current equity and target allocation with enhanced risk.
+    
+    Args:
+        current_equity: Current account equity
+        target_allocation_pct: Target percentage allocation (0.0 to 1.0)
+        price: Current price of the instrument
+        multiplier: Contract multiplier
+        min_contracts: Minimum number of contracts (default 1)
+    
+    Returns:
+        Number of contracts to trade
+    """
+    target_dollar_amount = current_equity * target_allocation_pct * risk_multiplier
+    contract_value = price * multiplier
+    
+    if contract_value <= 0:
+        return min_contracts
+    
+    calculated_contracts = target_dollar_amount / contract_value
+    
+    # Round to nearest integer, minimum specified contracts
+    contracts = max(min_contracts, round(calculated_contracts))
+    
+    return int(contracts)
 
 # -------------------------------
 # Data Preparation
@@ -92,9 +126,10 @@ for i in range(len(data)):
             if (current_price > yesterdays_high) or (current_wr > sell_threshold):
                 # Exit
                 exit_price = current_price
-                profit = (exit_price - position['entry_price']) * multiplier * num_contracts
+                exit_contracts = position['contracts']  # Use stored contract count
+                profit = (exit_price - position['entry_price']) * multiplier * exit_contracts
                 # Subtract commission on exit
-                profit -= commission_per_order * num_contracts
+                profit -= commission_per_order * exit_contracts
 
                 trade_results.append({
                     'entry_time': position['entry_time'],
@@ -102,9 +137,9 @@ for i in range(len(data)):
                     'entry_price': position['entry_price'],
                     'exit_price': exit_price,
                     'profit': profit,
-                    'contracts': num_contracts
+                    'contracts': exit_contracts
                 })
-                logger.info(f"SELL signal at {current_time} | Exit Price: {exit_price:.2f} | Profit: {profit:.2f}")
+                logger.info(f"SELL signal at {current_time} | Exit Price: {exit_price:.2f} | Contracts: {exit_contracts} | Profit: {profit:.2f}")
                 capital += profit
                 in_position = False
                 position = None
@@ -112,6 +147,16 @@ for i in range(len(data)):
         # Buy condition: Williams %R < -90
         if current_wr < buy_threshold:
             entry_price = current_price
+            
+            # Calculate dynamic position size based on current equity
+            num_contracts = calculate_position_size(
+                capital, 
+                target_allocation_pct, 
+                current_price, 
+                multiplier, 
+                min_contracts
+            )
+            
             in_position = True
             # Subtract commission on entry
             capital -= commission_per_order * num_contracts
@@ -120,12 +165,17 @@ for i in range(len(data)):
                 'entry_time': current_time,
                 'contracts': num_contracts
             }
-            logger.info(f"BUY signal at {current_time} | Entry Price: {entry_price:.2f} | Contracts: {num_contracts}")
+            
+            # Enhanced logging for position sizing
+            target_dollar = capital * target_allocation_pct * risk_multiplier
+            logger.info(f"BUY signal at {current_time} | Entry Price: {entry_price:.2f}")
+            logger.info(f"Dynamic sizing: {target_allocation_pct*100:.0f}% * {risk_multiplier}x = ${target_dollar:,.0f} target")
+            logger.info(f"Contracts: {num_contracts}")
     
     # Mark-to-market equity calculation
     if in_position:
         # For a long position, unrealized PnL = (current price - entry price) * multiplier * number of contracts.
-        unrealized = (current_price - position['entry_price']) * multiplier * num_contracts
+        unrealized = (current_price - position['entry_price']) * multiplier * position['contracts']
         equity = capital + unrealized
     else:
         equity = capital
@@ -137,9 +187,10 @@ if in_position:
     current_time = row['Time']
     current_price = row['Last']
     exit_price = current_price
-    profit = (exit_price - position['entry_price']) * multiplier * num_contracts
+    final_contracts = position['contracts']  # Use stored contract count
+    profit = (exit_price - position['entry_price']) * multiplier * final_contracts
     # Subtract commission on exit
-    profit -= commission_per_order * num_contracts
+    profit -= commission_per_order * final_contracts
 
     trade_results.append({
         'entry_time': position['entry_time'],
@@ -147,9 +198,9 @@ if in_position:
         'entry_price': position['entry_price'],
         'exit_price': exit_price,
         'profit': profit,
-        'contracts': num_contracts
+        'contracts': final_contracts
     })
-    logger.info(f"Closing open position at end {current_time} | Exit Price: {exit_price:.2f} | Profit: {profit:.2f}")
+    logger.info(f"Closing open position at end {current_time} | Exit Price: {exit_price:.2f} | Contracts: {final_contracts} | Profit: {profit:.2f}")
     capital += profit
     equity = capital
     in_position = False
@@ -204,6 +255,8 @@ calmar_ratio = (annualized_return_percentage / abs(max_drawdown_percentage)
 results = {
     "Start Date": start_date,
     "End Date": end_date,
+    "Risk Multiplier": f"{risk_multiplier}x",
+    "Target Allocation": f"{target_allocation_pct*100:.0f}%",
     "Final Account Balance": f"${final_account_balance:,.2f}",
     "Total Return": f"{total_return_percentage:.2f}%",
     "Annualized Return": f"{annualized_return_percentage:.2f}%",
@@ -225,21 +278,40 @@ results = {
     "Average Loss ($)": f"${avg_loss:,.2f}",
 }
 
-print("\nPerformance Summary:")
+print("\n" + "="*80)
+print("ENHANCED RISK WILLIAMS %R STRATEGY PERFORMANCE")
+print("="*80)
+
+print(f"\n📊 STRATEGY OVERVIEW")
+print("-" * 60)
+print(f"Williams %R Strategy with Enhanced Risk:")
+print(f"  • Risk Multiplier: {risk_multiplier}x (LARGER POSITION SIZES)")
+print(f"  • Target Allocation: {target_allocation_pct*100:.0f}%")
+print(f"  • Dynamic position sizing scales with account equity")
+print(f"  • Enhanced risk/reward with larger position sizes")
+
+print(f"\n📈 PERFORMANCE SUMMARY")
+print("-" * 60)
 for key, value in results.items():
     print(f"{key:30}: {value:>15}")
 
 # -------------------------------
 # Plot Equity Curve
 # -------------------------------
-plt.figure(figsize=(14, 7))
-plt.plot(equity_df.index, equity_df['Equity'], label='Strategy Equity')
+plt.figure(figsize=(14, 8))
+plt.plot(equity_df.index, equity_df['Equity'], label='Enhanced Risk Williams %R Strategy', color='steelblue', linewidth=2)
 # Optionally plot benchmark
 # plt.plot(benchmark_equity.index, benchmark_equity, label='Benchmark (Buy & Hold)', alpha=0.7)
-plt.title('Equity Curve: Williams %R Strategy')
+plt.title(f'Enhanced Risk Williams %R Strategy Performance ({risk_multiplier}x Risk Multiplier)\nDynamic Position Sizing with {target_allocation_pct*100:.0f}% Allocation')
 plt.xlabel('Time')
 plt.ylabel('Account Balance ($)')
+
+# Format y-axis to show dollar amounts clearly
+ax = plt.gca()
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+
+# Add horizontal grid lines at key dollar amounts
+plt.grid(True, alpha=0.3)
 plt.legend()
-plt.grid(True)
 plt.tight_layout()
 plt.show()

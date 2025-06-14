@@ -17,8 +17,11 @@ logger = logging.getLogger()
 initial_capital = 30000.0         # total capital ($30,000)
 commission_per_order = 1.24       # commission per order (per contract)
 
+# Risk multiplier for larger position sizes
+risk_multiplier = 3.0              # 3x larger positions for higher risk/reward
+
 # Date range for all strategies
-start_date = '2000-01-01'
+start_date = '2020-01-01'
 end_date   = '2025-03-12'
 
 # -------------------------------
@@ -76,7 +79,7 @@ williams_contracts = 1          # Williams trades ES with 1 contract (multiplier
 # -------------------------------
 # Dynamic Position Sizing Functions
 # -------------------------------
-def calculate_position_size(current_equity, target_allocation_pct, price, multiplier, min_contracts=2):
+def calculate_position_size(current_equity, target_allocation_pct, price, multiplier, min_contracts=1):
     """
     Calculate number of contracts based on current equity and target allocation.
     
@@ -85,12 +88,12 @@ def calculate_position_size(current_equity, target_allocation_pct, price, multip
         target_allocation_pct: Target percentage allocation (0.0 to 1.0)
         price: Current price of the instrument
         multiplier: Contract multiplier
-        min_contracts: Minimum number of contracts (default 2)
+        min_contracts: Minimum number of contracts (default 1)
     
     Returns:
         Number of contracts to trade
     """
-    target_dollar_amount = current_equity * target_allocation_pct
+    target_dollar_amount = current_equity * target_allocation_pct * risk_multiplier
     contract_value = price * multiplier
     
     if contract_value <= 0:
@@ -462,14 +465,16 @@ print("="*80)
 
 print(f"\n📊 ALLOCATION STRATEGY OVERVIEW")
 print("-" * 60)
-print("Using Dynamic Percentage-Based Capital Allocation:")
+print("Using Dynamic Percentage-Based Capital Allocation with Enhanced Risk:")
 for strategy, pct in allocation_percentages.items():
     print(f"  • {strategy}: {pct*100:.0f}%")
+print(f"  • Risk Multiplier: {risk_multiplier}x (LARGER POSITION SIZES)")
 print(f"  • Rebalancing Threshold: {rebalance_threshold*100:.0f}% drift")
 print(f"  • Rebalancing Frequency: Every {rebalance_frequency_days} days")
 print("\nKey Benefits:")
 print("  • Position sizes scale with account equity")
-print("  • Maintains consistent risk profile as capital grows")
+print("  • Enhanced risk/reward with larger position sizes")
+print("  • Maintains dynamic allocation structure")
 print("  • No fixed dollar amounts - pure percentage allocation")
 print("  • Enables compound growth across all strategies")
 
@@ -490,15 +495,36 @@ total_final = sum(backtest_results[strategy]['final_capital'] for strategy in al
 total_growth = total_final / initial_capital
 print(f"{'TOTAL':15}: ${total_final:>10,.0f} ({total_growth:>6.2f}x growth)")
 
+print(f"\n🔍 PERFORMANCE VALIDATION")
+print("-" * 60)
+print(f"Initial Capital: ${initial_capital:,.0f}")
+print(f"Risk Multiplier: {risk_multiplier}x")
+print(f"Time Period: {years:.1f} years")
+print(f"Compound Annual Growth Rate: {annualized_return_percentage:.2f}%")
+print(f"Expected vs Actual Final Balance:")
+print(f"  • Reported Final Balance: ${final_account_balance:,.0f}")
+print(f"  • Sum of Strategy Capitals: ${total_final:,.0f}")
+print(f"  • Difference: ${abs(final_account_balance - total_final):,.0f}")
+if abs(final_account_balance - total_final) > 1000:
+    print("  ⚠️  WARNING: Significant discrepancy detected!")
+else:
+    print("  ✅ Balance validation passed")
+
 # -------------------------------
 # Plot the Combined Equity Curve
 # -------------------------------
-plt.figure(figsize=(14, 7))
-plt.plot(combined_equity_df.index, combined_equity_df['Equity'], label='Dynamic Allocation Portfolio', color='steelblue', linewidth=2)
-plt.title('Dynamic Allocation Portfolio Performance\nPercentage-Based Allocation: IBS (10% each: ES, YM, GC, NQ, ZQ) + Williams (50%)')
+plt.figure(figsize=(14, 8))
+plt.plot(combined_equity_df.index, combined_equity_df['Equity'], label='Enhanced Risk Dynamic Allocation Portfolio', color='steelblue', linewidth=2)
+plt.title(f'Enhanced Risk Dynamic Allocation Portfolio Performance ({risk_multiplier}x Risk Multiplier)\nPercentage-Based Allocation: IBS (10% each: ES, YM, GC, NQ, ZQ) + Williams (50%)')
 plt.xlabel('Time')
 plt.ylabel('Account Balance ($)')
+
+# Format y-axis to show dollar amounts clearly
+ax = plt.gca()
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+
+# Add horizontal grid lines at key dollar amounts
+plt.grid(True, alpha=0.3)
 plt.legend()
-plt.grid(True)
 plt.tight_layout()
 plt.show()

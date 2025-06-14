@@ -9,6 +9,8 @@ import os
 import time
 from datetime import datetime, timedelta
 import pytz
+from collections import defaultdict
+from uuid import uuid4
 
 # -------------------------------
 # Configuration Parameters
@@ -21,6 +23,9 @@ CLIENT_ID = 1
 # Dynamic Allocation Parameters (matching aggregate_port.py exactly)
 # -------------------------------
 # Note: Commissions are automatically handled by IBKR in live trading
+
+# Risk multiplier for larger position sizes (matching enhanced backtest)
+risk_multiplier = 3.0              # 3x larger positions for higher risk/reward
 
 # Target percentage allocations (must sum to 100%)
 allocation_percentages = {
@@ -57,21 +62,21 @@ wr_sell_threshold = -30
 # -------------------------------
 # Dynamic Position Sizing Functions (matching aggregate_port.py exactly)
 # -------------------------------
-def calculate_position_size(current_equity, target_allocation_pct, price, multiplier, min_contracts=2):
+def calculate_position_size(current_equity, target_allocation_pct, price, multiplier, min_contracts=1):
     """
-    Calculate number of contracts based on current equity and target allocation.
+    Calculate number of contracts based on current equity and target allocation with enhanced risk.
     
     Args:
         current_equity: Current account equity
         target_allocation_pct: Target percentage allocation (0.0 to 1.0)
         price: Current price of the instrument
         multiplier: Contract multiplier
-        min_contracts: Minimum number of contracts (default 2)
+        min_contracts: Minimum number of contracts (default 1)
     
     Returns:
         Number of contracts to trade
     """
-    target_dollar_amount = current_equity * target_allocation_pct
+    target_dollar_amount = current_equity * target_allocation_pct * risk_multiplier
     contract_value = price * multiplier
     
     if contract_value <= 0:
@@ -562,6 +567,80 @@ def get_next_market_close(timezone='US/Eastern'):
     
     return target_time
 
+
+# ============================================================
+# Symbol‑level position router (used where multiple strategies
+# trade the same contract – e.g. IBS_ES and Williams on MES)
+# ============================================================
+ROUTER_STATE_FILE = 'router_state.json'
+
+
+class PositionRouter:
+    """
+    Maintains virtual lots per strategy for a single contract and nets those
+    into one real IBKR order each time `sync()` is called.
+    """
+    def __init__(self, ib, contract, symbol='ES'):
+        self.ib = ib
+        self.contract = contract
+        self.symbol = symbol
+        self.strategy_lots = self._load_state()
+
+    # ---------- persistence ----------
+    def _load_state(self):
+        if os.path.exists(ROUTER_STATE_FILE):
+            try:
+                with open(ROUTER_STATE_FILE, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        # default – no virtual positions yet
+        return defaultdict(int)
+
+    def _save_state(self):
+        with open(ROUTER_STATE_FILE, 'w') as f:
+            json.dump(self.strategy_lots, f, indent=2)
+
+    # ---------- live position ----------
+    def _live_position(self):
+        for p in self.ib.positions():
+            if p.contract.conId == self.contract.conId:
+                return int(p.position)
+        return 0
+
+    # ---------- public ----------
+    def sync(self, desired_dict):
+        """
+        desired_dict: {'IBS_ES': +2, 'Williams': 0, ...}
+        Places ONE order to move from current net to desired net.
+        """
+        live_total = self._live_position()
+        desired_total = sum(desired_dict.values())
+        net_change = desired_total - live_total
+
+        # no trade needed
+        if net_change == 0:
+            self.strategy_lots.update(desired_dict)
+            self._save_state()
+            return
+
+        action = 'BUY' if net_change > 0 else 'SELL'
+        qty = abs(net_change)
+
+        # use existing helper with MOC→LMT fallback
+        trade = place_order_with_fallback(
+            self.ib,
+            self.contract,
+            action,
+            qty,
+            self.symbol
+        )
+
+        # optimistic virtual‑lot update (we rely on nightly reconciliation)
+        if trade is not None:
+            self.strategy_lots.update(desired_dict)
+            self._save_state()
+
 def wait_until_next_close(timezone='US/Eastern', lead_seconds=10):
     """Wait until the next 5 PM Eastern market close minus lead_seconds."""
     tz = pytz.timezone(timezone)
@@ -612,6 +691,10 @@ def run_daily_signals(ib):
         return
     
     logger.info("All contracts qualified successfully")
+
+    # ---------- router for ES (shared by IBS_ES & Williams) ----------
+    es_router = PositionRouter(ib, contracts['ES'])
+    desired_es = {}  # will hold target lots per ES‑strategy
     
     # Get current account equity
     current_equity = get_account_equity(ib)
@@ -667,154 +750,160 @@ def run_daily_signals(ib):
         strategy_key = f'IBS_{symbol}'
         contract = contracts[symbol]
         multiplier = contract_specs[symbol]['multiplier']
-        
+
         logger.info(f"\nProcessing {strategy_key}...")
-        
+
         # Get recent bars for IBS calculation
         bars = get_daily_bar(ib, contract, end_datetime_str)
         if not bars:
             logger.warning(f"No bars available for {symbol}")
             continue
-        
+
         # Use most recent bar
         current_bar = bars[-1]
         current_price = current_bar.close
-        
+
         # Calculate IBS with safety check (matching aggregate_port.py exactly)
         ibs = compute_ibs(current_bar)
-        
+
         logger.info(f"{symbol} - Price: {current_price}, High: {current_bar.high}, Low: {current_bar.low}, IBS: {ibs:.3f}")
-        
+
         # Calculate position size based on current equity and allocation
         target_contracts = calculate_position_size(
-            current_equity, 
-            allocation_percentages[strategy_key], 
-            current_price, 
+            current_equity,
+            allocation_percentages[strategy_key],
+            current_price,
             multiplier
         )
-        
+
+        # Enhanced logging for position sizing
+        allocation_pct = allocation_percentages[strategy_key]
+        target_dollar = current_equity * allocation_pct * risk_multiplier
+        logger.info(f"{symbol} - Allocation: {allocation_pct*100:.0f}% * {risk_multiplier}x = ${target_dollar:,.0f} target")
         logger.info(f"{symbol} - Target contracts: {target_contracts}")
-        
+
         # Get current position state
         strategy_state = state['positions'][strategy_key]
-        
+
         # Execute IBS trading logic (matching aggregate_port.py exactly)
-        if strategy_state['in_position']:
-            if ibs > ibs_exit_threshold:
-                # Exit position
-                logger.info(f"{symbol} - IBS exit signal (IBS: {ibs:.3f} > {ibs_exit_threshold})")
-                current_contracts = strategy_state['position']['contracts']
-                
-                trade = place_order_with_fallback(ib, contract, 'SELL', current_contracts, symbol)
-                
-                if trade is not None:
-                    # Update state only if order was placed successfully (not dry run)
-                    strategy_state['in_position'] = False
-                    strategy_state['position'] = None
-                    logger.info(f"{symbol} - Position state updated: EXIT")
-                else:
-                    logger.info(f"{symbol} - Order not placed (dry run mode), position state unchanged")
+        if symbol == 'ES':
+            # ----- router‑only logic (no direct orders here) -----
+            if strategy_state['in_position']:
+                desired_qty = 0 if ibs > ibs_exit_threshold else strategy_state['position']['contracts']
             else:
-                logger.info(f"{symbol} - Holding position (IBS: {ibs:.3f}, exit threshold: {ibs_exit_threshold})")
+                desired_qty = target_contracts if ibs < ibs_entry_threshold else 0
+
+            desired_es[strategy_key] = desired_qty
+            continue  # skip direct execution – router will handle later
         else:
-            if ibs < ibs_entry_threshold:
-                # Enter position
-                logger.info(f"{symbol} - IBS entry signal (IBS: {ibs:.3f} < {ibs_entry_threshold})")
-                
-                trade = place_order_with_fallback(ib, contract, 'BUY', target_contracts, symbol)
-                
-                if trade is not None:
-                    # Update state only if order was placed successfully (not dry run)
-                    strategy_state['in_position'] = True
-                    strategy_state['position'] = {
-                        'entry_price': current_price,
-                        'entry_time': current_dt.isoformat(),
-                        'contracts': target_contracts
-                    }
-                    logger.info(f"{symbol} - Position state updated: ENTRY")
+            if strategy_state['in_position']:
+                if ibs > ibs_exit_threshold:
+                    # Exit position
+                    logger.info(f"{symbol} - IBS exit signal (IBS: {ibs:.3f} > {ibs_exit_threshold})")
+                    current_contracts = strategy_state['position']['contracts']
+
+                    trade = place_order_with_fallback(ib, contract, 'SELL', current_contracts, symbol)
+
+                    if trade is not None:
+                        # Update state only if order was placed successfully (not dry run)
+                        strategy_state['in_position'] = False
+                        strategy_state['position'] = None
+                        logger.info(f"{symbol} - Position state updated: EXIT")
+                    else:
+                        logger.info(f"{symbol} - Order not placed (dry run mode), position state unchanged")
                 else:
-                    logger.info(f"{symbol} - Order not placed (dry run mode), position state unchanged")
+                    logger.info(f"{symbol} - Holding position (IBS: {ibs:.3f}, exit threshold: {ibs_exit_threshold})")
             else:
-                logger.info(f"{symbol} - No entry signal (IBS: {ibs:.3f}, entry threshold: {ibs_entry_threshold})")
+                if ibs < ibs_entry_threshold:
+                    # Enter position
+                    logger.info(f"{symbol} - IBS entry signal (IBS: {ibs:.3f} < {ibs_entry_threshold})")
+
+                    trade = place_order_with_fallback(ib, contract, 'BUY', target_contracts, symbol)
+
+                    if trade is not None:
+                        # Update state only if order was placed successfully (not dry run)
+                        strategy_state['in_position'] = True
+                        strategy_state['position'] = {
+                            'entry_price': current_price,
+                            'entry_time': current_dt.isoformat(),
+                            'contracts': target_contracts
+                        }
+                        logger.info(f"{symbol} - Position state updated: ENTRY")
+                    else:
+                        logger.info(f"{symbol} - Order not placed (dry run mode), position state unchanged")
+                else:
+                    logger.info(f"{symbol} - No entry signal (IBS: {ibs:.3f}, entry threshold: {ibs_entry_threshold})")
     
     # Process Williams %R strategy (ES only, matching aggregate_port.py logic exactly)
     logger.info(f"\nProcessing Williams strategy...")
-    
+
     es_contract = contracts['ES']
     es_bars = get_williams_bars(ib, es_contract, end_datetime_str)
-    
+
     logger.info(f"Williams - Retrieved {len(es_bars)} bars, need {williams_period}")
     if len(es_bars) > 0:
-        logger.info(f"Williams - Recent bars: {[f'{bar.date}' for bar in es_bars[-min(3, len(es_bars)):]]}") 
-    
+        logger.info(f"Williams - Recent bars: {[f'{bar.date}' for bar in es_bars[-min(3, len(es_bars)):]]}")
+
     if len(es_bars) >= williams_period:
         current_bar = es_bars[-1]
         current_price = current_bar.close
-        
+
         # Calculate Williams %R with safety check (matching aggregate_port.py exactly)
         williams_r = compute_williams_r(es_bars)
-        
+
         logger.info(f"ES Williams - Price: {current_price}, Williams %R: {williams_r:.2f}")
-        
+
         # Calculate position size
         target_contracts = calculate_position_size(
-            current_equity, 
-            allocation_percentages['Williams'], 
-            current_price, 
+            current_equity,
+            allocation_percentages['Williams'],
+            current_price,
             contract_specs['ES']['multiplier']
         )
-        
+
+        # Enhanced logging for position sizing
+        allocation_pct = allocation_percentages['Williams']
+        target_dollar = current_equity * allocation_pct * risk_multiplier
+        logger.info(f"Williams - Allocation: {allocation_pct*100:.0f}% * {risk_multiplier}x = ${target_dollar:,.0f} target")
         logger.info(f"Williams - Target contracts: {target_contracts}")
-        
+
         # Get current position state
         williams_state = state['positions']['Williams']
-        
-        # Execute Williams trading logic (matching aggregate_port.py exactly)
+
+        # ----- router‑only logic for ES Williams -----
         if williams_state['in_position']:
-            # Check exit conditions: current_price > yesterday's high OR williams_r > sell_threshold
             exit_signal = False
-            if len(es_bars) >= 2:
-                yesterdays_high = es_bars[-2].high
-                if current_price > yesterdays_high:
-                    logger.info(f"Williams exit signal - Price {current_price} > Yesterday's high {yesterdays_high}")
-                    exit_signal = True
-            
-            if williams_r > wr_sell_threshold:
-                logger.info(f"Williams exit signal - Williams %R {williams_r:.2f} > {wr_sell_threshold}")
+            if len(es_bars) >= 2 and current_price > es_bars[-2].high:
                 exit_signal = True
-            
-            if exit_signal:
-                current_contracts = williams_state['position']['contracts']
-                
-                trade = place_order_with_fallback(ib, es_contract, 'SELL', current_contracts, 'ES')
-                
-                if trade is not None:
-                    # Update state only if order was placed successfully (not dry run)
-                    williams_state['in_position'] = False
-                    williams_state['position'] = None
-                    logger.info(f"Williams - Position state updated: EXIT")
-                else:
-                    logger.info(f"Williams - Order not placed (dry run mode), position state unchanged")
+            if williams_r > wr_sell_threshold:
+                exit_signal = True
+            desired_qty = 0 if exit_signal else williams_state['position']['contracts']
         else:
-            if williams_r < wr_buy_threshold:
-                # Enter position
-                logger.info(f"Williams entry signal - Williams %R {williams_r:.2f} < {wr_buy_threshold}")
-                
-                trade = place_order_with_fallback(ib, es_contract, 'BUY', target_contracts, 'ES')
-                
-                if trade is not None:
-                    # Update state only if order was placed successfully (not dry run)
-                    williams_state['in_position'] = True
-                    williams_state['position'] = {
-                        'entry_price': current_price,
-                        'entry_time': current_dt.isoformat(),
-                        'contracts': target_contracts
-                    }
-                    logger.info(f"Williams - Position state updated: ENTRY")
-                else:
-                    logger.info(f"Williams - Order not placed (dry run mode), position state unchanged")
+            desired_qty = target_contracts if williams_r < wr_buy_threshold else 0
+
+        desired_es['Williams'] = desired_qty
     else:
         logger.warning("Insufficient Williams data - need at least 2 bars")
+
+    # ---------- execute net ES order ----------
+    es_router.sync(desired_es)
+
+    # reflect router outcome in local state (simplified – optimistic)
+    for strat, lots in es_router.strategy_lots.items():
+        st = state['positions'][strat]
+        if lots == 0:
+            st['in_position'] = False
+            st['position'] = None
+        else:
+            st['in_position'] = True
+            if st['position'] is None:
+                st['position'] = {
+                    'entry_price': current_price,
+                    'entry_time': current_dt.isoformat(),
+                    'contracts': lots
+                }
+            else:
+                st['position']['contracts'] = lots
     
     # Save updated state
     save_portfolio_state(state)
@@ -837,9 +926,11 @@ def print_portfolio_summary(ib):
     state = load_portfolio_state()
     
     logger.info("=== PORTFOLIO SUMMARY ===")
-    logger.info("Dynamic Percentage-Based Allocation:")
+    logger.info("Dynamic Percentage-Based Allocation with Enhanced Risk:")
     for strategy, pct in allocation_percentages.items():
         logger.info(f"  • {strategy}: {pct*100:.0f}%")
+    logger.info(f"  • Risk Multiplier: {risk_multiplier}x (LARGER POSITION SIZES)")
+    logger.info("  • Enhanced risk/reward with larger position sizes")
     
     # Get current equity from IBKR if not available in state
     current_equity = state['current_equity']
