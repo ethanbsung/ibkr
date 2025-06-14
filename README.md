@@ -2,6 +2,12 @@
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![Interactive Brokers](https://img.shields.io/badge/Broker-Interactive%20Brokers-green.svg)](https://www.interactivebrokers.com/)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+![Account Value](https://img.shields.io/badge/Account-%2432%2C555-blue)
+![P&L](https://img.shields.io/badge/P&L-%242%2C385-brightgreen)
+![Status](https://img.shields.io/badge/Trading-LIVE-brightgreen)
+![Last Updated](https://img.shields.io/badge/Updated-2025-06-14-lightgrey)
 
 A comprehensive algorithmic trading system implementing systematic trading strategies with real-time execution, extensive backtesting, and Monte Carlo simulation capabilities. This project demonstrates enterprise-level quantitative finance software engineering practices.
 
@@ -28,7 +34,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Live Trading Performance
 
-> **Last Updated:** 2025-06-14 14:40 UTC | **Trading Days:** 1
+> **Last Updated:** 2025-06-14 14:47 UTC | **Trading Days:** 1
 
 ### Current Account Status
 | Metric | Value |

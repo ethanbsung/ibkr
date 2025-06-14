@@ -5,6 +5,7 @@ Script to update README.md with live trading metrics from account snapshots
 import json
 import os
 import re
+import urllib.parse
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -88,6 +89,38 @@ def format_percentage(value: float) -> str:
     else:
         return f"{value:.2f}%"
 
+def generate_dynamic_badges(metrics: Dict) -> str:
+    """Generate dynamic badges for README header"""
+    
+    # Format values for badges (URL encoding)
+    account_value = f"${metrics['account_value']:,.0f}"
+    total_pnl = metrics['total_pnl']
+    
+    # Determine colors based on P&L
+    pnl_color = "brightgreen" if total_pnl >= 0 else "red"
+    pnl_value = f"${abs(total_pnl):,.0f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.0f}"
+    
+    # Calculate return percentage if available
+    return_badge = ""
+    if metrics['total_pnl_pct'] != 0:
+        return_pct = metrics['total_pnl_pct']
+        return_color = "brightgreen" if return_pct >= 0 else "red"
+        return_value = f"+{return_pct:.1f}%" if return_pct >= 0 else f"{return_pct:.1f}%"
+        return_badge = f"![Return](https://img.shields.io/badge/Return-{urllib.parse.quote(return_value)}-{return_color})\n"
+    
+    # Generate trading status badge
+    status_color = "brightgreen" if total_pnl >= 0 else "yellow"
+    status_text = "LIVE" if metrics['trading_days'] > 0 else "PAPER"
+    
+    badges = f"""[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+![Account Value](https://img.shields.io/badge/Account-{urllib.parse.quote(account_value)}-blue)
+![P&L](https://img.shields.io/badge/P&L-{urllib.parse.quote(pnl_value)}-{pnl_color})
+{return_badge}![Status](https://img.shields.io/badge/Trading-{status_text}-{status_color})
+![Last Updated](https://img.shields.io/badge/Updated-{urllib.parse.quote(metrics['last_updated'].split()[0])}-lightgrey)"""
+    
+    return badges
+
 def generate_metrics_section(metrics: Dict) -> str:
     """Generate the live metrics section for README"""
     
@@ -127,28 +160,45 @@ def generate_metrics_section(metrics: Dict) -> str:
     
     return section
 
-def update_readme_with_metrics(metrics_section: str) -> bool:
-    """Update README.md with the new metrics section"""
+def update_readme_with_metrics(metrics_section: str, badges: str) -> bool:
+    """Update README.md with the new metrics section and dynamic badges"""
     try:
         with open('README.md', 'r') as f:
             content = f.read()
         
-        # Pattern to match the existing live metrics section
+        # Replace all badges (static + dynamic) in one go
+        # Pattern to match from Python badge to end of badges
+        badge_section_pattern = r'([![]Python[^\n]*\n[![]Interactive Brokers[^\n]*\n)([![]License[^\n]*\n\n(!\[[^\]]+\][^\n]*\n)*)?'
+        
+        if re.search(badge_section_pattern, content, re.DOTALL):
+            # Replace the entire badge section
+            badge_replacement = r'\1' + badges + r'\n'
+            content = re.sub(badge_section_pattern, badge_replacement, content, flags=re.DOTALL)
+        else:
+            # Fallback: just add after Interactive Brokers badge
+            ib_pattern = r'([![]Interactive Brokers[^\n]*\n)'
+            if re.search(ib_pattern, content):
+                badge_replacement = r'\1' + badges + r'\n'
+                content = re.sub(ib_pattern, badge_replacement, content)
+        
+        # Update live metrics section
         pattern = r'## 📊 Live Trading Performance.*?(?=##|\Z)'
         
         if re.search(pattern, content, re.DOTALL):
             # Replace existing section
-            new_content = re.sub(pattern, metrics_section.strip(), content, flags=re.DOTALL)
+            content = re.sub(pattern, metrics_section.strip(), content, flags=re.DOTALL)
         else:
             # Add new section after the Key Features section
             insert_pattern = r'(## 🚀 Key Features.*?)(\n## 📊 Trading Strategies)'
             replacement = r'\1\n' + metrics_section.strip() + r'\2'
-            new_content = re.sub(insert_pattern, replacement, content, flags=re.DOTALL)
+            content = re.sub(insert_pattern, replacement, content, flags=re.DOTALL)
+        
+        new_content = content
         
         with open('README.md', 'w') as f:
             f.write(new_content)
         
-        print("README.md updated successfully with live trading metrics")
+        print("README.md updated successfully with live trading metrics and dynamic badges")
         return True
         
     except Exception as e:
@@ -157,7 +207,7 @@ def update_readme_with_metrics(metrics_section: str) -> bool:
 
 def main():
     """Main function to update README with trading metrics"""
-    print("Updating README with live trading metrics...")
+    print("Updating README with live trading metrics and dynamic badges...")
     
     # Load trading metrics
     metrics = load_trading_metrics()
@@ -165,14 +215,17 @@ def main():
         print("No trading metrics available")
         return
     
+    # Generate dynamic badges
+    badges = generate_dynamic_badges(metrics)
+    
     # Generate metrics section
     metrics_section = generate_metrics_section(metrics)
     
     # Update README
-    success = update_readme_with_metrics(metrics_section)
+    success = update_readme_with_metrics(metrics_section, badges)
     
     if success:
-        print("✅ README updated successfully")
+        print("✅ README updated successfully with dynamic badges")
     else:
         print("❌ Failed to update README")
 
