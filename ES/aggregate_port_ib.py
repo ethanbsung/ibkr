@@ -26,10 +26,13 @@ CLIENT_ID = 3   # Unique client ID
 initial_capital = 30000.0         # total capital ($30,000)
 commission_per_order = 1.24       # commission per order (per contract)
 
+# Risk multiplier for larger position sizes
+risk_multiplier = 3.0              # 3x larger positions for higher risk/reward
+
 # Date ranges for combined backtest
 # Original backtest period (local data)
-original_start_date = '2000-01-01'
-original_end_date = '2025-03-12'
+original_start_date = '2020-01-01'
+original_end_date = '2025-06-13'
 
 # IBKR data period (continuation)
 ibkr_start_date = '2025-03-12'  # Start from March 12, 2025
@@ -90,7 +93,7 @@ williams_contracts = 1          # Williams trades ES with 1 contract (multiplier
 # -------------------------------
 # Dynamic Position Sizing Functions
 # -------------------------------
-def calculate_position_size(current_equity, target_allocation_pct, price, multiplier, min_contracts=2):
+def calculate_position_size(current_equity, target_allocation_pct, price, multiplier, min_contracts=1):
     """
     Calculate number of contracts based on current equity and target allocation.
     
@@ -104,7 +107,7 @@ def calculate_position_size(current_equity, target_allocation_pct, price, multip
     Returns:
         Number of contracts to trade
     """
-    target_dollar_amount = current_equity * target_allocation_pct
+    target_dollar_amount = current_equity * target_allocation_pct * risk_multiplier
     contract_value = price * multiplier
     
     if contract_value <= 0:
@@ -112,7 +115,7 @@ def calculate_position_size(current_equity, target_allocation_pct, price, multip
     
     calculated_contracts = target_dollar_amount / contract_value
     
-    # Round to nearest integer, minimum 1 contract
+    # Round to nearest integer, minimum specified contracts
     contracts = max(min_contracts, round(calculated_contracts))
     
     return int(contracts)
@@ -282,8 +285,12 @@ def run_original_backtest():
             current_date = row['Time']
             current_price = row['Last']
             
-            # Calculate IBS
-            ibs = (row['Last'] - row['Low']) / (row['High'] - row['Low'])
+            # Calculate IBS with safety check for zero range
+            range_val = row['High'] - row['Low']
+            if range_val == 0:
+                ibs = 0.5  # Neutral IBS when no range
+            else:
+                ibs = (row['Last'] - row['Low']) / range_val
             
             multiplier = contract_specs[symbol]['multiplier']
             strategy_data = strategy_values[strategy_key]
@@ -624,8 +631,12 @@ for day_idx in range(max_ibkr_rows):
         current_date = row['Time']
         current_price = row['Last']
         
-        # Calculate IBS
-        ibs = (row['Last'] - row['Low']) / (row['High'] - row['Low'])
+        # Calculate IBS with safety check for zero range
+        range_val = row['High'] - row['Low']
+        if range_val == 0:
+            ibs = 0.5  # Neutral IBS when no range
+        else:
+            ibs = (row['Last'] - row['Low']) / range_val
         
         multiplier = contract_specs[symbol]['multiplier']
         strategy_data = ibkr_strategy_values[strategy_key]
@@ -679,10 +690,14 @@ for day_idx in range(max_ibkr_rows):
             current_date = current_row['Time']
             current_price = current_row['Last']
             
-            # Calculate Williams %R
+            # Calculate Williams %R with safety check
             highest_high = es_window['High'].max()
             lowest_low = es_window['Low'].min()
-            williams_r = -100 * (highest_high - current_price) / (highest_high - lowest_low)
+            range_val = highest_high - lowest_low
+            if range_val == 0:
+                williams_r = -50  # Neutral Williams %R when no range
+            else:
+                williams_r = -100 * (highest_high - current_price) / range_val
             
             strategy_data = ibkr_strategy_values['Williams']
             
@@ -841,12 +856,15 @@ def calculate_performance_metrics(equity_df, start_date_str, end_date_str, initi
     
     start_balance = equity_df['Equity'].iloc[0]
     final_balance = equity_df['Equity'].iloc[-1]
-    total_return_pct = ((final_balance / initial_capital) - 1) * 100
+    
+    # Use the actual start balance of the period for return calculation
+    # instead of the initial_capital parameter which may be from a different period
+    total_return_pct = ((final_balance / start_balance) - 1) * 100
     
     start_dt = pd.to_datetime(start_date_str)
     end_dt = pd.to_datetime(end_date_str)
     years = (end_dt - start_dt).days / 365.25
-    annualized_return_pct = ((final_balance / initial_capital) ** (1 / years) - 1) * 100 if years > 0 else np.nan
+    annualized_return_pct = ((final_balance / start_balance) ** (1 / years) - 1) * 100 if years > 0 else np.nan
     
     returns = equity_df['Equity'].pct_change().dropna()
     volatility_annual_pct = returns.std() * np.sqrt(252) * 100 if len(returns) > 1 else np.nan
@@ -879,19 +897,25 @@ def calculate_performance_metrics(equity_df, start_date_str, end_date_str, initi
 logger.info("Calculating performance metrics for original period...")
 original_end_dt = pd.to_datetime(original_end_date)
 original_period_equity = combined_equity_df[combined_equity_df.index <= original_end_dt].copy()
+# Drop NaN values and ensure we have valid data
+original_period_equity = original_period_equity.dropna()
 original_metrics = calculate_performance_metrics(original_period_equity, original_start_date, original_end_date, initial_capital)
 
 # Calculate metrics for IBKR period
 logger.info("Calculating performance metrics for IBKR period...")
 ibkr_start_dt = pd.to_datetime(ibkr_start_date)
 ibkr_period_equity = combined_equity_df[combined_equity_df.index >= ibkr_start_dt].copy()
+# Drop NaN values and ensure we have valid data
+ibkr_period_equity = ibkr_period_equity.dropna()
 # Use the ending capital from original period as the "initial" capital for IBKR period calculation
 ibkr_initial_capital = original_metrics['final_balance']
 ibkr_metrics = calculate_performance_metrics(ibkr_period_equity, ibkr_start_date, ibkr_end_date, ibkr_initial_capital)
 
 # Calculate metrics for combined period
 logger.info("Calculating performance metrics for combined period...")
-combined_metrics = calculate_performance_metrics(combined_equity_df, full_start_date, full_end_date, initial_capital)
+# Drop NaN values and ensure we have valid data
+combined_equity_clean = combined_equity_df.dropna()
+combined_metrics = calculate_performance_metrics(combined_equity_clean, full_start_date, full_end_date, initial_capital)
 
 # -------------------------------
 # Results Output
@@ -924,14 +948,16 @@ print("="*80)
 
 print(f"\n📊 ALLOCATION STRATEGY OVERVIEW")
 print("-" * 60)
-print("Using Dynamic Percentage-Based Capital Allocation:")
+print("Using Dynamic Percentage-Based Capital Allocation with Enhanced Risk:")
 for strategy, pct in allocation_percentages.items():
     print(f"  • {strategy}: {pct*100:.0f}%")
+print(f"  • Risk Multiplier: {risk_multiplier}x (LARGER POSITION SIZES)")
 print(f"  • Rebalancing Threshold: {rebalance_threshold*100:.0f}% drift")
 print(f"  • Rebalancing Frequency: Every {rebalance_frequency_days} days")
 print("\nKey Benefits:")
 print("  • Position sizes scale with account equity")
-print("  • Maintains consistent risk profile as capital grows")
+print("  • Enhanced risk/reward with larger position sizes")
+print("  • Maintains dynamic allocation structure")
 print("  • No fixed dollar amounts - pure percentage allocation")
 print("  • Enables compound growth across all strategies")
 
@@ -1018,7 +1044,7 @@ plt.plot(ibkr_equity.index, ibkr_equity['Equity'],
 plt.axvline(x=original_end, color='gray', linestyle='--', alpha=0.7, 
            label=f'Data Transition ({original_end_date})')
 
-plt.title(f'Dynamic Allocation Portfolio ({full_start_date} to {full_end_date})\nPercentage-Based Allocation: IBS (10% each: ES, YM, GC, NQ, ZQ) + Williams (50%)')
+plt.title(f'Enhanced Risk Dynamic Allocation Portfolio ({risk_multiplier}x Risk Multiplier) ({full_start_date} to {full_end_date})\nPercentage-Based Allocation: IBS (10% each: ES, YM, GC, NQ, ZQ) + Williams (50%)')
 plt.xlabel('Date')
 plt.ylabel('Account Balance ($)')
 plt.legend()

@@ -21,7 +21,7 @@ commission_per_order = 1.24       # commission per order (per contract)
 risk_multiplier = 3.0              # 3x larger positions for higher risk/reward
 
 # Date range for all strategies
-start_date = '2020-01-01'
+start_date = '2000-01-01'
 end_date   = '2025-03-12'
 
 # -------------------------------
