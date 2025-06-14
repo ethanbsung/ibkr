@@ -9,6 +9,59 @@ import urllib.parse
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
+def load_position_data() -> List[Dict]:
+    """Load current position data from portfolio state"""
+    try:
+        # Try to load from portfolio state (from live trading system)
+        with open('portfolio_state.json', 'r') as f:
+            portfolio_state = json.load(f)
+        
+        positions = []
+        if 'positions' in portfolio_state:
+            for strategy, pos_data in portfolio_state['positions'].items():
+                if pos_data.get('in_position', False) and pos_data.get('position'):
+                    pos = pos_data['position']
+                    
+                    # Map strategy names to proper symbols
+                    symbol_map = {
+                        'IBS_ES': 'MES', 'Williams_ES': 'MES',
+                        'IBS_YM': 'MYM', 'Williams_YM': 'MYM', 
+                        'IBS_GC': 'MGC', 'Williams_GC': 'MGC',
+                        'IBS_NQ': 'MNQ', 'Williams_NQ': 'MNQ',
+                        'IBS_ZQ': 'ZQ', 'Williams_ZQ': 'ZQ'
+                    }
+                    
+                    symbol = symbol_map.get(strategy, strategy.split('_')[-1])
+                    
+                    # Format entry time
+                    entry_time = pos.get('entry_time', 'N/A')
+                    if isinstance(entry_time, str) and 'T' in entry_time:
+                        try:
+                            # Parse ISO format and get just the date
+                            from datetime import datetime
+                            dt = datetime.fromisoformat(entry_time.replace('Z', '+00:00'))
+                            entry_time = dt.strftime('%Y-%m-%d')
+                        except:
+                            entry_time = entry_time.split('T')[0]  # Fallback
+                    
+                    positions.append({
+                        'strategy': strategy,
+                        'symbol': symbol,
+                        'side': 'Long' if pos.get('contracts', 0) > 0 else 'Short',
+                        'contracts': abs(pos.get('contracts', 0)),
+                        'entry_price': pos.get('entry_price', 0),
+                        'entry_time': entry_time
+                    })
+        
+        return positions
+        
+    except FileNotFoundError:
+        print("Portfolio state file not found")
+        return []
+    except Exception as e:
+        print(f"Error loading position data: {e}")
+        return []
+
 def load_trading_metrics() -> Optional[Dict]:
     """Load the latest trading metrics from JSON file"""
     try:
@@ -34,7 +87,7 @@ def load_trading_metrics() -> Optional[Dict]:
         
         # Calculate performance over time if we have multiple snapshots
         if len(snapshots) > 1:
-            # Calculate returns from first snapshot
+            # Calculate returns from first snapshot (initial capital)
             first_snapshot = sorted(snapshots, key=lambda x: x['date'])[0]
             initial_value = first_snapshot['net_liquidation'] - first_snapshot['unrealized_pnl'] - first_snapshot['realized_pnl']
             
@@ -49,6 +102,12 @@ def load_trading_metrics() -> Optional[Dict]:
                     if period_snapshot:
                         period_return = (latest['net_liquidation'] - period_snapshot['net_liquidation']) / period_snapshot['net_liquidation'] * 100
                         metrics[f'{period_name}_return'] = period_return
+        else:
+            # If only one snapshot, try to estimate return from P&L
+            total_pnl = latest['unrealized_pnl'] + latest['realized_pnl']
+            estimated_initial = latest['net_liquidation'] - total_pnl
+            if estimated_initial > 0:
+                metrics['total_pnl_pct'] = (total_pnl / estimated_initial) * 100
         
         return metrics
         
@@ -100,9 +159,9 @@ def generate_dynamic_badges(metrics: Dict) -> str:
     pnl_color = "brightgreen" if total_pnl >= 0 else "red"
     pnl_value = f"${abs(total_pnl):,.0f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.0f}"
     
-    # Calculate return percentage if available
+    # Calculate return percentage badge - always show if we have P&L data
     return_badge = ""
-    if metrics['total_pnl_pct'] != 0:
+    if metrics.get('total_pnl_pct', 0) != 0:
         return_pct = metrics['total_pnl_pct']
         return_color = "brightgreen" if return_pct >= 0 else "red"
         return_value = f"+{return_pct:.1f}%" if return_pct >= 0 else f"{return_pct:.1f}%"
@@ -121,7 +180,7 @@ def generate_dynamic_badges(metrics: Dict) -> str:
     
     return badges
 
-def generate_metrics_section(metrics: Dict) -> str:
+def generate_metrics_section(metrics: Dict, positions: List[Dict]) -> str:
     """Generate the live metrics section for README"""
     
     pnl_emoji = "📈" if metrics['total_pnl'] >= 0 else "📉"
@@ -140,8 +199,21 @@ def generate_metrics_section(metrics: Dict) -> str:
 | **Realized P&L** | {format_currency(metrics['realized_pnl'])} |
 """
 
-    if metrics['total_pnl_pct'] != 0:
+    # Always show total return if we have it
+    if metrics.get('total_pnl_pct', 0) != 0:
         section += f"| **Total Return** | {format_percentage(metrics['total_pnl_pct'])} |\n"
+    
+    # Add current positions
+    if positions:
+        section += f"\n### Current Positions\n"
+        section += f"| Strategy | Symbol | Side | Contracts | Entry Price | Entry Date |\n"
+        section += f"|----------|--------|------|-----------|-------------|------------|\n"
+        
+        for pos in positions:
+            section += f"| **{pos['strategy']}** | {pos['symbol']} | {pos['side']} | {pos['contracts']} | ${pos['entry_price']:.2f} | {pos['entry_time']} |\n"
+    else:
+        section += f"\n### Current Positions\n"
+        section += f"*No positions currently open - waiting for entry signals*\n"
     
     # Add period returns if available
     if '1_week_return' in metrics:
@@ -207,7 +279,7 @@ def update_readme_with_metrics(metrics_section: str, badges: str) -> bool:
 
 def main():
     """Main function to update README with trading metrics"""
-    print("Updating README with live trading metrics and dynamic badges...")
+    print("Updating README with live trading metrics, positions, and dynamic badges...")
     
     # Load trading metrics
     metrics = load_trading_metrics()
@@ -215,17 +287,21 @@ def main():
         print("No trading metrics available")
         return
     
+    # Load position data
+    positions = load_position_data()
+    print(f"Loaded {len(positions)} open positions")
+    
     # Generate dynamic badges
     badges = generate_dynamic_badges(metrics)
     
     # Generate metrics section
-    metrics_section = generate_metrics_section(metrics)
+    metrics_section = generate_metrics_section(metrics, positions)
     
     # Update README
     success = update_readme_with_metrics(metrics_section, badges)
     
     if success:
-        print("✅ README updated successfully with dynamic badges")
+        print("✅ README updated successfully with dynamic badges and positions")
     else:
         print("❌ Failed to update README")
 

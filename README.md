@@ -6,6 +6,7 @@
 
 ![Account Value](https://img.shields.io/badge/Account-%2432%2C555-blue)
 ![P&L](https://img.shields.io/badge/P&L-%242%2C385-brightgreen)
+![Return](https://img.shields.io/badge/Return-%2B7.9%25-brightgreen)
 ![Status](https://img.shields.io/badge/Trading-LIVE-brightgreen)
 ![Last Updated](https://img.shields.io/badge/Updated-2025-06-14-lightgrey)
 
@@ -34,7 +35,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Live Trading Performance
 
-> **Last Updated:** 2025-06-14 14:47 UTC | **Trading Days:** 1
+> **Last Updated:** 2025-06-14 14:52 UTC | **Trading Days:** 1
 
 ### Current Account Status
 | Metric | Value |
@@ -43,6 +44,14 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 | **Total P&L** | 📈 $2,384.86 |
 | **Unrealized P&L** | $2,413.02 |
 | **Realized P&L** | -$28.16 |
+| **Total Return** | +7.90% |
+
+### Current Positions
+| Strategy | Symbol | Side | Contracts | Entry Price | Entry Date |
+|----------|--------|------|-----------|-------------|------------|
+| **IBS_ES** | MES | Long | 2 | $6028.25 | 2025-06-11 |
+| **IBS_YM** | MYM | Long | 2 | $42175.00 | 2025-06-13 |
+| **IBS_GC** | MGC | Long | 2 | $3376.20 | 2025-06-11 |
 
 *📝 Metrics automatically updated via GitHub Actions from live IBKR account*
 ## 📊 Trading Strategies
