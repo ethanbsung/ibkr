@@ -215,7 +215,10 @@ def get_positions_from_ibkr(ib, contracts):
         
         # Initialize position tracking
         ibkr_positions = {strategy: {'in_position': False, 'position': None} for strategy in allocation_percentages}
-        
+
+        # Load saved state once for position mapping
+        saved_state = load_portfolio_state()
+
         # Process IBKR positions
         for position in positions:
             if position.contract.conId in contract_to_strategy:
@@ -249,10 +252,7 @@ def get_positions_from_ibkr(ib, contracts):
                         'contracts': int(abs(position.position))  # Use absolute value for long positions
                     }
                     
-                    # For all instruments, we need to determine which strategy has the position
-                    # Load saved state to check which strategy should have the position
-                    saved_state = load_portfolio_state()
-                    
+                    # For all instruments, determine which strategy has the position using loaded state
                     # Check which strategies expect to have positions for this instrument
                     ibs_strategy = f'IBS_{symbol}'
                     williams_strategy = f'Williams_{symbol}'
