@@ -416,7 +416,7 @@ def place_limit_order(ib, contract, action, quantity, symbol):
         current_price = (ticker.bid + ticker.ask) / 2
     
     # Cancel market data subscription
-    ib.cancelMktData(contract)
+    ib.cancelMktData(ticker)
     
     if current_price:
         # Set limit price slightly favorable (0.1% buffer)
