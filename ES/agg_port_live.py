@@ -19,11 +19,8 @@ CLIENT_ID = 1
 # -------------------------------
 # Dynamic Allocation Parameters (matching aggregate_port.py exactly)
 # -------------------------------
-# Note: Commissions are automatically handled by IBKR in live trading
-
 # Risk multiplier for larger position sizes (matching enhanced backtest)
 risk_multiplier = 3.0              # 3x larger positions for higher risk/reward
-
 # Target percentage allocations (must sum to 100%)
 # 50/50 split between IBS and Williams strategies, equal weighting within each
 allocation_percentages = {
@@ -37,9 +34,7 @@ allocation_percentages = {
     'Williams_NQ': 0.125  # 12.5% to NQ Williams strategy
 }
 
-# Rebalancing parameters
-rebalance_threshold = 0.05  # Rebalance when allocation drifts >5% from target
-rebalance_frequency_days = 30  # Also rebalance monthly regardless
+# Note: Position sizing automatically maintains target allocations as equity changes
 
 # Contract Specifications and Multipliers (matching aggregate_port.py exactly)
 contract_specs = {
@@ -49,11 +44,11 @@ contract_specs = {
     'NQ': {'multiplier': 2, 'contract_month': '202506', 'exchange': 'CME'}      # MNQ multiplier
 }
 
-# IBS entry/exit thresholds (common for all IBS instruments)
+# IBS entry/exit thresholds
 ibs_entry_threshold = 0.1       # Enter when IBS < 0.1
 ibs_exit_threshold  = 0.9       # Exit when IBS > 0.9
 
-# Williams %R strategy parameters (applied to ES only)
+# Williams %R strategy parameters
 williams_period = 2             # 2-day lookback
 wr_buy_threshold  = -90
 wr_sell_threshold = -30
@@ -88,27 +83,7 @@ def calculate_position_size(current_equity, target_allocation_pct, price, multip
     
     return int(contracts)
 
-def check_rebalancing_needed(current_allocations, target_allocations, threshold=0.05):
-    """
-    Check if rebalancing is needed based on allocation drift.
-    
-    Args:
-        current_allocations: Dict of current allocations by strategy
-        target_allocations: Dict of target allocations by strategy  
-        threshold: Drift threshold (default 5%)
-    
-    Returns:
-        Boolean indicating if rebalancing is needed
-    """
-    for strategy in target_allocations:
-        current_pct = current_allocations.get(strategy, 0)
-        target_pct = target_allocations[strategy]
-        drift = abs(current_pct - target_pct)
-        
-        if drift > threshold:
-            return True
-    
-    return False
+
 
 # -------------------------------
 # State Management
@@ -150,10 +125,10 @@ def get_daily_bar(ib, contract, end_datetime):
     bars = ib.reqHistoricalData(
         contract,
         endDateTime=end_datetime,
-        durationStr='5 D',  # Get 5 days to ensure we have enough data including weekends
+        durationStr='5 D',
         barSizeSetting='1 day',
         whatToShow='TRADES',
-        useRTH=False,  # Use full futures trading session (6PM-5PM ET) instead of RTH (9:30AM-4:15PM ET)
+        useRTH=False,
         formatDate=1
     )
     return bars if bars else []
@@ -163,10 +138,10 @@ def get_williams_bars(ib, contract, end_datetime):
     bars = ib.reqHistoricalData(
         contract,
         endDateTime=end_datetime,
-        durationStr='1 W',  # Get 1 week of data to ensure we have enough trading days
+        durationStr='1 W',
         barSizeSetting='1 day',
         whatToShow='TRADES',
-        useRTH=False,  # Use full futures trading session (6PM-5PM ET) instead of RTH (9:30AM-4:15PM ET)
+        useRTH=False,
         formatDate=1
     )
     return bars if bars else []

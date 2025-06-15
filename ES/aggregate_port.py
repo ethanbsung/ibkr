@@ -21,7 +21,7 @@ commission_per_order = 1.24       # commission per order (per contract)
 risk_multiplier = 3.0              # 3x larger positions for higher risk/reward
 
 # Date range for all strategies
-start_date = '2015-01-01'
+start_date = '2000-01-01'
 end_date   = '2025-03-12'
 
 # -------------------------------
@@ -39,9 +39,7 @@ allocation_percentages = {
     'Williams_NQ': 0.125  # 12.5% to NQ Williams strategy
 }
 
-# Rebalancing parameters
-rebalance_threshold = 0.05  # Rebalance when allocation drifts >5% from target
-rebalance_frequency_days = 30  # Also rebalance monthly regardless
+# Note: Dynamic position sizing automatically maintains target allocations
 
 # Validate allocations sum to 100%
 total_allocation = sum(allocation_percentages.values())
@@ -115,27 +113,7 @@ def calculate_position_size(current_equity, target_allocation_pct, price, multip
     
     return int(contracts)
 
-def check_rebalancing_needed(current_allocations, target_allocations, threshold=0.05):
-    """
-    Check if rebalancing is needed based on allocation drift.
-    
-    Args:
-        current_allocations: Dict of current allocations by strategy
-        target_allocations: Dict of target allocations by strategy  
-        threshold: Drift threshold (default 5%)
-    
-    Returns:
-        Boolean indicating if rebalancing is needed
-    """
-    for strategy in target_allocations:
-        current_pct = current_allocations.get(strategy, 0)
-        target_pct = target_allocations[strategy]
-        drift = abs(current_pct - target_pct)
-        
-        if drift > threshold:
-            return True
-    
-    return False
+
 
 # -------------------------------
 # Data Preparation & Benchmark (ES data for benchmark and Williams)
@@ -189,7 +167,6 @@ def run_dynamic_allocation_backtest():
     # Track total portfolio equity and individual strategy allocations
     total_equity = initial_capital
     strategy_values = {}
-    last_rebalance_day = 0
     
     # Initialize strategy capital allocations
     for strategy in allocation_percentages:
@@ -344,11 +321,6 @@ def run_dynamic_allocation_backtest():
         # Update total equity for next day's position sizing
         if current_date is not None:
             total_equity = daily_total_equity
-            
-            # Check for rebalancing (every 30 days)
-            if day_idx - last_rebalance_day >= rebalance_frequency_days:
-                logger.info(f"Rebalancing on {current_date} (Day {day_idx})")
-                last_rebalance_day = day_idx
     
     # Close any remaining positions and prepare results
     results = {}
@@ -499,8 +471,7 @@ for strategy, pct in sorted(williams_strategies.items()):
     print(f"    • {strategy}: {pct*100:.1f}%")
 
 print(f"  • Risk Multiplier: {risk_multiplier}x (LARGER POSITION SIZES)")
-print(f"  • Rebalancing Threshold: {rebalance_threshold*100:.0f}% drift")
-print(f"  • Rebalancing Frequency: Every {rebalance_frequency_days} days")
+print(f"  • Dynamic position sizing maintains target allocations automatically")
 print("\nKey Benefits:")
 print("  • Position sizes scale with account equity")
 print("  • Enhanced risk/reward with larger position sizes")
