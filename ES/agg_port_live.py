@@ -1,6 +1,4 @@
 #!/usr/bin/env python
-import pandas as pd
-import numpy as np
 from ib_insync import *
 import logging
 import sys
@@ -10,7 +8,6 @@ import time
 from datetime import datetime, timedelta
 import pytz
 from collections import defaultdict
-from uuid import uuid4
 
 # -------------------------------
 # Configuration Parameters
