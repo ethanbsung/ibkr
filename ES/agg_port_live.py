@@ -435,44 +435,7 @@ def place_limit_order(ib, contract, action, quantity, symbol):
         logger.error(f"Could not get current price for {symbol} limit order")
         return None
 
-def is_market_hours(timezone='US/Eastern'):
-    """Check if futures markets are currently open (6 PM Sunday - 5 PM Friday Eastern)"""
-    tz = pytz.timezone(timezone)
-    now = datetime.now(tz)
-    
-    # Market hours: Sunday 6 PM - Friday 5 PM Eastern (futures markets)
-    weekday = now.weekday()  # 0=Monday, 6=Sunday
-    hour = now.hour
-    minute = now.minute
-    
-    # Saturday - market closed all day
-    if weekday == 5:  # Saturday
-        return False
-    
-    # Sunday before 6 PM - market closed
-    if weekday == 6 and hour < 18:  # Sunday
-        return False
-    
-    # Monday-Thursday after 5 PM - market closed until 6 PM
-    if weekday in [0, 1, 2, 3] and hour >= 17:  # Monday-Thursday
-        if hour > 18 or (hour == 18 and minute >= 0):  # After 6 PM, market reopens
-            return True
-        else:  # Between 5 PM and 6 PM, market closed
-            return False
-    
-    # Friday after 5 PM - market closed for weekend
-    if weekday == 4 and hour >= 17:  # Friday
-        return False
-    
-    # Sunday after 6 PM - market open
-    if weekday == 6 and hour >= 18:
-        return True
-    
-    # Monday-Friday during regular hours (before 5 PM) - market open
-    if weekday in [0, 1, 2, 3, 4] and hour < 17:
-        return True
-    
-    return False
+
 
 def is_trading_window(timezone='US/Eastern'):
     """Check if we're in the specific trading window (4:55-5:05 PM Eastern) for placing EOD orders"""
