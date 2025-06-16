@@ -550,7 +550,7 @@ class PositionRouter:
             self.strategy_lots.update(desired_dict)
             self._save_state()
 
-def wait_until_next_close(timezone='US/Eastern', lead_seconds=10):
+def wait_until_next_close(timezone='US/Eastern', lead_seconds=5):
     """Wait until the next 5 PM Eastern market close minus lead_seconds."""
     tz = pytz.timezone(timezone)
     logger = logging.getLogger()
@@ -903,7 +903,7 @@ def main():
     if is_trading_window():
         logger.info("LIVE TRADING MODE - Within trading window (4:55-5:05 PM Eastern)")
     else:
-        logger.info("Will execute trades 10 seconds before next market close")
+        logger.info("Will execute trades 5 seconds before next market close")
     
     ib = IB()
     
@@ -918,9 +918,9 @@ def main():
     # Print portfolio summary on startup
     print_portfolio_summary(ib)
 
-    # Always wait until 10 seconds before next market close (5 PM Eastern)
-    logger.info("Waiting until 10 seconds before next market close...")
-    wait_until_next_close(timezone='US/Eastern', lead_seconds=10)
+    # Always wait until 5 seconds before next market close (5 PM Eastern)
+    logger.info("Waiting until 5 seconds before next market close...")
+    wait_until_next_close(timezone='US/Eastern', lead_seconds=5)
 
     # Run daily signals with exact logic from aggregate_port.py
     logger.info("Running daily signal generation...")
