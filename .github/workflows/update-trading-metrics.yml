@@ -2,8 +2,8 @@ name: Update Trading Metrics
 
 on:
   schedule:
-    # Run every day at 6 PM ET (after markets close)
-    - cron: '0 23 * * *'
+    # Run every weekday at 6 PM ET (after markets close) - 23:00 UTC
+    - cron: '0 23 * * 1-5'  # Monday-Friday only
   workflow_dispatch: # Allow manual trigger
 
 jobs:
@@ -25,6 +25,8 @@ jobs:
         
     - name: Update README with trading metrics
       run: |
+        echo "🔍 Checking for trading data updates..."
+        ls -la account_snapshots/daily_snapshots.json || echo "No snapshots file found"
         python scripts/update_readme_metrics.py
         
     - name: Commit and push changes
@@ -32,9 +34,12 @@ jobs:
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         git add README.md
+        echo "📊 Checking for changes to commit..."
         if git diff --staged --quiet; then
-          echo "No changes to commit"
+          echo "ℹ️  No changes to commit - README already up to date"
         else
+          echo "✅ Changes found - updating README"
           git commit -m "🤖 Auto-update trading metrics [$(date +'%Y-%m-%d %H:%M UTC')]"
           git push
+          echo "🚀 README updated successfully"
         fi 
