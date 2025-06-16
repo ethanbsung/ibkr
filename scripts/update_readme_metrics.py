@@ -217,7 +217,8 @@ def generate_dynamic_badges(metrics: Dict) -> str:
     drawdown_badge = ""
     if metrics.get('max_drawdown_pct', 0) > 0:
         dd_value = f"{metrics['max_drawdown_pct']:.1f}%25"
-        dd_color = "green" if metrics['max_drawdown_pct'] < 5 else "yellow" if metrics['max_drawdown_pct'] < 10 else "red"
+        # More conservative colors since end-of-day data underestimates true drawdown
+        dd_color = "green" if metrics['max_drawdown_pct'] < 2 else "yellow" if metrics['max_drawdown_pct'] < 5 else "red"
         drawdown_badge = f"![Max DD](https://img.shields.io/badge/Max_DD-{urllib.parse.quote(dd_value)}-{dd_color})\n"
     
     badges = f"""[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -256,7 +257,7 @@ def generate_metrics_section(metrics: Dict, positions: List[Dict]) -> str:
     if metrics.get('sharpe_ratio', 0) > 0:
         section += f"| **Sharpe Ratio** | {metrics['sharpe_ratio']:.2f} |\n"
     if metrics.get('max_drawdown_pct', 0) > 0:
-        section += f"| **Max Drawdown** | {metrics['max_drawdown_pct']:.1f}% |\n"
+        section += f"| **Max Drawdown** | {metrics['max_drawdown_pct']:.1f}%* |\n"
     
     # Add current positions
     if positions:
@@ -312,6 +313,10 @@ def generate_metrics_section(metrics: Dict, positions: List[Dict]) -> str:
             section += f"| **3 Months** | {format_percentage(metrics['3_months_return'])} |\n"
     
     section += f"\n*📝 Metrics automatically updated via GitHub Actions from live IBKR account*\n"
+    
+    # Add disclaimer for max drawdown if it's being shown
+    if metrics.get('max_drawdown_pct', 0) > 0:
+        section += f"\n*⚠️ Max Drawdown calculated from end-of-day data only - may underestimate true intraday drawdown*\n"
     
     return section
 
