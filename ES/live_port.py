@@ -926,6 +926,17 @@ def main():
     logger.info("Running daily signal generation...")
     run_daily_signals(ib)
 
+    # Save daily account snapshot for GitHub Actions
+    logger.info("Saving daily account snapshot...")
+    try:
+        from account_summary import save_daily_snapshot
+        if save_daily_snapshot(ib):
+            logger.info("Daily snapshot saved successfully")
+        else:
+            logger.warning("Failed to save daily snapshot")
+    except Exception as e:
+        logger.error(f"Error saving daily snapshot: {e}")
+
     # Disconnect
     ib.disconnect()
     logger.info("Finished running daily signals. Disconnected from IBKR.")
