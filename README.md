@@ -4,6 +4,13 @@
 [![Interactive Brokers](https://img.shields.io/badge/Broker-Interactive%20Brokers-green.svg)](https://www.interactivebrokers.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+![Account Value](https://img.shields.io/badge/Account-%2432%2C169-blue)
+![P&L](https://img.shields.io/badge/P&L-%242%2C027-brightgreen)
+![Return](https://img.shields.io/badge/Return-%2B6.6%25-brightgreen)
+![Status](https://img.shields.io/badge/Trading-LIVE-brightgreen)
+![Last Updated](https://img.shields.io/badge/Updated-2025-06-16-lightgrey)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 ![Account Value](https://img.shields.io/badge/Account-%2432%2C555-blue)
 ![P&L](https://img.shields.io/badge/P&L-%242%2C385-brightgreen)
 ![Return](https://img.shields.io/badge/Return-%2B7.9%25-brightgreen)
@@ -35,9 +42,26 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Live Trading Performance
 
-> **Last Updated:** 2025-06-14 14:59 UTC | **Trading Days:** 1
+> **Last Updated:** 2025-06-16 23:15 UTC | **Trading Days:** 3
 
 ### Current Account Status
+| Metric | Value |
+|--------|-------|
+| **Account Value** | $32,169.22 |
+| **Total P&L** | 📈 $2,027.02 |
+| **Unrealized P&L** | $2,027.02 |
+| **Realized P&L** | $0.00 |
+| **Total Return** | +6.63% |
+
+### Current Positions
+*No positions currently open - waiting for entry signals*
+
+### Recent Performance
+| Period | Return |
+|--------|--------|
+| **1 Week** | -1.19% |
+
+*📝 Metrics automatically updated via GitHub Actions from live IBKR account*### Current Account Status
 | Metric | Value |
 |--------|-------|
 | **Account Value** | $32,555.22 |
