@@ -85,7 +85,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ### Core Components
 ```
-├── ES/live_port.py          # Live trading engine
+├── portfolio/live_port.py          # Live trading engine
 ├── rob_port/                    # Systematic trading framework
 │   ├── chapter*.py              # Strategy implementations
 │   └── tests/                   # Comprehensive test suite
@@ -187,7 +187,7 @@ pip install pandas numpy matplotlib ib_insync arch
 ### Running the System
 ```bash
 # Start live trading engine
-python ES/live_port.py
+python portfolio/live_port.py
 
 # Run backtests
 python rob_port/chapter4.py
