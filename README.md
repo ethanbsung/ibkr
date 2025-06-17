@@ -4,10 +4,11 @@
 [![Interactive Brokers](https://img.shields.io/badge/Broker-Interactive%20Brokers-green.svg)](https://www.interactivebrokers.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-![Account Value](https://img.shields.io/badge/Account-%2432%2C164-blue)
-![P&L](https://img.shields.io/badge/P&L-%242%2C022-brightgreen)
-![Return](https://img.shields.io/badge/Return-%2B6.6%25-brightgreen)
+![Account Value](https://img.shields.io/badge/Account-%2431%2C700-blue)
+![P&L](https://img.shields.io/badge/P&L-%241%2C558-brightgreen)
+![Return](https://img.shields.io/badge/Return-%2B5.1%25-brightgreen)
 ![Status](https://img.shields.io/badge/Trading-LIVE-brightgreen)
+![Last Updated](https://img.shields.io/badge/Last_Updated-2025-06-17-lightgrey)
 
 A comprehensive algorithmic trading system implementing systematic trading strategies with real-time execution, extensive backtesting, and Monte Carlo simulation capabilities. This project demonstrates enterprise-level quantitative finance software engineering practices.
 
@@ -34,36 +35,24 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Live Trading Performance
 
-> **Last Updated:** 2025-06-16 21:03 UTC | **Trading Days:** 3
+> **Last Updated:** 2025-06-17 23:15 UTC | **Trading Days:** 4
 
 ### Current Account Status
 | Metric | Value |
 |--------|-------|
-| **Account Value** | $32,164.22 |
-| **Total P&L** | 📈 $2,022.02 |
-| **Unrealized P&L** | $2,022.02 |
+| **Account Value** | $31,700.22 |
+| **Total P&L** | 📈 $1,558.02 |
+| **Unrealized P&L** | $1,558.02 |
 | **Realized P&L** | $0.00 |
-| **Total Return** | +6.61% |
+| **Total Return** | +5.07% |
 
 ### Current Positions
-| Strategy | Symbol | Side | Contracts | Entry Price | Entry Date |
-|----------|--------|------|-----------|-------------|------------|
-| **IBS_ES** | MES | Long | 2 | $6028.25 | 2025-06-11 |
-| **IBS_YM** | MYM | Long | 2 | $42175.00 | 2025-06-13 |
-| **IBS_GC** | MGC | Long | 2 | $3376.20 | 2025-06-11 |
-
-### Portfolio Risk Metrics
-| Metric | Value |
-|--------|-------|
-| **Total Notional** | $169,981.50 |
-| **Gross Leverage** | 5.3x |
-| **Risk per Position** | 33.3% avg allocation |
-| **Largest Position** | 39.7% (MGC) |
+*No positions currently open - waiting for entry signals*
 
 ### Recent Performance
 | Period | Return |
 |--------|--------|
-| **1 Week** | -1.20% |
+| **1 Week** | -2.63% |
 
 *📝 Metrics automatically updated via GitHub Actions from live IBKR account*
 
