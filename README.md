@@ -8,7 +8,6 @@
 ![P&L](https://img.shields.io/badge/P&L-%242%2C022-brightgreen)
 ![Return](https://img.shields.io/badge/Return-%2B6.6%25-brightgreen)
 ![Status](https://img.shields.io/badge/Trading-LIVE-brightgreen)
-![Last Updated](https://img.shields.io/badge/Last_Updated-2025-06-16-lightgrey)
 
 A comprehensive algorithmic trading system implementing systematic trading strategies with real-time execution, extensive backtesting, and Monte Carlo simulation capabilities. This project demonstrates enterprise-level quantitative finance software engineering practices.
 
