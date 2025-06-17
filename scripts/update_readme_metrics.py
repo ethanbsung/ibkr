@@ -222,13 +222,30 @@ def generate_dynamic_badges(metrics: Dict) -> str:
         drawdown_badge = f"![Max DD](https://img.shields.io/badge/Max_DD-{urllib.parse.quote(dd_value)}-{dd_color})\n"
     
     # Return just the dynamic badges - no license badge duplication
-    badges = f"""![Account Value](https://img.shields.io/badge/Account-{urllib.parse.quote(account_value)}-blue)
-![P&L](https://img.shields.io/badge/P&L-{urllib.parse.quote(pnl_value)}-{pnl_color})
-{return_badge.rstrip()}
-{sharpe_badge.rstrip()}
-{drawdown_badge.rstrip()}
-![Status](https://img.shields.io/badge/Trading-{status_text}-{status_color})
-![Last Updated](https://img.shields.io/badge/Updated-{urllib.parse.quote(metrics['last_updated'].split()[0])}-lightgrey)""".strip()
+    badge_lines = [
+        f"![Account Value](https://img.shields.io/badge/Account-{urllib.parse.quote(account_value)}-blue)",
+        f"![P&L](https://img.shields.io/badge/P&L-{urllib.parse.quote(pnl_value)}-{pnl_color})"
+    ]
+    
+    # Add return badge if available
+    if return_badge.strip():
+        badge_lines.append(return_badge.strip())
+    
+    # Add sharpe badge if available
+    if sharpe_badge.strip():
+        badge_lines.append(sharpe_badge.strip())
+    
+    # Add drawdown badge if available  
+    if drawdown_badge.strip():
+        badge_lines.append(drawdown_badge.strip())
+    
+    # Add status and last updated badges
+    badge_lines.extend([
+        f"![Status](https://img.shields.io/badge/Trading-{status_text}-{status_color})",
+        f"![Last Updated](https://img.shields.io/badge/Last_Updated-{urllib.parse.quote(metrics['last_updated'].split()[0])}-lightgrey)"
+    ])
+    
+    badges = '\n'.join(badge_lines)
     
     return badges
 
