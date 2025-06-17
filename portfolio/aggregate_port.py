@@ -15,7 +15,7 @@ logger = logging.getLogger()
 # Parameters & User Settings
 # -------------------------------
 initial_capital = 30000.0         # total capital ($30,000)
-commission_per_order = 1.24       # commission per order (per contract)
+commission_per_order = 5       # commission per order (per contract)
 
 # Risk multiplier for larger position sizes
 risk_multiplier = 3.0              # 3x larger positions for higher risk/reward
