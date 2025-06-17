@@ -13,7 +13,7 @@ def load_position_data() -> List[Dict]:
     """Load current position data from portfolio state"""
     try:
         # Try to load from portfolio state (from live trading system)
-        with open('portfolio_state.json', 'r') as f:
+        with open('ES/portfolio_state.json', 'r') as f:
             portfolio_state = json.load(f)
         
         positions = []
@@ -221,12 +221,14 @@ def generate_dynamic_badges(metrics: Dict) -> str:
         dd_color = "green" if metrics['max_drawdown_pct'] < 2 else "yellow" if metrics['max_drawdown_pct'] < 5 else "red"
         drawdown_badge = f"![Max DD](https://img.shields.io/badge/Max_DD-{urllib.parse.quote(dd_value)}-{dd_color})\n"
     
-    badges = f"""[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
-![Account Value](https://img.shields.io/badge/Account-{urllib.parse.quote(account_value)}-blue)
+    # Return just the dynamic badges - no license badge duplication
+    badges = f"""![Account Value](https://img.shields.io/badge/Account-{urllib.parse.quote(account_value)}-blue)
 ![P&L](https://img.shields.io/badge/P&L-{urllib.parse.quote(pnl_value)}-{pnl_color})
-{return_badge}{sharpe_badge}{drawdown_badge}![Status](https://img.shields.io/badge/Trading-{status_text}-{status_color})
-![Last Updated](https://img.shields.io/badge/Updated-{urllib.parse.quote(metrics['last_updated'].split()[0])}-lightgrey)"""
+{return_badge.rstrip()}
+{sharpe_badge.rstrip()}
+{drawdown_badge.rstrip()}
+![Status](https://img.shields.io/badge/Trading-{status_text}-{status_color})
+![Last Updated](https://img.shields.io/badge/Updated-{urllib.parse.quote(metrics['last_updated'].split()[0])}-lightgrey)""".strip()
     
     return badges
 
@@ -326,37 +328,59 @@ def update_readme_with_metrics(metrics_section: str, badges: str) -> bool:
         with open('README.md', 'r') as f:
             content = f.read()
         
-        # Replace all badges (static + dynamic) in one go
-        # Pattern to match from Python badge to end of badges
-        badge_section_pattern = r'([![]Python[^\n]*\n[![]Interactive Brokers[^\n]*\n)([![]License[^\n]*\n\n(!\[[^\]]+\][^\n]*\n)*)?'
+        # More robust badge replacement - find the License badge and replace everything after it until the description
+        license_badge = '[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)'
+        description_start = 'A comprehensive algorithmic trading system'
         
-        if re.search(badge_section_pattern, content, re.DOTALL):
-            # Replace the entire badge section
-            badge_replacement = r'\1' + badges + r'\n'
-            content = re.sub(badge_section_pattern, badge_replacement, content, flags=re.DOTALL)
+        license_pos = content.find(license_badge)
+        desc_pos = content.find(description_start)
+        
+        if license_pos != -1 and desc_pos != -1:
+            # Replace everything between the license badge and the description with our new badges
+            before_badges = content[:license_pos + len(license_badge)]
+            after_badges = content[desc_pos:]
+            content = before_badges + '\n\n' + badges + '\n\n' + after_badges
+        
+        # Clean up the Live Trading Performance section more robustly
+        live_trading_start = content.find('## 📊 Live Trading Performance')
+        if live_trading_start != -1:
+            # Find the next major section (Trading Strategies)
+            next_section = content.find('## 📊 Trading Strategies', live_trading_start + 1)
+            if next_section == -1:
+                # If Trading Strategies not found, look for Technical Architecture
+                next_section = content.find('## 🔧 Technical Architecture', live_trading_start + 1)
+            
+            if next_section != -1:
+                # Replace the entire Live Trading Performance section
+                before_section = content[:live_trading_start]
+                after_section = content[next_section:]
+                content = before_section + metrics_section.strip() + '\n\n' + after_section
+            else:
+                # If no next section found, replace to end of file
+                before_section = content[:live_trading_start]
+                content = before_section + metrics_section.strip()
         else:
-            # Fallback: just add after Interactive Brokers badge
-            ib_pattern = r'([![]Interactive Brokers[^\n]*\n)'
-            if re.search(ib_pattern, content):
-                badge_replacement = r'\1' + badges + r'\n'
-                content = re.sub(ib_pattern, badge_replacement, content)
+            # If no existing Live Trading Performance section, add after Key Features
+            key_features_pattern = '## 🚀 Key Features'
+            key_features_pos = content.find(key_features_pattern)
+            if key_features_pos != -1:
+                # Find the next section after Key Features
+                next_section_patterns = ['## 📊 Trading Strategies', '## 🔧 Technical Architecture']
+                next_section_pos = len(content)
+                
+                for pattern in next_section_patterns:
+                    pos = content.find(pattern, key_features_pos + 1)
+                    if pos != -1:
+                        next_section_pos = min(next_section_pos, pos)
+                
+                if next_section_pos < len(content):
+                    before_insert = content[:next_section_pos]
+                    after_insert = content[next_section_pos:]
+                    content = before_insert + '\n' + metrics_section.strip() + '\n\n' + after_insert
         
-        # Update live metrics section
-        pattern = r'## 📊 Live Trading Performance.*?(?=##|\Z)'
-        
-        if re.search(pattern, content, re.DOTALL):
-            # Replace existing section
-            content = re.sub(pattern, metrics_section.strip(), content, flags=re.DOTALL)
-        else:
-            # Add new section after the Key Features section
-            insert_pattern = r'(## 🚀 Key Features.*?)(\n## 📊 Trading Strategies)'
-            replacement = r'\1\n' + metrics_section.strip() + r'\2'
-            content = re.sub(insert_pattern, replacement, content, flags=re.DOTALL)
-        
-        new_content = content
-        
+        # Write the updated content
         with open('README.md', 'w') as f:
-            f.write(new_content)
+            f.write(content)
         
         print("README.md updated successfully with live trading metrics and dynamic badges")
         return True

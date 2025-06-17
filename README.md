@@ -4,18 +4,13 @@
 [![Interactive Brokers](https://img.shields.io/badge/Broker-Interactive%20Brokers-green.svg)](https://www.interactivebrokers.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-![Account Value](https://img.shields.io/badge/Account-%2432%2C169-blue)
-![P&L](https://img.shields.io/badge/P&L-%242%2C027-brightgreen)
+![Account Value](https://img.shields.io/badge/Account-%2432%2C164-blue)
+![P&L](https://img.shields.io/badge/P&L-%242%2C022-brightgreen)
 ![Return](https://img.shields.io/badge/Return-%2B6.6%25-brightgreen)
+
+
 ![Status](https://img.shields.io/badge/Trading-LIVE-brightgreen)
 ![Last Updated](https://img.shields.io/badge/Updated-2025-06-16-lightgrey)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
-![Account Value](https://img.shields.io/badge/Account-%2432%2C555-blue)
-![P&L](https://img.shields.io/badge/P&L-%242%2C385-brightgreen)
-![Return](https://img.shields.io/badge/Return-%2B7.9%25-brightgreen)
-![Status](https://img.shields.io/badge/Trading-LIVE-brightgreen)
-![Last Updated](https://img.shields.io/badge/Updated-2025-06-14-lightgrey)
 
 A comprehensive algorithmic trading system implementing systematic trading strategies with real-time execution, extensive backtesting, and Monte Carlo simulation capabilities. This project demonstrates enterprise-level quantitative finance software engineering practices.
 
@@ -42,33 +37,16 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Live Trading Performance
 
-> **Last Updated:** 2025-06-16 23:15 UTC | **Trading Days:** 3
+> **Last Updated:** 2025-06-16 20:58 UTC | **Trading Days:** 3
 
 ### Current Account Status
 | Metric | Value |
 |--------|-------|
-| **Account Value** | $32,169.22 |
-| **Total P&L** | 📈 $2,027.02 |
-| **Unrealized P&L** | $2,027.02 |
+| **Account Value** | $32,164.22 |
+| **Total P&L** | 📈 $2,022.02 |
+| **Unrealized P&L** | $2,022.02 |
 | **Realized P&L** | $0.00 |
-| **Total Return** | +6.63% |
-
-### Current Positions
-*No positions currently open - waiting for entry signals*
-
-### Recent Performance
-| Period | Return |
-|--------|--------|
-| **1 Week** | -1.19% |
-
-*📝 Metrics automatically updated via GitHub Actions from live IBKR account*### Current Account Status
-| Metric | Value |
-|--------|-------|
-| **Account Value** | $32,555.22 |
-| **Total P&L** | 📈 $2,384.86 |
-| **Unrealized P&L** | $2,413.02 |
-| **Realized P&L** | -$28.16 |
-| **Total Return** | +7.90% |
+| **Total Return** | +6.61% |
 
 ### Current Positions
 | Strategy | Symbol | Side | Contracts | Entry Price | Entry Date |
@@ -81,11 +59,17 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 | Metric | Value |
 |--------|-------|
 | **Total Notional** | $169,981.50 |
-| **Gross Leverage** | 5.2x |
+| **Gross Leverage** | 5.3x |
 | **Risk per Position** | 33.3% avg allocation |
 | **Largest Position** | 39.7% (MGC) |
 
+### Recent Performance
+| Period | Return |
+|--------|--------|
+| **1 Week** | -1.20% |
+
 *📝 Metrics automatically updated via GitHub Actions from live IBKR account*
+
 ## 📊 Trading Strategies
 
 ### Strategy Portfolio
