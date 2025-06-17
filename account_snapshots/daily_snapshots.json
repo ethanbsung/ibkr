@@ -15,9 +15,9 @@
   },
   {
     "date": "2025-06-16",
-    "net_liquidation": 32169.22,
-    "unrealized_pnl": 2027.02,
+    "net_liquidation": 32164.22,
+    "unrealized_pnl": 2022.02,
     "realized_pnl": 0.0,
-    "total_cash": 32169.22
+    "total_cash": 32164.22
   }
 ]

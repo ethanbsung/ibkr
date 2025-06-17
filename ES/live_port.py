@@ -95,7 +95,30 @@ def load_portfolio_state():
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, 'r') as f:
-                return json.load(f)
+                state = json.load(f)
+
+            # -----------------------------------------------------------
+            # Robustness patch: ensure all expected strategies are present
+            # -----------------------------------------------------------
+            # Older versions of the state file may pre-date new strategies
+            # added to `allocation_percentages`, which can lead to
+            # KeyErrors when the live code tries to access them.  Here we
+            # reconcile the on-disk state with the current list of
+            # strategies, defaulting to no position where necessary.
+            if 'positions' not in state or not isinstance(state['positions'], dict):
+                state['positions'] = {}
+
+            for strategy in allocation_percentages:
+                state['positions'].setdefault(strategy, {
+                    'in_position': False,
+                    'position': None
+                })
+
+            # Maintain required top-level keys
+            state.setdefault('last_rebalance_date', None)
+            state.setdefault('current_equity', None)
+
+            return state
         except:
             pass
     
@@ -489,26 +512,65 @@ class PositionRouter:
     Maintains virtual lots per strategy for a single contract and nets those
     into one real IBKR order each time `sync()` is called.
     """
-    def __init__(self, ib, contract, symbol='ES'):
+    def __init__(self, ib, contract, symbol='ES', portfolio_state=None):
         self.ib = ib
         self.contract = contract
         self.symbol = symbol
         self.strategy_lots = self._load_state()
+        
+        # Initialize router state from portfolio state if provided
+        if portfolio_state:
+            self._sync_with_portfolio_state(portfolio_state)
+
+    def _sync_with_portfolio_state(self, portfolio_state):
+        """Initialize router state from current portfolio positions"""
+        logger = logging.getLogger()
+        
+        # Find strategies that trade this symbol
+        symbol_strategies = [s for s in portfolio_state['positions'].keys() 
+                           if s.endswith(f'_{self.symbol}')]
+        
+        for strategy in symbol_strategies:
+            strategy_state = portfolio_state['positions'][strategy]
+            if strategy_state['in_position'] and strategy_state['position']:
+                current_contracts = strategy_state['position']['contracts']
+                self.strategy_lots[strategy] = current_contracts
+                logger.info(f"Router {self.symbol}: Initialized {strategy} with {current_contracts} contracts")
+            else:
+                self.strategy_lots[strategy] = 0
+        
+        # Save the initialized state
+        self._save_state()
 
     # ---------- persistence ----------
     def _load_state(self):
         if os.path.exists(ROUTER_STATE_FILE):
             try:
                 with open(ROUTER_STATE_FILE, 'r') as f:
-                    return json.load(f)
+                    all_router_state = json.load(f)
+                    # Return only this symbol's state
+                    return defaultdict(int, all_router_state.get(self.symbol, {}))
             except Exception:
                 pass
         # default – no virtual positions yet
         return defaultdict(int)
 
     def _save_state(self):
+        # Load existing state for all symbols
+        all_state = {}
+        if os.path.exists(ROUTER_STATE_FILE):
+            try:
+                with open(ROUTER_STATE_FILE, 'r') as f:
+                    all_state = json.load(f)
+            except Exception:
+                pass
+        
+        # Update this symbol's state
+        all_state[self.symbol] = dict(self.strategy_lots)
+        
+        # Save back to file
         with open(ROUTER_STATE_FILE, 'w') as f:
-            json.dump(self.strategy_lots, f, indent=2)
+            json.dump(all_state, f, indent=2)
 
     # ---------- live position ----------
     def _live_position(self):
@@ -520,21 +582,33 @@ class PositionRouter:
     # ---------- public ----------
     def sync(self, desired_dict):
         """
-        desired_dict: {'IBS_ES': +2, 'Williams': 0, ...}
+        desired_dict: {'IBS_ES': +2, 'Williams_ES': 0, ...}
         Places ONE order to move from current net to desired net.
         """
+        logger = logging.getLogger()
+        
         live_total = self._live_position()
         desired_total = sum(desired_dict.values())
         net_change = desired_total - live_total
+        
+        # Log the calculation details
+        logger.info(f"Router {self.symbol}: Current virtual lots: {dict(self.strategy_lots)}")
+        logger.info(f"Router {self.symbol}: Desired lots: {desired_dict}")
+        logger.info(f"Router {self.symbol}: Live IBKR position: {live_total}")
+        logger.info(f"Router {self.symbol}: Desired total: {desired_total}")
+        logger.info(f"Router {self.symbol}: Net change needed: {net_change}")
 
         # no trade needed
         if net_change == 0:
+            logger.info(f"Router {self.symbol}: No trade needed")
             self.strategy_lots.update(desired_dict)
             self._save_state()
             return
 
         action = 'BUY' if net_change > 0 else 'SELL'
         qty = abs(net_change)
+        
+        logger.info(f"Router {self.symbol}: Placing {action} order for {qty} contracts")
 
         # use existing helper with MOC→LMT fallback
         trade = place_order_with_fallback(
@@ -547,8 +621,11 @@ class PositionRouter:
 
         # optimistic virtual‑lot update (we rely on nightly reconciliation)
         if trade is not None:
+            logger.info(f"Router {self.symbol}: Order placed successfully, updating virtual lots")
             self.strategy_lots.update(desired_dict)
             self._save_state()
+        else:
+            logger.warning(f"Router {self.symbol}: Order failed, keeping existing virtual lots")
 
 def wait_until_next_close(timezone='US/Eastern', lead_seconds=5):
     """Wait until the next 5 PM Eastern market close minus lead_seconds."""
@@ -606,7 +683,7 @@ def run_daily_signals(ib):
     desired_positions = {}  # will hold target lots per instrument per strategy
     
     for symbol in ['ES', 'YM', 'GC', 'NQ']:
-        routers[symbol] = PositionRouter(ib, contracts[symbol], symbol)
+        routers[symbol] = PositionRouter(ib, contracts[symbol], symbol, state)
         desired_positions[symbol] = {}  # will hold IBS and Williams target lots for this symbol
     
     # Get current account equity
@@ -700,11 +777,16 @@ def run_daily_signals(ib):
 
         # Execute IBS trading logic using router approach
         if strategy_state['in_position']:
-            desired_qty = 0 if ibs > ibs_exit_threshold else strategy_state['position']['contracts']
             if ibs > ibs_exit_threshold:
+                desired_qty = 0
                 logger.info(f"{symbol} - IBS exit signal (IBS: {ibs:.3f} > {ibs_exit_threshold})")
             else:
-                logger.info(f"{symbol} - Holding position (IBS: {ibs:.3f}, exit threshold: {ibs_exit_threshold})")
+                desired_qty = target_contracts  # Use target contracts for rebalancing
+                current_contracts = strategy_state['position']['contracts']
+                if desired_qty != current_contracts:
+                    logger.info(f"{symbol} - IBS rebalancing: {current_contracts} → {desired_qty} contracts (IBS: {ibs:.3f})")
+                else:
+                    logger.info(f"{symbol} - Holding position (IBS: {ibs:.3f}, exit threshold: {ibs_exit_threshold})")
         else:
             desired_qty = target_contracts if ibs < ibs_entry_threshold else 0
             if ibs < ibs_entry_threshold:
@@ -765,9 +847,15 @@ def run_daily_signals(ib):
                     exit_signal = True
                     logger.info(f"{symbol} Williams - Exit signal: Williams %R > {wr_sell_threshold}")
                 
-                desired_qty = 0 if exit_signal else williams_state['position']['contracts']
-                if not exit_signal:
-                    logger.info(f"{symbol} Williams - Holding position (Williams %R: {williams_r:.2f})")
+                if exit_signal:
+                    desired_qty = 0
+                else:
+                    desired_qty = target_contracts  # Use target contracts for rebalancing
+                    current_contracts = williams_state['position']['contracts']
+                    if desired_qty != current_contracts:
+                        logger.info(f"{symbol} Williams - Rebalancing: {current_contracts} → {desired_qty} contracts (Williams %R: {williams_r:.2f})")
+                    else:
+                        logger.info(f"{symbol} Williams - Holding position (Williams %R: {williams_r:.2f})")
             else:
                 desired_qty = target_contracts if williams_r < wr_buy_threshold else 0
                 if williams_r < wr_buy_threshold:
