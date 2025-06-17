@@ -16,7 +16,7 @@ logger = logging.getLogger()
 # -------------------------------
 
 # Input file path for ES futures 1-minute data
-data_file = "Data/es_1m_data.csv"  # File should include: Symbol, Time, Open, High, Low, Last, Volume
+data_file = "Data/es_5m_data.csv"  # File should include: Symbol, Time, Open, High, Low, Last, Volume
 
 # Backtest parameters
 initial_capital = 100000.0         # starting account balance in dollars

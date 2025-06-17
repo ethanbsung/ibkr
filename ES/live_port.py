@@ -356,22 +356,22 @@ def qualify_contracts(ib):
 
 def place_order_with_fallback(ib, contract, action, quantity, symbol, dry_run=False):
     """
-    Place an order with fallback from MOC to limit order if MOC is not supported.
+    Place a market order for immediate execution during trading hours.
     Returns the trade object if successful, None if failed or in dry run mode.
     """
     logger = logging.getLogger()
     
-    # Check if we're outside the trading window (4:55-5:05 PM Eastern) - use dry run mode
+    # Check if we're outside the trading window (4:58-5:05 PM Eastern) - use dry run mode
     if not is_trading_window() or dry_run:
-        logger.info(f"DRY RUN: Would place MOC {action} order for {quantity} {symbol} contracts (outside trading window)")
+        logger.info(f"DRY RUN: Would place MKT {action} order for {quantity} {symbol} contracts (outside trading window)")
         # Return None for dry run mode - do not update position state
         return None
     
-    # For other instruments, try MOC first
+    # Use market orders for immediate execution before close
     try:
-        order = Order(action=action, totalQuantity=quantity, orderType='MOC', tif='DAY')
+        order = Order(action=action, totalQuantity=quantity, orderType='MKT', tif='DAY')
         trade = ib.placeOrder(contract, order)
-        logger.info(f"Placed MOC {action} order for {quantity} {symbol} contracts")
+        logger.info(f"Placed MKT {action} order for {quantity} {symbol} contracts")
         
         # Wait a moment to see if there are any immediate errors
         ib.sleep(1)
@@ -379,11 +379,11 @@ def place_order_with_fallback(ib, contract, action, quantity, symbol, dry_run=Fa
         # Check if order was rejected
         if trade.orderStatus.status == 'Cancelled':
             for log_entry in trade.log:
-                if '387' in log_entry.message or 'Unsupported order type' in log_entry.message:
-                    logger.warning(f"MOC order rejected for {symbol}, falling back to limit order")
-                    return place_limit_order(ib, contract, action, quantity, symbol)
-                elif '201' in log_entry.message or 'physical delivery' in log_entry.message.lower():
+                if '201' in log_entry.message or 'physical delivery' in log_entry.message.lower():
                     logger.error(f"Order rejected for {symbol}: Contract in delivery window or near expiration")
+                    return None
+                elif 'exchange is closed' in log_entry.message.lower():
+                    logger.error(f"Order rejected for {symbol}: Exchange is closed")
                     return None
         
         return trade
@@ -395,7 +395,7 @@ def place_limit_order(ib, contract, action, quantity, symbol):
     """Place a limit order near current market price"""
     logger = logging.getLogger()
     
-    # Check if we're outside the trading window (4:55-5:05 PM Eastern) - use dry run mode
+    # Check if we're outside the trading window (4:58-5:05 PM Eastern) - use dry run mode
     if not is_trading_window():
         logger.info(f"DRY RUN: Would place LMT {action} order for {quantity} {symbol} contracts (outside trading window)")
         # Return None for dry run mode - do not update position state
@@ -461,7 +461,7 @@ def place_limit_order(ib, contract, action, quantity, symbol):
 
 
 def is_trading_window(timezone='US/Eastern'):
-    """Check if we're in the specific trading window (4:55-5:05 PM Eastern) for placing EOD orders"""
+    """Check if we're in the specific trading window (4:58-5:05 PM Eastern) for placing EOD orders"""
     tz = pytz.timezone(timezone)
     now = datetime.now(tz)
     
@@ -473,8 +473,8 @@ def is_trading_window(timezone='US/Eastern'):
     if weekday not in [0, 1, 2, 3, 4]:  # Monday-Friday
         return False
     
-    # Only trade between 4:55 PM and 5:05 PM Eastern
-    if hour == 16 and minute >= 55:  # 4:55-4:59 PM
+    # Only trade between 4:58 PM and 5:05 PM Eastern (extended window for execution)
+    if hour == 16 and minute >= 58:  # 4:58-4:59 PM
         return True
     elif hour == 17 and minute <= 5:  # 5:00-5:05 PM
         return True
@@ -627,7 +627,7 @@ class PositionRouter:
         else:
             logger.warning(f"Router {self.symbol}: Order failed, keeping existing virtual lots")
 
-def wait_until_next_close(timezone='US/Eastern', lead_seconds=5):
+def wait_until_next_close(timezone='US/Eastern', lead_seconds=10):
     """Wait until the next 5 PM Eastern market close minus lead_seconds."""
     tz = pytz.timezone(timezone)
     logger = logging.getLogger()
@@ -640,7 +640,7 @@ def wait_until_next_close(timezone='US/Eastern', lead_seconds=5):
         return
     
     wait_seconds = (target_time - now).total_seconds()
-    logger.info(f"Waiting until {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')} ({wait_seconds/3600:.1f} hours)")
+    logger.info(f"Waiting until {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')} ({wait_seconds/60:.1f} minutes before market close)")
     
     # Show periodic updates for long waits
     while True:
@@ -652,10 +652,10 @@ def wait_until_next_close(timezone='US/Eastern', lead_seconds=5):
         
         # Sleep in chunks, showing progress for long waits
         if remaining_seconds > 3600:  # More than 1 hour
-            logger.info(f"Waiting {remaining_seconds/3600:.1f} hours until market close...")
+            logger.info(f"Waiting {remaining_seconds/3600:.1f} hours until execution time...")
             time.sleep(min(1800, remaining_seconds))  # Sleep up to 30 minutes at a time
         elif remaining_seconds > 300:  # More than 5 minutes
-            logger.info(f"Waiting {remaining_seconds/60:.1f} minutes until market close...")
+            logger.info(f"Waiting {remaining_seconds/60:.1f} minutes until execution time...")
             time.sleep(min(60, remaining_seconds))  # Sleep up to 1 minute at a time
         else:
             time.sleep(remaining_seconds)
@@ -989,9 +989,9 @@ def main():
     logger.info(f"Next market close: {next_close.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     
     if is_trading_window():
-        logger.info("LIVE TRADING MODE - Within trading window (4:55-5:05 PM Eastern)")
+        logger.info("LIVE TRADING MODE - Within trading window (4:58-5:05 PM Eastern)")
     else:
-        logger.info("Will execute trades 5 seconds before next market close")
+        logger.info("Will execute trades 10 seconds before next market close")
     
     ib = IB()
     
@@ -1006,9 +1006,9 @@ def main():
     # Print portfolio summary on startup
     print_portfolio_summary(ib)
 
-    # Always wait until 5 seconds before next market close (5 PM Eastern)
-    logger.info("Waiting until 5 seconds before next market close...")
-    wait_until_next_close(timezone='US/Eastern', lead_seconds=5)
+    # Always wait until 10 seconds before next market close (5 PM Eastern)
+    logger.info("Waiting until 10 seconds before next market close...")
+    wait_until_next_close(timezone='US/Eastern', lead_seconds=10)
 
     # Run daily signals with exact logic from aggregate_port.py
     logger.info("Running daily signal generation...")
@@ -1017,6 +1017,13 @@ def main():
     # Save daily account snapshot for GitHub Actions
     logger.info("Saving daily account snapshot...")
     try:
+        import sys
+        import os
+        # Add parent directory to path to import account_summary
+        parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if parent_dir not in sys.path:
+            sys.path.append(parent_dir)
+        
         from account_summary import save_daily_snapshot
         if save_daily_snapshot(ib):
             logger.info("Daily snapshot saved successfully")
