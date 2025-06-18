@@ -4,11 +4,11 @@
 [![Interactive Brokers](https://img.shields.io/badge/Broker-Interactive%20Brokers-green.svg)](https://www.interactivebrokers.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-![Account Value](https://img.shields.io/badge/Account-%2431%2C700-blue)
-![P&L](https://img.shields.io/badge/P&L-%241%2C558-brightgreen)
-![Return](https://img.shields.io/badge/Return-%2B5.1%25-brightgreen)
-![Status](https://img.shields.io/badge/Trading-PAPER-brightgreen)
-![Last Updated](https://img.shields.io/badge/Last_Updated-2025-06-17-lightgrey)
+![Account Value](https://img.shields.io/badge/Account-%2431%2C316-blue)
+![P&L](https://img.shields.io/badge/P&L-%241%2C174-brightgreen)
+![Return](https://img.shields.io/badge/Return-%2B3.8%25-brightgreen)
+![Status](https://img.shields.io/badge/Trading-LIVE-brightgreen)
+![Last Updated](https://img.shields.io/badge/Last_Updated-2025-06-18-lightgrey)
 
 A comprehensive algorithmic trading system implementing systematic trading strategies with paper trading execution, extensive backtesting, and Monte Carlo simulation capabilities. This project demonstrates enterprise-level quantitative finance software engineering practices using Interactive Brokers' paper trading environment.
 
@@ -55,6 +55,30 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 | **1 Week** | -2.63% |
 
 *📝 Metrics automatically updated via GitHub Actions from paper trading IBKR account*
+
+
+## 📊 Live Trading Performance
+
+> **Last Updated:** 2025-06-18 23:15 UTC | **Trading Days:** 5
+
+### Current Account Status
+| Metric | Value |
+|--------|-------|
+| **Account Value** | $31,316.23 |
+| **Total P&L** | 📈 $1,174.03 |
+| **Unrealized P&L** | $606.26 |
+| **Realized P&L** | $567.77 |
+| **Total Return** | +3.80% |
+
+### Current Positions
+*No positions currently open - waiting for entry signals*
+
+### Recent Performance
+| Period | Return |
+|--------|--------|
+| **1 Week** | -3.81% |
+
+*📝 Metrics automatically updated via GitHub Actions from live IBKR account*
 
 ## 📊 Trading Strategies
 
