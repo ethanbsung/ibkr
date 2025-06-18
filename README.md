@@ -7,15 +7,15 @@
 ![Account Value](https://img.shields.io/badge/Account-%2431%2C700-blue)
 ![P&L](https://img.shields.io/badge/P&L-%241%2C558-brightgreen)
 ![Return](https://img.shields.io/badge/Return-%2B5.1%25-brightgreen)
-![Status](https://img.shields.io/badge/Trading-LIVE-brightgreen)
+![Status](https://img.shields.io/badge/Trading-PAPER-brightgreen)
 ![Last Updated](https://img.shields.io/badge/Last_Updated-2025-06-17-lightgrey)
 
-A comprehensive algorithmic trading system implementing systematic trading strategies with real-time execution, extensive backtesting, and Monte Carlo simulation capabilities. This project demonstrates enterprise-level quantitative finance software engineering practices.
+A comprehensive algorithmic trading system implementing systematic trading strategies with paper trading execution, extensive backtesting, and Monte Carlo simulation capabilities. This project demonstrates enterprise-level quantitative finance software engineering practices using Interactive Brokers' paper trading environment.
 
 ## 🚀 Key Features
 
-### Live Trading Engine
-- **Real-time execution** via Interactive Brokers API with multi-strategy portfolio management
+### Paper Trading Engine
+- **Real-time paper trading execution** via Interactive Brokers API with multi-strategy portfolio management
 - **Dynamic position sizing** with automated rebalancing across 8 strategy allocations
 - **Risk management** with 3x leveraged positions and threshold-based rebalancing (5% drift tolerance)
 - **Market hours awareness** with automated scheduling and portfolio state persistence
@@ -33,11 +33,11 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 - **Multi-timeframe support** (1-minute, 5-minute, daily bars)
 - **Real-time market data integration** with historical data alignment
 
-## 📊 Live Trading Performance
+## 📊 Paper Trading Performance
 
 > **Last Updated:** 2025-06-17 23:15 UTC | **Trading Days:** 4
 
-### Current Account Status
+### Current Paper Account Status
 | Metric | Value |
 |--------|-------|
 | **Account Value** | $31,700.22 |
@@ -54,7 +54,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 |--------|--------|
 | **1 Week** | -2.63% |
 
-*📝 Metrics automatically updated via GitHub Actions from live IBKR account*
+*📝 Metrics automatically updated via GitHub Actions from paper trading IBKR account*
 
 ## 📊 Trading Strategies
 
@@ -74,7 +74,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ### Core Components
 ```
-├── portfolio/live_port.py          # Live trading engine
+├── portfolio/live_port.py          # Paper trading engine
 ├── rob_port/                    # Systematic trading framework
 │   ├── chapter*.py              # Strategy implementations
 │   └── tests/                   # Comprehensive test suite
@@ -82,7 +82,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 │   ├── instruments.csv          # Contract specifications
 │   └── *_daily_data.csv         # Historical price data
 ├── results/                     # Backtest outputs and visualizations
-└── account_snapshots/           # Live trading performance tracking
+└── account_snapshots/           # Paper trading performance tracking
 ```
 
 ### Key Technologies
@@ -94,9 +94,9 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📈 Performance Metrics
 
-### Live Trading Results
+### Paper Trading Results
 - **Multi-strategy portfolio** with dynamic allocation across 8 strategies
-- **Real-time P&L tracking** with unrealized/realized profit attribution
+- **Real-time P&L tracking** with unrealized/realized profit attribution (paper money)
 - **Automated position management** with market hours integration
 - **Daily portfolio snapshots** for performance monitoring
 
@@ -142,7 +142,7 @@ results = run_monte_carlo_simulation(
 )
 ```
 
-## 🔄 Live Trading Execution
+## 🔄 Paper Trading Execution
 
 ### Portfolio Management
 ```python
@@ -175,7 +175,7 @@ pip install pandas numpy matplotlib ib_insync arch
 
 ### Running the System
 ```bash
-# Start live trading engine
+# Start paper trading engine
 python portfolio/live_port.py
 
 # Run backtests
@@ -198,7 +198,7 @@ The system generates comprehensive performance reports including:
 
 ## 🚨 Risk Disclosure
 
-This is a demonstration system for educational and professional development purposes. All trading involves risk of loss. The strategies and code provided are for illustrative purposes and should not be used for actual trading without proper risk management and regulatory compliance.
+This is a demonstration system for educational and professional development purposes using **paper trading only - no real money is involved**. All trading is conducted in Interactive Brokers' paper trading environment with simulated funds. The strategies and code provided are for illustrative and educational purposes. While the paper trading results provide valuable insights into strategy performance, actual trading involves real financial risk and should not be undertaken without proper risk management, regulatory compliance, and thorough understanding of the strategies involved.
 
 ## 📝 Development Roadmap
 

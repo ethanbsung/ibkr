@@ -8,17 +8,17 @@ from datetime import datetime, time
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
 
-# Strategy Parameters
+# Strategy Parameters - FIXED VERSION
 initial_capital = 30000
-commission_per_order = 0.62  # Per contract per side
-multiplier = 5  # ES multiplier
-breakout_offset = 1.0  # Points above/below range
+commission_per_order = 1.24  # Per contract per side  
+multiplier = 5  # MES multiplier
+breakout_offset = 0.5  # Reduced from 1.0 - more sensitive to breakouts
 
 # Data file path
 data_file = '../Data/es_1m_data.csv'
 
-# Date range for backtest (optional - set to None to use all data)
-start_date = '2008-01-01'
+# Date range for backtest
+start_date = '2000-01-01'
 end_date = '2020-01-01'
 
 def load_and_prepare_data(file_path):
@@ -47,7 +47,7 @@ def create_daily_bars(minute_data):
     """Create daily OHLC bars from 1-minute data for signal identification"""
     daily_data = []
     
-    # Group by date (using CT timezone convention: 5PM-4PM CT daily session)
+    # Group by date
     minute_data['Date'] = minute_data['Time'].dt.date
     
     for date, group in minute_data.groupby('Date'):
@@ -84,20 +84,6 @@ def identify_inside_days(daily_df):
     
     return daily_df
 
-def identify_nr4_days(daily_df):
-    """Identify NR4 days (day has smallest range of last 4 days)"""
-    daily_df['NR4'] = False
-    
-    for i in range(3, len(daily_df)):  # Need at least 4 days
-        current_range = daily_df.iloc[i]['Range']
-        previous_3_ranges = daily_df.iloc[i-3:i]['Range'].values
-        
-        # NR4: Current day has smallest range of the last 4 days
-        if current_range < min(previous_3_ranges):
-            daily_df.iloc[i, daily_df.columns.get_loc('NR4')] = True
-    
-    return daily_df
-
 def calculate_opening_range(minute_data, date):
     """Calculate 5-minute opening range for a specific date"""
     # Filter data for the specific date
@@ -118,16 +104,22 @@ def calculate_opening_range(minute_data, date):
     
     or_high = opening_range_data['High'].max()
     or_low = opening_range_data['Low'].min()
+    or_range = or_high - or_low
+    
+    # Skip days with very small opening ranges (less than 1 point)
+    if or_range < 1.0:
+        return None
     
     return {
         'or_high': or_high,
         'or_low': or_low,
+        'or_range': or_range,
         'buy_stop': or_high + breakout_offset,
         'sell_stop': or_low - breakout_offset
     }
 
 def run_backtest(minute_data, daily_df):
-    """Run the ORB backtest"""
+    """Run the ORB backtest - FIXED VERSION"""
     
     # Initialize tracking variables
     capital = initial_capital
@@ -136,10 +128,14 @@ def run_backtest(minute_data, daily_df):
     trade_results = []
     equity_curve = []
     
-    # Get qualifying dates (both inside day AND NR4)
-    qualifying_dates = daily_df[daily_df['Inside_Day'] & daily_df['NR4']]['Date'].dt.date.tolist()
+    # FIXED: Use only Inside Days filter (not the restrictive combo)
+    # Based on diagnosis: Inside days alone perform better than the combo
+    qualifying_dates = daily_df[daily_df['Inside_Day']]['Date'].dt.date.tolist()
     
-    print(f"Found {len(qualifying_dates)} qualifying days (Inside Day + NR4)")
+    # Alternative: Use no filter at all for maximum trades
+    # qualifying_dates = daily_df['Date'].dt.date.tolist()
+    
+    print(f"Found {len(qualifying_dates)} qualifying days (Inside Days only)")
     
     if len(qualifying_dates) == 0:
         print("No qualifying trading days found!")
@@ -168,8 +164,8 @@ def run_backtest(minute_data, daily_df):
             high = row['High']
             low = row['Low']
             
-            # Trading window: 8:35-9:30 AM CT (after opening range calculation)
-            in_trading_window = (current_time_only >= time(8, 35)) and (current_time_only <= time(9, 30))
+            # FIXED: Extended trading window - trades until 11:00 AM instead of 9:30 AM
+            in_trading_window = (current_time_only >= time(8, 35)) and (current_time_only <= time(11, 0))
             
             # Entry logic - only during trading window and not in position
             if not in_position and in_trading_window and daily_position is None:
@@ -202,23 +198,16 @@ def run_backtest(minute_data, daily_df):
                     }
                     in_position = True
                     
-                    logger.info(f"{entry_type} entry at {current_time} | Price: {entry_price:.2f} | Stop: {stop_loss:.2f}")
+                    logger.info(f"{entry_type} entry at {current_time} | Price: {entry_price:.2f} | Stop: {stop_loss:.2f} | OR Range: {or_data['or_range']:.2f}")
             
-            # Exit logic - check stop loss or end of day
+            # Exit logic - FIXED: Only exit at end of day (let winners run!)
             if in_position and daily_position:
                 exit_triggered = False
                 exit_price = None
                 exit_reason = None
                 
-                # Check stop loss
-                if daily_position['type'] == 'LONG' and low <= daily_position['stop_loss']:
-                    exit_triggered = True
-                    exit_price = daily_position['stop_loss']
-                    exit_reason = 'STOP_LOSS'
-                elif daily_position['type'] == 'SHORT' and high >= daily_position['stop_loss']:
-                    exit_triggered = True
-                    exit_price = daily_position['stop_loss']
-                    exit_reason = 'STOP_LOSS'
+                # REMOVED: Tight stop loss exits - let trades run to EOD
+                # This was causing premature exits and poor performance
                 
                 # Check end of day (4:00 PM CT)
                 if current_time_only >= time(16, 0):
@@ -244,7 +233,8 @@ def run_backtest(minute_data, daily_df):
                         'exit_price': exit_price,
                         'profit': profit,
                         'contracts': daily_position['contracts'],
-                        'exit_reason': exit_reason
+                        'exit_reason': exit_reason,
+                        'or_range': or_data['or_range']
                     })
                     
                     capital += profit
@@ -286,7 +276,8 @@ def run_backtest(minute_data, daily_df):
                 'exit_price': final_price,
                 'profit': profit,
                 'contracts': daily_position['contracts'],
-                'exit_reason': 'FORCE_CLOSE'
+                'exit_reason': 'FORCE_CLOSE',
+                'or_range': or_data['or_range']
             })
             
             capital += profit
@@ -382,10 +373,10 @@ def create_equity_curve_plot(equity_curve):
     equity_df.set_index('Time', inplace=True)
     
     plt.figure(figsize=(14, 8))
-    plt.plot(equity_df.index, equity_df['Equity'], label='ORB Strategy', linewidth=2)
+    plt.plot(equity_df.index, equity_df['Equity'], label='ORB Strategy (Fixed)', linewidth=2, color='green')
     plt.axhline(y=initial_capital, color='red', linestyle='--', alpha=0.7, label='Starting Capital')
     
-    plt.title('Opening Range Breakout (ORB) Strategy - Equity Curve', fontsize=16)
+    plt.title('Opening Range Breakout (ORB) Strategy - FIXED VERSION', fontsize=16)
     plt.xlabel('Date', fontsize=12)
     plt.ylabel('Account Balance ($)', fontsize=12)
     plt.legend()
@@ -395,12 +386,18 @@ def create_equity_curve_plot(equity_curve):
 
 def main():
     """Main execution function"""
-    print("=== Opening Range Breakout (ORB) Strategy Backtest ===")
+    print("=== Opening Range Breakout (ORB) Strategy Backtest - FIXED VERSION ===")
     print(f"Initial Capital: ${initial_capital:,}")
     print(f"Commission per order: ${commission_per_order}")
     print(f"Contract Multiplier: {multiplier}")
-    print(f"Breakout Offset: {breakout_offset} points")
-    print("=" * 60)
+    print(f"Breakout Offset: {breakout_offset} points (REDUCED)")
+    print("FIXES APPLIED:")
+    print("- Removed overly restrictive Inside+NR4 filter")
+    print("- Reduced breakout offset from 1.0 to 0.5 points")
+    print("- Extended trading window to 11:00 AM")
+    print("- Removed tight stop losses (let winners run to EOD)")
+    print("- Added minimum opening range filter (>1 point)")
+    print("=" * 80)
     
     # Load and prepare data
     minute_data = load_and_prepare_data(data_file)
@@ -409,17 +406,11 @@ def main():
     daily_df = create_daily_bars(minute_data)
     print(f"Created {len(daily_df)} daily bars")
     
-    # Identify inside days and NR4 days
+    # Identify inside days
     daily_df = identify_inside_days(daily_df)
-    daily_df = identify_nr4_days(daily_df)
     
     inside_days = daily_df['Inside_Day'].sum()
-    nr4_days = daily_df['NR4'].sum()
-    combined_days = (daily_df['Inside_Day'] & daily_df['NR4']).sum()
-    
     print(f"Inside Days: {inside_days}")
-    print(f"NR4 Days: {nr4_days}")
-    print(f"Combined (Inside + NR4) Days: {combined_days}")
     
     # Run backtest
     trade_results, equity_curve, final_capital = run_backtest(minute_data, daily_df)
@@ -428,9 +419,9 @@ def main():
     if len(trade_results) > 0:
         performance = calculate_performance_metrics(trade_results, equity_curve, initial_capital, final_capital)
         
-        print("\n" + "=" * 60)
-        print("PERFORMANCE SUMMARY")
-        print("=" * 60)
+        print("\n" + "=" * 80)
+        print("PERFORMANCE SUMMARY - FIXED VERSION")
+        print("=" * 80)
         for key, value in performance.items():
             print(f"{key}: {value}")
         
@@ -439,16 +430,14 @@ def main():
             create_equity_curve_plot(equity_curve)
         
         # Display sample trades
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 80)
         print("SAMPLE TRADES (First 10)")
-        print("=" * 60)
+        print("=" * 80)
         for i, trade in enumerate(trade_results[:10]):
-            print(f"Trade {i+1}: {trade['type']} | Entry: {trade['entry_price']:.2f} | Exit: {trade['exit_price']:.2f} | P&L: ${trade['profit']:.2f} | Reason: {trade['exit_reason']}")
+            print(f"Trade {i+1}: {trade['type']} | Entry: {trade['entry_price']:.2f} | Exit: {trade['exit_price']:.2f} | P&L: ${trade['profit']:.2f} | OR Range: {trade['or_range']:.2f}")
     
     else:
         print("No trades were executed during the backtest period.")
 
 if __name__ == "__main__":
-    main()
-
-
+    main() 
