@@ -9,7 +9,9 @@ Places buy and sell stops and uses one as entry and other as stop loss
 
 Places orders 1 "stretch" above the high and 1 "stretch" below the low
 
-NR7: After any day that has a daily range less than the previous 6 days
+NR4: After any day that has a daily range less than the previous 3 days
+
+
 
 
 '''
