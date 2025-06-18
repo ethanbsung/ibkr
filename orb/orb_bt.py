@@ -8,16 +8,23 @@ from datetime import datetime, time
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
 
-# Strategy Parameters
+# Strategy Parameters - CORRECTED VERSION WITH STOP LOSS
 initial_capital = 30000
-commission_per_order = 0.62  # Per contract per side
-multiplier = 5  # ES multiplier
-breakout_offset = 1.0  # Points above/below range
+commission_per_order = 0.62  # Per contract per side  
+multiplier = 5  # MES multiplier
+breakout_offset = 0.5  # Points above/below range
+
+# Stop Loss Parameters
+use_stop_loss = True  # Enable/disable stop loss
+stop_loss_points = 2.0  # Fixed point stop loss (alternative to OR-based)
+stop_loss_type = 'OR_BASED'  # 'OR_BASED' or 'FIXED_POINTS'
+# OR_BASED: Uses opposite breakout level as stop
+# FIXED_POINTS: Uses fixed point distance from entry
 
 # Data file path
 data_file = '../Data/es_1m_data.csv'
 
-# Date range for backtest (optional - set to None to use all data)
+# Date range for backtest
 start_date = '2008-01-01'
 end_date = '2020-01-01'
 
@@ -44,7 +51,7 @@ def load_and_prepare_data(file_path):
     return data
 
 def create_daily_bars(minute_data):
-    """Create daily OHLC bars from 1-minute data for signal identification"""
+    """Create daily OHLC bars from 1-minute data for NR4 identification"""
     daily_data = []
     
     # Group by date (using CT timezone convention: 5PM-4PM CT daily session)
@@ -70,20 +77,6 @@ def create_daily_bars(minute_data):
     
     return daily_df
 
-def identify_inside_days(daily_df):
-    """Identify inside days (day's range is inside previous day's range)"""
-    daily_df['Inside_Day'] = False
-    
-    for i in range(1, len(daily_df)):
-        current = daily_df.iloc[i]
-        previous = daily_df.iloc[i-1]
-        
-        # Inside day: High < Previous High AND Low > Previous Low
-        if current['High'] < previous['High'] and current['Low'] > previous['Low']:
-            daily_df.iloc[i, daily_df.columns.get_loc('Inside_Day')] = True
-    
-    return daily_df
-
 def identify_nr4_days(daily_df):
     """Identify NR4 days (day has smallest range of last 4 days)"""
     daily_df['NR4'] = False
@@ -99,203 +92,266 @@ def identify_nr4_days(daily_df):
     return daily_df
 
 def calculate_opening_range(minute_data, date):
-    """Calculate 5-minute opening range for a specific date"""
-    # Filter data for the specific date
-    date_data = minute_data[minute_data['Time'].dt.date == date].copy()
+    """Calculate 5-minute opening range for a specific date - OPTIMIZED"""
+    # Pre-filter data for the specific date (more efficient than filtering inside loop)
+    date_mask = minute_data['Time'].dt.date == date
+    date_data = minute_data[date_mask].copy()
     
     if len(date_data) == 0:
         return None
     
-    # Find opening range (8:30-8:35 AM CT)
-    date_data['Time_Only'] = date_data['Time'].dt.time
-    opening_range_data = date_data[
-        (date_data['Time_Only'] >= time(8, 30)) & 
-        (date_data['Time_Only'] < time(8, 35))
-    ]
+    # Find opening range (8:30-8:35 AM CT) using vectorized operations
+    time_only = date_data['Time'].dt.time
+    or_mask = (time_only >= time(8, 30)) & (time_only < time(8, 35))
+    opening_range_data = date_data[or_mask]
     
     if len(opening_range_data) == 0:
         return None
     
     or_high = opening_range_data['High'].max()
     or_low = opening_range_data['Low'].min()
+    or_range = or_high - or_low
+    
+    # Skip days with very small opening ranges (less than 1 point)
+    if or_range < 1.0:
+        return None
     
     return {
         'or_high': or_high,
         'or_low': or_low,
+        'or_range': or_range,
         'buy_stop': or_high + breakout_offset,
-        'sell_stop': or_low - breakout_offset
+        'sell_stop': or_low - breakout_offset,
+        'date_data': date_data  # Cache filtered data for reuse
     }
 
-def run_backtest(minute_data, daily_df):
-    """Run the ORB backtest"""
+def calculate_stop_loss(entry_price, entry_type, or_data):
+    """Calculate stop loss based on configured method"""
+    if not use_stop_loss:
+        return None
+    
+    if stop_loss_type == 'OR_BASED':
+        # Use opposite breakout level as stop loss
+        if entry_type == 'LONG':
+            return or_data['sell_stop']
+        else:  # SHORT
+            return or_data['buy_stop']
+    
+    elif stop_loss_type == 'FIXED_POINTS':
+        # Use fixed point distance from entry
+        if entry_type == 'LONG':
+            return entry_price - stop_loss_points
+        else:  # SHORT
+            return entry_price + stop_loss_points
+    
+    return None
+
+def run_backtest(minute_data):
+    """Run the ORB backtest - OPTIMIZED VERSION WITH NR4 FILTER"""
+    
+    # Create daily bars for NR4 identification
+    print("Creating daily bars for NR4 analysis...")
+    daily_df = create_daily_bars(minute_data)
+    daily_df = identify_nr4_days(daily_df)
+    
+    nr4_days = daily_df['NR4'].sum()
+    print(f"Found {nr4_days} NR4 days out of {len(daily_df)} total days")
+    
+    # Get NR4 dates for filtering
+    nr4_dates = set(daily_df[daily_df['NR4']]['Date'].dt.date.tolist())
     
     # Initialize tracking variables
     capital = initial_capital
-    in_position = False
-    position = None
     trade_results = []
     equity_curve = []
     
-    # Get qualifying dates (both inside day AND NR4)
-    qualifying_dates = daily_df[daily_df['Inside_Day'] & daily_df['NR4']]['Date'].dt.date.tolist()
+    # Pre-compute all dates to avoid repeated operations
+    all_dates = sorted(minute_data['Time'].dt.date.unique())
     
-    print(f"Found {len(qualifying_dates)} qualifying days (Inside Day + NR4)")
+    # Filter to only NR4 days + next day (since we trade the day AFTER NR4)
+    nr4_next_day_dates = []
+    daily_dates = sorted(daily_df['Date'].dt.date.tolist())
     
-    if len(qualifying_dates) == 0:
-        print("No qualifying trading days found!")
-        return trade_results, equity_curve, capital
+    for i, date in enumerate(daily_dates[:-1]):  # Exclude last day since it has no "next day"
+        if date in nr4_dates:
+            next_day = daily_dates[i + 1]
+            nr4_next_day_dates.append(next_day)
+    
+    qualifying_dates = [d for d in all_dates if d in nr4_next_day_dates]
+    
+    print(f"Found {len(qualifying_dates)} trading days (day after NR4)")
+    print(f"Stop Loss Enabled: {use_stop_loss}")
+    if use_stop_loss:
+        print(f"Stop Loss Type: {stop_loss_type}")
+        if stop_loss_type == 'FIXED_POINTS':
+            print(f"Stop Loss Distance: {stop_loss_points} points")
+    
+    total_trades = 0
+    successful_setups = 0
     
     # Process each qualifying date
-    for trade_date in qualifying_dates:
-        # Calculate opening range
+    for i, trade_date in enumerate(qualifying_dates):
+        # Progress indicator for long backtests
+        if i % 100 == 0 and i > 0:
+            print(f"Processed {i}/{len(qualifying_dates)} NR4 days ({i/len(qualifying_dates)*100:.1f}%)")
+        
+        # Calculate opening range (includes cached day data)
         or_data = calculate_opening_range(minute_data, trade_date)
         if or_data is None:
             continue
         
-        # Get minute data for this trading day
-        day_data = minute_data[minute_data['Time'].dt.date == trade_date].copy()
+        successful_setups += 1
+        
+        # Use cached day data from opening range calculation
+        day_data = or_data['date_data'].copy()
         day_data['Time_Only'] = day_data['Time'].dt.time
+        
+        # Pre-filter to relevant trading hours only (8:35 AM - 3:00 PM CT) - CHANGED TO 3PM
+        relevant_mask = (day_data['Time_Only'] >= time(8, 35)) & (day_data['Time_Only'] <= time(15, 0))
+        day_data = day_data[relevant_mask].reset_index(drop=True)
+        
+        if len(day_data) == 0:
+            continue
         
         # Track daily state
         daily_position = None
         daily_equity = capital
+        trade_taken = False
         
-        # Process each minute bar for this day
-        for idx, row in day_data.iterrows():
-            current_time = row['Time']
-            current_time_only = row['Time_Only']
-            current_price = row['Last']
-            high = row['High']
-            low = row['Low']
+        # OPTIMIZED: Process only trading window (8:35-9:30) for entries
+        entry_window_mask = day_data['Time_Only'] <= time(9, 30)
+        entry_window_data = day_data[entry_window_mask]
+        
+        # Look for breakout in entry window
+        if len(entry_window_data) > 0:
+            # Vectorized breakout detection
+            long_breakout_mask = entry_window_data['High'] >= or_data['buy_stop']
+            short_breakout_mask = entry_window_data['Low'] <= or_data['sell_stop']
             
-            # Trading window: 8:35-9:30 AM CT (after opening range calculation)
-            in_trading_window = (current_time_only >= time(8, 35)) and (current_time_only <= time(9, 30))
+            long_breakout_idx = None
+            short_breakout_idx = None
             
-            # Entry logic - only during trading window and not in position
-            if not in_position and in_trading_window and daily_position is None:
-                entry_type = None
-                entry_price = None
-                
-                # Check for breakout
-                if high >= or_data['buy_stop']:
-                    # Long breakout
+            if long_breakout_mask.any():
+                long_breakout_idx = entry_window_data[long_breakout_mask].index[0]
+            if short_breakout_mask.any():
+                short_breakout_idx = entry_window_data[short_breakout_mask].index[0]
+            
+            # Determine which breakout occurred first
+            entry_idx = None
+            entry_type = None
+            entry_price = None
+            
+            if long_breakout_idx is not None and short_breakout_idx is not None:
+                # Both breakouts occurred - take the first one
+                if long_breakout_idx <= short_breakout_idx:
+                    entry_idx = long_breakout_idx
                     entry_type = 'LONG'
                     entry_price = or_data['buy_stop']
-                    stop_loss = or_data['sell_stop']
-                elif low <= or_data['sell_stop']:
-                    # Short breakout
+                else:
+                    entry_idx = short_breakout_idx
                     entry_type = 'SHORT'
                     entry_price = or_data['sell_stop']
-                    stop_loss = or_data['buy_stop']
-                
-                if entry_type:
-                    # Enter position
-                    num_contracts = 1  # Single contract per trade
-                    capital -= commission_per_order * num_contracts  # Entry commission
-                    
-                    daily_position = {
-                        'type': entry_type,
-                        'entry_price': entry_price,
-                        'entry_time': current_time,
-                        'stop_loss': stop_loss,
-                        'contracts': num_contracts
-                    }
-                    in_position = True
-                    
-                    logger.info(f"{entry_type} entry at {current_time} | Price: {entry_price:.2f} | Stop: {stop_loss:.2f}")
+            elif long_breakout_idx is not None:
+                entry_idx = long_breakout_idx
+                entry_type = 'LONG'
+                entry_price = or_data['buy_stop']
+            elif short_breakout_idx is not None:
+                entry_idx = short_breakout_idx
+                entry_type = 'SHORT'
+                entry_price = or_data['sell_stop']
             
-            # Exit logic - check stop loss or end of day
-            if in_position and daily_position:
-                exit_triggered = False
+            # If we have an entry, process the trade
+            if entry_type:
+                entry_row = day_data.loc[entry_idx]
+                current_time = entry_row['Time']
+                
+                # Calculate stop loss
+                stop_loss = calculate_stop_loss(entry_price, entry_type, or_data)
+                
+                # Enter position
+                num_contracts = 1
+                capital -= commission_per_order * num_contracts
+                
+                daily_position = {
+                    'type': entry_type,
+                    'entry_price': entry_price,
+                    'entry_time': current_time,
+                    'stop_loss': stop_loss,
+                    'contracts': num_contracts
+                }
+                trade_taken = True
+                total_trades += 1
+                
+                # Reduced logging for performance
+                if total_trades <= 10 or total_trades % 50 == 0:
+                    stop_info = f" | Stop: {stop_loss:.2f}" if stop_loss else " | No Stop"
+                    logger.info(f"ENTRY {total_trades}: {entry_type} at {current_time} | Price: {entry_price:.2f}{stop_info}")
+                
+                # OPTIMIZED EXIT PROCESSING: Look for exit after entry
+                exit_data = day_data[day_data.index > entry_idx].copy()
+                
+                exit_found = False
                 exit_price = None
+                exit_time = None
                 exit_reason = None
                 
-                # Check stop loss
-                if daily_position['type'] == 'LONG' and low <= daily_position['stop_loss']:
-                    exit_triggered = True
-                    exit_price = daily_position['stop_loss']
-                    exit_reason = 'STOP_LOSS'
-                elif daily_position['type'] == 'SHORT' and high >= daily_position['stop_loss']:
-                    exit_triggered = True
-                    exit_price = daily_position['stop_loss']
-                    exit_reason = 'STOP_LOSS'
-                
-                # Check end of day (4:00 PM CT)
-                if current_time_only >= time(16, 0):
-                    exit_triggered = True
-                    exit_price = current_price
-                    exit_reason = 'END_OF_DAY'
-                
-                if exit_triggered:
-                    # Calculate profit
-                    if daily_position['type'] == 'LONG':
-                        price_diff = exit_price - daily_position['entry_price']
+                if use_stop_loss and stop_loss:
+                    # Vectorized stop loss detection
+                    if entry_type == 'LONG':
+                        stop_hit_mask = exit_data['Low'] <= stop_loss
                     else:  # SHORT
-                        price_diff = daily_position['entry_price'] - exit_price
+                        stop_hit_mask = exit_data['High'] >= stop_loss
                     
-                    profit = price_diff * multiplier * daily_position['contracts'] - commission_per_order * daily_position['contracts']
-                    
-                    # Record trade
-                    trade_results.append({
-                        'entry_time': daily_position['entry_time'],
-                        'exit_time': current_time,
-                        'type': daily_position['type'],
-                        'entry_price': daily_position['entry_price'],
-                        'exit_price': exit_price,
-                        'profit': profit,
-                        'contracts': daily_position['contracts'],
-                        'exit_reason': exit_reason
-                    })
-                    
-                    capital += profit
-                    in_position = False
-                    daily_position = None
-                    
-                    logger.info(f"{exit_reason} exit at {current_time} | Price: {exit_price:.2f} | Profit: {profit:.2f}")
-            
-            # Calculate mark-to-market equity
-            if in_position and daily_position:
-                if daily_position['type'] == 'LONG':
-                    unrealized = (current_price - daily_position['entry_price']) * multiplier * daily_position['contracts']
+                    if stop_hit_mask.any():
+                        exit_idx = exit_data[stop_hit_mask].index[0]
+                        exit_row = day_data.loc[exit_idx]
+                        exit_price = stop_loss
+                        exit_time = exit_row['Time']
+                        exit_reason = 'STOP_LOSS'
+                        exit_found = True
+                
+                # If no stop loss hit, exit at 3:00 PM CT (CHANGED FROM 4PM)
+                if not exit_found:
+                    exit_row = day_data.iloc[-1]
+                    exit_price = exit_row['Last']
+                    exit_time = exit_row['Time']
+                    exit_reason = 'END_OF_DAY_3PM'
+                
+                # Calculate profit
+                if entry_type == 'LONG':
+                    price_diff = exit_price - entry_price
                 else:  # SHORT
-                    unrealized = (daily_position['entry_price'] - current_price) * multiplier * daily_position['contracts']
-                daily_equity = capital + unrealized
-            else:
+                    price_diff = entry_price - exit_price
+                
+                profit = price_diff * multiplier * num_contracts - commission_per_order * num_contracts
+                
+                # Record trade
+                trade_results.append({
+                    'entry_time': current_time,
+                    'exit_time': exit_time,
+                    'type': entry_type,
+                    'entry_price': entry_price,
+                    'exit_price': exit_price,
+                    'profit': profit,
+                    'contracts': num_contracts,
+                    'exit_reason': exit_reason,
+                    'or_range': or_data['or_range'],
+                    'stop_loss': stop_loss
+                })
+                
+                capital += profit
                 daily_equity = capital
+                
+                # Reduced logging for performance
+                if total_trades <= 10 or total_trades % 50 == 0:
+                    logger.info(f"EXIT {total_trades}: {exit_reason} | Price: {exit_price:.2f} | P&L: ${profit:.2f}")
         
-        # Record daily equity
+        # Record daily equity (use final capital for the day)
         if len(day_data) > 0:
-            equity_curve.append((day_data.iloc[-1]['Time'], daily_equity))
-        
-        # Force close any remaining position at end of day
-        if in_position and daily_position:
-            final_price = day_data.iloc[-1]['Last']
-            
-            if daily_position['type'] == 'LONG':
-                price_diff = final_price - daily_position['entry_price']
-            else:  # SHORT
-                price_diff = daily_position['entry_price'] - final_price
-            
-            profit = price_diff * multiplier * daily_position['contracts'] - commission_per_order * daily_position['contracts']
-            
-            trade_results.append({
-                'entry_time': daily_position['entry_time'],
-                'exit_time': day_data.iloc[-1]['Time'],
-                'type': daily_position['type'],
-                'entry_price': daily_position['entry_price'],
-                'exit_price': final_price,
-                'profit': profit,
-                'contracts': daily_position['contracts'],
-                'exit_reason': 'FORCE_CLOSE'
-            })
-            
-            capital += profit
-            in_position = False
-            daily_position = None
-            
-            # Update final equity
-            if len(equity_curve) > 0:
-                equity_curve[-1] = (equity_curve[-1][0], capital)
+            equity_curve.append((day_data.iloc[-1]['Time'], capital))
+    
+    print(f"\nSetup Success Rate: {successful_setups}/{len(qualifying_dates)} = {(successful_setups/len(qualifying_dates)*100):.1f}%")
+    print(f"Trade Execution Rate: {total_trades}/{successful_setups} = {(total_trades/successful_setups*100):.1f}%" if successful_setups > 0 else "No valid setups")
     
     return trade_results, equity_curve, capital
 
@@ -353,10 +409,14 @@ def calculate_performance_metrics(trade_results, equity_curve, initial_capital, 
     avg_loss = np.mean(losing_trades) if len(losing_trades) > 0 else 0
     profit_factor = sum(winning_trades) / abs(sum(losing_trades)) if len(losing_trades) > 0 and sum(losing_trades) < 0 else float('inf')
     
+    # Stop loss analysis (if enabled)
+    stop_loss_exits = [t for t in trade_results if t['exit_reason'] == 'STOP_LOSS']
+    stop_loss_rate = (len(stop_loss_exits) / len(trade_results)) * 100 if len(trade_results) > 0 else 0
+    
     # Calmar ratio
     calmar_ratio = annualized_return / abs(max_drawdown) if max_drawdown != 0 else 0
     
-    return {
+    metrics = {
         'Start Date': start_date.strftime('%Y-%m-%d'),
         'End Date': end_date.strftime('%Y-%m-%d'),
         'Total Trades': len(trade_results),
@@ -375,6 +435,13 @@ def calculate_performance_metrics(trade_results, equity_curve, initial_capital, 
         'Winning Trades': len(winning_trades),
         'Losing Trades': len(losing_trades)
     }
+    
+    # Add stop loss metrics if enabled
+    if use_stop_loss:
+        metrics['Stop Loss Rate'] = f"{stop_loss_rate:.2f}%"
+        metrics['Stop Loss Exits'] = len(stop_loss_exits)
+    
+    return metrics
 
 def create_equity_curve_plot(equity_curve):
     """Create and display equity curve plot"""
@@ -385,7 +452,8 @@ def create_equity_curve_plot(equity_curve):
     plt.plot(equity_df.index, equity_df['Equity'], label='ORB Strategy', linewidth=2)
     plt.axhline(y=initial_capital, color='red', linestyle='--', alpha=0.7, label='Starting Capital')
     
-    plt.title('Opening Range Breakout (ORB) Strategy - Equity Curve', fontsize=16)
+    stop_label = f" (Stop Loss: {stop_loss_type})" if use_stop_loss else " (No Stop Loss)"
+    plt.title(f'Opening Range Breakout Strategy - Equity Curve{stop_label}', fontsize=16)
     plt.xlabel('Date', fontsize=12)
     plt.ylabel('Account Balance ($)', fontsize=12)
     plt.legend()
@@ -400,29 +468,20 @@ def main():
     print(f"Commission per order: ${commission_per_order}")
     print(f"Contract Multiplier: {multiplier}")
     print(f"Breakout Offset: {breakout_offset} points")
+    print(f"Filter: NR4 (trade day after narrow range 4)")
+    print(f"Exit Time: 3:00 PM CT (instead of 4:00 PM)")
+    print(f"Stop Loss Enabled: {use_stop_loss}")
+    if use_stop_loss:
+        print(f"Stop Loss Type: {stop_loss_type}")
+        if stop_loss_type == 'FIXED_POINTS':
+            print(f"Stop Loss Distance: {stop_loss_points} points")
     print("=" * 60)
     
     # Load and prepare data
     minute_data = load_and_prepare_data(data_file)
     
-    # Create daily bars for signal identification
-    daily_df = create_daily_bars(minute_data)
-    print(f"Created {len(daily_df)} daily bars")
-    
-    # Identify inside days and NR4 days
-    daily_df = identify_inside_days(daily_df)
-    daily_df = identify_nr4_days(daily_df)
-    
-    inside_days = daily_df['Inside_Day'].sum()
-    nr4_days = daily_df['NR4'].sum()
-    combined_days = (daily_df['Inside_Day'] & daily_df['NR4']).sum()
-    
-    print(f"Inside Days: {inside_days}")
-    print(f"NR4 Days: {nr4_days}")
-    print(f"Combined (Inside + NR4) Days: {combined_days}")
-    
     # Run backtest
-    trade_results, equity_curve, final_capital = run_backtest(minute_data, daily_df)
+    trade_results, equity_curve, final_capital = run_backtest(minute_data)
     
     # Calculate and display performance metrics
     if len(trade_results) > 0:
@@ -443,7 +502,21 @@ def main():
         print("SAMPLE TRADES (First 10)")
         print("=" * 60)
         for i, trade in enumerate(trade_results[:10]):
-            print(f"Trade {i+1}: {trade['type']} | Entry: {trade['entry_price']:.2f} | Exit: {trade['exit_price']:.2f} | P&L: ${trade['profit']:.2f} | Reason: {trade['exit_reason']}")
+            stop_info = f" | Stop: {trade['stop_loss']:.2f}" if trade['stop_loss'] else " | No Stop"
+            print(f"Trade {i+1}: {trade['type']} | Entry: {trade['entry_price']:.2f} | Exit: {trade['exit_price']:.2f} | P&L: ${trade['profit']:.2f} | Reason: {trade['exit_reason']}{stop_info} | OR: {trade['or_range']:.2f}")
+        
+        # Show exit reason breakdown
+        print("\n" + "=" * 60)
+        print("EXIT REASON BREAKDOWN")
+        print("=" * 60)
+        exit_reasons = {}
+        for trade in trade_results:
+            reason = trade['exit_reason']
+            exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+        
+        for reason, count in exit_reasons.items():
+            percentage = (count / len(trade_results)) * 100
+            print(f"{reason}: {count} trades ({percentage:.1f}%)")
     
     else:
         print("No trades were executed during the backtest period.")
