@@ -1,6 +1,6 @@
 {
   "ES": {
-    "IBS_ES": 2,
+    "IBS_ES": 1,
     "Williams_ES": 0
   },
   "YM": {
@@ -8,7 +8,7 @@
     "Williams_YM": 0
   },
   "GC": {
-    "IBS_GC": 2,
+    "IBS_GC": 1,
     "Williams_GC": 0
   },
   "NQ": {
