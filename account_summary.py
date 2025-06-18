@@ -6,6 +6,14 @@ import numpy as np
 import os
 import json
 
+# Contract multipliers from live_port.py for proper avgCost display
+contract_multipliers = {
+    'MES': 5,      # Micro E-mini S&P 500
+    'MYM': 0.50,   # Micro Dow 
+    'MGC': 10,     # Micro Gold
+    'MNQ': 2       # Micro Nasdaq
+}
+
 def connect_to_ibkr():
     """Establish connection to IB Gateway"""
     ib = IB()
@@ -82,12 +90,18 @@ def get_current_positions(ib):
         
         position_data = []
         for pos in positions:
+            # Get the multiplier for this contract symbol
+            multiplier = contract_multipliers.get(pos.contract.symbol, 1)
+            
+            # Divide avgCost by multiplier for futures contracts
+            adjusted_avg_cost = pos.avgCost / multiplier if pos.contract.secType == 'FUT' and multiplier != 1 else pos.avgCost
+            
             position_data.append({
                 'Symbol': pos.contract.symbol,
                 'SecType': pos.contract.secType,
                 'Exchange': pos.contract.exchange,
                 'Position': pos.position,
-                'AvgCost': pos.avgCost,
+                'AvgCost': adjusted_avg_cost,
                 'Account': pos.account
             })
         
@@ -105,13 +119,19 @@ def get_portfolio_pnl(ib):
         
         portfolio_data = []
         for item in portfolio:
+            # Get the multiplier for this contract symbol
+            multiplier = contract_multipliers.get(item.contract.symbol, 1)
+            
+            # Divide avgCost by multiplier for futures contracts
+            adjusted_avg_cost = item.averageCost / multiplier if item.contract.secType == 'FUT' and multiplier != 1 else item.averageCost
+            
             portfolio_data.append({
                 'Symbol': item.contract.symbol,
                 'SecType': item.contract.secType,
                 'Position': item.position,
                 'MarketPrice': item.marketPrice,
                 'MarketValue': item.marketValue,
-                'AvgCost': item.averageCost,
+                'AvgCost': adjusted_avg_cost,
                 'UnrealizedPnL': item.unrealizedPNL,
                 'RealizedPnL': item.realizedPNL,
                 'Account': item.account
