@@ -13,7 +13,7 @@ def load_position_data() -> List[Dict]:
     """Load current position data from portfolio state"""
     try:
         # Try to load from portfolio state (from live trading system)
-        with open('ES/portfolio_state.json', 'r') as f:
+        with open('portfolio_state.json', 'r') as f:
             portfolio_state = json.load(f)
         
         positions = []
@@ -205,7 +205,7 @@ def generate_dynamic_badges(metrics: Dict) -> str:
     
     # Generate trading status badge
     status_color = "brightgreen" if total_pnl >= 0 else "yellow"
-    status_text = "LIVE" if metrics['trading_days'] > 0 else "PAPER"
+    status_text = "PAPER"  # Always use PAPER for this educational system
     
     # Advanced metrics badges
     sharpe_badge = ""
@@ -255,11 +255,11 @@ def generate_metrics_section(metrics: Dict, positions: List[Dict]) -> str:
     pnl_emoji = "📈" if metrics['total_pnl'] >= 0 else "📉"
     
     section = f"""
-## 📊 Live Trading Performance
+## 📊 Paper Trading Performance
 
 > **Last Updated:** {metrics['last_updated']} | **Trading Days:** {metrics['trading_days']}
 
-### Current Account Status
+### Current Paper Account Status
 | Metric | Value |
 |--------|-------|
 | **Account Value** | {format_currency(metrics['account_value'])} |
@@ -331,7 +331,7 @@ def generate_metrics_section(metrics: Dict, positions: List[Dict]) -> str:
         if '3_months_return' in metrics:
             section += f"| **3 Months** | {format_percentage(metrics['3_months_return'])} |\n"
     
-    section += f"\n*📝 Metrics automatically updated via GitHub Actions from live IBKR account*\n"
+    section += f"\n*📝 Metrics automatically updated via GitHub Actions from paper trading IBKR account*\n"
     
     # Add disclaimer for max drawdown if it's being shown
     if metrics.get('max_drawdown_pct', 0) > 0:
@@ -358,26 +358,31 @@ def update_readme_with_metrics(metrics_section: str, badges: str) -> bool:
             after_badges = content[desc_pos:]
             content = before_badges + '\n\n' + badges + '\n\n' + after_badges
         
-        # Clean up the Live Trading Performance section more robustly
+        # Clean up the Paper Trading Performance section more robustly
+        # Look for both live and paper trading sections for compatibility
+        paper_trading_start = content.find('## 📊 Paper Trading Performance')
         live_trading_start = content.find('## 📊 Live Trading Performance')
-        if live_trading_start != -1:
+        
+        trading_start = paper_trading_start if paper_trading_start != -1 else live_trading_start
+        
+        if trading_start != -1:
             # Find the next major section (Trading Strategies)
-            next_section = content.find('## 📊 Trading Strategies', live_trading_start + 1)
+            next_section = content.find('## 📊 Trading Strategies', trading_start + 1)
             if next_section == -1:
                 # If Trading Strategies not found, look for Technical Architecture
-                next_section = content.find('## 🔧 Technical Architecture', live_trading_start + 1)
+                next_section = content.find('## 🔧 Technical Architecture', trading_start + 1)
             
             if next_section != -1:
-                # Replace the entire Live Trading Performance section
-                before_section = content[:live_trading_start]
+                # Replace the entire Trading Performance section
+                before_section = content[:trading_start]
                 after_section = content[next_section:]
                 content = before_section + metrics_section.strip() + '\n\n' + after_section
             else:
                 # If no next section found, replace to end of file
-                before_section = content[:live_trading_start]
+                before_section = content[:trading_start]
                 content = before_section + metrics_section.strip()
         else:
-            # If no existing Live Trading Performance section, add after Key Features
+            # If no existing Trading Performance section, add after Key Features
             key_features_pattern = '## 🚀 Key Features'
             key_features_pos = content.find(key_features_pattern)
             if key_features_pos != -1:
@@ -408,7 +413,7 @@ def update_readme_with_metrics(metrics_section: str, badges: str) -> bool:
 
 def main():
     """Main function to update README with trading metrics"""
-    print("Updating README with live trading metrics, positions, and dynamic badges...")
+    print("Updating README with paper trading metrics, positions, and dynamic badges...")
     
     # Load trading metrics
     metrics = load_trading_metrics()
@@ -430,7 +435,7 @@ def main():
     success = update_readme_with_metrics(metrics_section, badges)
     
     if success:
-        print("✅ README updated successfully with dynamic badges and positions")
+        print("✅ README updated successfully with paper trading dynamic badges and positions")
     else:
         print("❌ Failed to update README")
 
