@@ -12,6 +12,57 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 warnings.filterwarnings('ignore')
 
+#####   TRADING COST CALCULATIONS   #####
+
+def calculate_trading_cost_from_sr(symbol, trade_size, price, volatility, multiplier, 
+                                  sr_cost, capital, fx_rate=1.0):
+    """
+    Calculate trading cost in currency units from SR_cost.
+    
+    From the book: SR_cost represents the cost as a fraction of Sharpe ratio.
+    To convert to currency units:
+        Cost = |trade_size| × SR_cost × volatility × price × multiplier × fx_rate
+    
+    Parameters:
+        symbol (str): Instrument symbol.
+        trade_size (float): Absolute trade size in contracts.
+        price (float): Current price.
+        volatility (float): Annualized volatility forecast.
+        multiplier (float): Contract multiplier.
+        sr_cost (float): SR cost from instruments.csv.
+        capital (float): Portfolio capital.
+        fx_rate (float): FX rate for currency conversion.
+    
+    Returns:
+        float: Trading cost in base currency (USD).
+    """
+    if trade_size == 0 or sr_cost == 0:
+        return 0.0
+    
+    # Convert SR cost to currency cost
+    # This is an approximation based on the book's cost methodology
+    notional_per_contract = price * multiplier * fx_rate
+    cost_per_contract = sr_cost * volatility * notional_per_contract
+    total_cost = abs(trade_size) * cost_per_contract
+    
+    return total_cost
+
+def calculate_position_change(previous_position, current_position):
+    """
+    Calculate position change and trade size.
+    
+    Parameters:
+        previous_position (float): Previous position size.
+        current_position (float): Current position size.
+    
+    Returns:
+        float: Absolute trade size (always positive).
+    """
+    if pd.isna(previous_position) or pd.isna(current_position):
+        return 0.0
+    
+    return abs(current_position - previous_position)
+
 #####   STRATEGY 5: SLOW TREND FOLLOWING, LONG ONLY   #####
 
 def calculate_ewma_trend(prices: pd.Series, fast_span: int = 64, slow_span: int = 256) -> pd.Series:
@@ -232,6 +283,9 @@ def backtest_trend_following_strategy(data_dir='Data', capital=1000000, risk_tar
     known_eligible_instruments = set()
     weights = {} 
     idm = 1.0
+    
+    # Initialize position tracking for cost calculation
+    previous_positions = {}
 
     # Main time-stepping loop with daily position updates
     for idx, current_date in enumerate(trading_days_range):
@@ -370,7 +424,23 @@ def backtest_trend_following_strategy(data_dir='Data', capital=1000000, risk_tar
                         # P&L calculation with FX rate to convert to base currency (USD)
                         price_change_in_local_currency = price_at_end_of_trading - price_at_start_of_trading
                         price_change_in_base_currency = price_change_in_local_currency * fx_rate
-                        instrument_pnl_today = num_contracts * instrument_multiplier * price_change_in_base_currency
+                        gross_pnl = num_contracts * instrument_multiplier * price_change_in_base_currency
+                        
+                        # Calculate trading costs
+                        previous_position = previous_positions.get(symbol, 0.0)
+                        trade_size = calculate_position_change(previous_position, num_contracts)
+                        trading_cost = 0.0
+                        
+                        if trade_size > 0:  # Only apply costs when there are trades
+                            sr_cost = specs.get('sr_cost', 0.0)
+                            if not pd.isna(sr_cost) and sr_cost > 0:
+                                trading_cost = calculate_trading_cost_from_sr(
+                                    symbol, trade_size, price_at_start_of_trading, vol_for_sizing,
+                                    instrument_multiplier, sr_cost, capital_at_start_of_day, fx_rate
+                                )
+                        
+                        # Net P&L after costs
+                        instrument_pnl_today = gross_pnl - trading_cost
                         
                         # Count active instruments and long signals
                         if abs(num_contracts) > 0.01:
@@ -385,6 +455,9 @@ def backtest_trend_following_strategy(data_dir='Data', capital=1000000, risk_tar
             
             current_day_positions[symbol] = num_contracts
             daily_total_pnl += instrument_pnl_today
+            
+            # Update position tracking for next day's cost calculation
+            previous_positions[symbol] = num_contracts
 
         # Update portfolio equity (same as chapter 4)
         portfolio_daily_percentage_return = daily_total_pnl / capital_at_start_of_day if capital_at_start_of_day > 0 else 0.0

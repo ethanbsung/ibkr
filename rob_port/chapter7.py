@@ -15,6 +15,57 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 warnings.filterwarnings('ignore')
 
+#####   TRADING COST CALCULATIONS   #####
+
+def calculate_trading_cost_from_sr(symbol, trade_size, price, volatility, multiplier, 
+                                  sr_cost, capital, fx_rate=1.0):
+    """
+    Calculate trading cost in currency units from SR_cost.
+    
+    From the book: SR_cost represents the cost as a fraction of Sharpe ratio.
+    To convert to currency units:
+        Cost = |trade_size| × SR_cost × volatility × price × multiplier × fx_rate
+    
+    Parameters:
+        symbol (str): Instrument symbol.
+        trade_size (float): Absolute trade size in contracts.
+        price (float): Current price.
+        volatility (float): Annualized volatility forecast.
+        multiplier (float): Contract multiplier.
+        sr_cost (float): SR cost from instruments.csv.
+        capital (float): Portfolio capital.
+        fx_rate (float): FX rate for currency conversion.
+    
+    Returns:
+        float: Trading cost in base currency (USD).
+    """
+    if trade_size == 0 or sr_cost == 0:
+        return 0.0
+    
+    # Convert SR cost to currency cost
+    # This is an approximation based on the book's cost methodology
+    notional_per_contract = price * multiplier * fx_rate
+    cost_per_contract = sr_cost * volatility * notional_per_contract
+    total_cost = abs(trade_size) * cost_per_contract
+    
+    return total_cost
+
+def calculate_position_change(previous_position, current_position):
+    """
+    Calculate position change and trade size.
+    
+    Parameters:
+        previous_position (float): Previous position size.
+        current_position (float): Current position size.
+    
+    Returns:
+        float: Absolute trade size (always positive).
+    """
+    if pd.isna(previous_position) or pd.isna(current_position):
+        return 0.0
+    
+    return abs(current_position - previous_position)
+
 #####   STRATEGY 7: SLOW TREND FOLLOWING WITH TREND STRENGTH   #####
 
 def calculate_raw_forecast(prices: pd.Series, fast_span: int = 64, slow_span: int = 256,
@@ -386,6 +437,9 @@ def backtest_forecast_trend_strategy(data_dir='Data', capital=50000000, risk_tar
     known_eligible_instruments = set()
     weights = {} 
     idm = 1.0
+    
+    # Initialize position tracking for cost calculation
+    previous_positions = {}
 
     # Main time-stepping loop with daily position updates
     for idx, current_date in enumerate(trading_days_range):
@@ -524,7 +578,23 @@ def backtest_forecast_trend_strategy(data_dir='Data', capital=50000000, risk_tar
                             # P&L calculation with FX rate to convert to base currency (USD)
                             price_change_in_local_currency = price_at_end_of_trading - price_at_start_of_trading
                             price_change_in_base_currency = price_change_in_local_currency * fx_rate
-                            instrument_pnl_today = num_contracts * instrument_multiplier * price_change_in_base_currency
+                            gross_pnl = num_contracts * instrument_multiplier * price_change_in_base_currency
+                            
+                            # Calculate trading costs
+                            previous_position = previous_positions.get(symbol, 0.0)
+                            trade_size = calculate_position_change(previous_position, num_contracts)
+                            trading_cost = 0.0
+                            
+                            if trade_size > 0:  # Only apply costs when there are trades
+                                sr_cost = specs.get('sr_cost', 0.0)
+                                if not pd.isna(sr_cost) and sr_cost > 0:
+                                    trading_cost = calculate_trading_cost_from_sr(
+                                        symbol, trade_size, price_at_start_of_trading, vol_for_sizing,
+                                        instrument_multiplier, sr_cost, capital_at_start_of_day, fx_rate
+                                    )
+                            
+                            # Net P&L after costs
+                            instrument_pnl_today = gross_pnl - trading_cost
                         
                         # Count active instruments and collect forecasts
                         if abs(num_contracts) > 0.01:
@@ -542,6 +612,9 @@ def backtest_forecast_trend_strategy(data_dir='Data', capital=50000000, risk_tar
                 'forecast': actual_forecast_used
             }
             daily_total_pnl += instrument_pnl_today
+            
+            # Update position tracking for next day's cost calculation
+            previous_positions[symbol] = num_contracts
 
         # Calculate daily forecast metrics
         avg_forecast = np.mean(daily_forecasts) if daily_forecasts else 0.0
@@ -973,26 +1046,50 @@ def main():
     """
     Test Strategy 7 implementation.
     """
+    # ===========================================
+    # CONFIGURATION - MODIFY THESE AS NEEDED
+    # ===========================================
+    CAPITAL = 1000000               # Starting capital
+    START_DATE = '2000-01-01'       # Backtest start date (YYYY-MM-DD) or None for earliest available
+    END_DATE = '2020-01-01'         # Backtest end date (YYYY-MM-DD) or None for latest available
+    RISK_TARGET = 0.2               # 20% annual risk target
+    WEIGHT_METHOD = 'handcrafted'   # 'equal', 'vol_inverse', or 'handcrafted'
+    TREND_FAST_SPAN = 64            # Fast EWMA span for trend filter
+    TREND_SLOW_SPAN = 256           # Slow EWMA span for trend filter
+    FORECAST_SCALAR = 1.91           # Forecast scaling factor
+    FORECAST_CAP = 20.0             # Maximum absolute forecast value
+    
     print("=" * 60)
     print("TESTING STRATEGY 7: FORECAST TREND FOLLOWING")
+    print("=" * 60)
+    print(f"Configuration:")
+    print(f"  Capital: ${CAPITAL:,}")
+    print(f"  Date Range: {START_DATE or 'earliest'} to {END_DATE or 'latest'}")
+    print(f"  Risk Target: {RISK_TARGET:.1%}")
+    print(f"  Weight Method: {WEIGHT_METHOD}")
+    print(f"  Trend Filter: EWMA({TREND_FAST_SPAN},{TREND_SLOW_SPAN}) with Forecasts")
+    print(f"  Forecast Scalar: {FORECAST_SCALAR}")
+    print(f"  Forecast Cap: ±{FORECAST_CAP}")
     print("=" * 60)
     
     try:
         # Run Strategy 7 backtest
         results = backtest_forecast_trend_strategy(
             data_dir='Data',
-            capital=50000000,
-            risk_target=0.2,
+            capital=CAPITAL,
+            risk_target=RISK_TARGET,
             short_span=32,
             long_years=10,
             min_vol_floor=0.05,
-            trend_fast_span=64,
-            trend_slow_span=256,
-            forecast_scalar=1.9,
-            forecast_cap=20.0,
-            weight_method='handcrafted',
+            trend_fast_span=TREND_FAST_SPAN,
+            trend_slow_span=TREND_SLOW_SPAN,
+            forecast_scalar=FORECAST_SCALAR,
+            forecast_cap=FORECAST_CAP,
+            weight_method=WEIGHT_METHOD,
             common_hypothetical_SR=0.3,
-            annual_turnover_T=7.0
+            annual_turnover_T=7.0,
+            start_date=START_DATE,
+            end_date=END_DATE
         )
         
         # Analyze results
@@ -1002,7 +1099,7 @@ def main():
         plot_strategy7_equity_curve(results)
         
         # Compare all strategies
-        comparison = compare_all_forecast_strategies()
+        #comparison = compare_all_forecast_strategies()
         
         print(f"\nStrategy 7 backtest completed successfully!")
         return results

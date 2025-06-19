@@ -15,6 +15,57 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 warnings.filterwarnings('ignore')
 
+#####   TRADING COST CALCULATIONS   #####
+
+def calculate_trading_cost_from_sr(symbol, trade_size, price, volatility, multiplier, 
+                                  sr_cost, capital, fx_rate=1.0):
+    """
+    Calculate trading cost in currency units from SR_cost.
+    
+    From the book: SR_cost represents the cost as a fraction of Sharpe ratio.
+    To convert to currency units:
+        Cost = |trade_size| × SR_cost × volatility × price × multiplier × fx_rate
+    
+    Parameters:
+        symbol (str): Instrument symbol.
+        trade_size (float): Absolute trade size in contracts.
+        price (float): Current price.
+        volatility (float): Annualized volatility forecast.
+        multiplier (float): Contract multiplier.
+        sr_cost (float): SR cost from instruments.csv.
+        capital (float): Portfolio capital.
+        fx_rate (float): FX rate for currency conversion.
+    
+    Returns:
+        float: Trading cost in base currency (USD).
+    """
+    if trade_size == 0 or sr_cost == 0:
+        return 0.0
+    
+    # Convert SR cost to currency cost
+    # This is an approximation based on the book's cost methodology
+    notional_per_contract = price * multiplier * fx_rate
+    cost_per_contract = sr_cost * volatility * notional_per_contract
+    total_cost = abs(trade_size) * cost_per_contract
+    
+    return total_cost
+
+def calculate_position_change(previous_position, current_position):
+    """
+    Calculate position change and trade size.
+    
+    Parameters:
+        previous_position (float): Previous position size.
+        current_position (float): Current position size.
+    
+    Returns:
+        float: Absolute trade size (always positive).
+    """
+    if pd.isna(previous_position) or pd.isna(current_position):
+        return 0.0
+    
+    return abs(current_position - previous_position)
+
 #####   RESULTS CACHING SYSTEM   #####
 
 def get_results_cache_filename(strategy_name, config_hash):
@@ -599,7 +650,20 @@ def backtest_fast_trend_strategy_with_buffering(data_dir='Data', capital=5000000
                         
                         # Calculate P&L based on the position we held during the day (BEFORE any trades)
                         # This is the position we entered the day with
-                        instrument_pnl_today = current_pos * instrument_multiplier * (price_at_end_of_trading - price_at_start_of_trading)
+                        gross_pnl = current_pos * instrument_multiplier * (price_at_end_of_trading - price_at_start_of_trading)
+                        
+                        # Calculate trading costs (only apply if there are actual trades)
+                        trading_cost = 0.0
+                        if abs(trade_size) > 0.01:  # Only apply costs when there are significant trades
+                            sr_cost = specs.get('sr_cost', 0.0)
+                            if not pd.isna(sr_cost) and sr_cost > 0:
+                                trading_cost = calculate_trading_cost_from_sr(
+                                    symbol, abs(trade_size), price_at_start_of_trading, vol_for_sizing,
+                                    instrument_multiplier, sr_cost, capital_at_start_of_day, 1.0
+                                )
+                        
+                        # Net P&L after costs
+                        instrument_pnl_today = gross_pnl - trading_cost
                         
                         # Update current position for next iteration (AFTER P&L calculation)
                         current_positions[symbol] = num_contracts
@@ -1046,27 +1110,53 @@ def main():
     """
     Test Strategy 8 implementation.
     """
+    # ===========================================
+    # CONFIGURATION - MODIFY THESE AS NEEDED
+    # ===========================================
+    CAPITAL = 1000000               # Starting capital
+    START_DATE = '2000-01-01'       # Backtest start date (YYYY-MM-DD) or None for earliest available
+    END_DATE = '2020-01-01'         # Backtest end date (YYYY-MM-DD) or None for latest available
+    RISK_TARGET = 0.2               # 20% annual risk target
+    WEIGHT_METHOD = 'handcrafted'   # 'equal', 'vol_inverse', or 'handcrafted'
+    TREND_FAST_SPAN = 16            # Fast EWMA span for trend filter
+    TREND_SLOW_SPAN = 64            # Slow EWMA span for trend filter
+    FORECAST_SCALAR = 4.1           # Forecast scaling factor
+    FORECAST_CAP = 20.0             # Maximum absolute forecast value
+    BUFFER_FRACTION = 0.1           # Buffer fraction for trading
+    
     print("=" * 60)
     print("TESTING STRATEGY 8: FAST TREND FOLLOWING WITH BUFFERING")
+    print("=" * 60)
+    print(f"Configuration:")
+    print(f"  Capital: ${CAPITAL:,}")
+    print(f"  Date Range: {START_DATE or 'earliest'} to {END_DATE or 'latest'}")
+    print(f"  Risk Target: {RISK_TARGET:.1%}")
+    print(f"  Weight Method: {WEIGHT_METHOD}")
+    print(f"  Trend Filter: EWMA({TREND_FAST_SPAN},{TREND_SLOW_SPAN}) Fast with Buffering")
+    print(f"  Forecast Scalar: {FORECAST_SCALAR}")
+    print(f"  Forecast Cap: ±{FORECAST_CAP}")
+    print(f"  Buffer Fraction: {BUFFER_FRACTION:.1%}")
     print("=" * 60)
     
     try:
         # Run Strategy 8 backtest
         results = backtest_fast_trend_strategy_with_buffering(
             data_dir='Data',
-            capital=50000000,
-            risk_target=0.2,
+            capital=CAPITAL,
+            risk_target=RISK_TARGET,
             short_span=32,
             long_years=10,
             min_vol_floor=0.05,
-            trend_fast_span=16,
-            trend_slow_span=64,
-            forecast_scalar=4.1,
-            forecast_cap=20.0,
-            buffer_fraction=0.1,
-            weight_method='handcrafted',
+            trend_fast_span=TREND_FAST_SPAN,
+            trend_slow_span=TREND_SLOW_SPAN,
+            forecast_scalar=FORECAST_SCALAR,
+            forecast_cap=FORECAST_CAP,
+            buffer_fraction=BUFFER_FRACTION,
+            weight_method=WEIGHT_METHOD,
             common_hypothetical_SR=0.3,
             annual_turnover_T=7.0,
+            start_date=START_DATE,
+            end_date=END_DATE,
             debug_buffering=False
         )
         

@@ -784,8 +784,8 @@ def main():
     END_DATE = '2020-01-01'         # Backtest end date (YYYY-MM-DD) or None for latest available
     RISK_TARGET = 0.2               # 20% annual risk target
     WEIGHT_METHOD = 'handcrafted'   # 'equal', 'vol_inverse', or 'handcrafted'
-    TREND_FAST_SPAN = 8            # Fast EWMA span for trend filter
-    TREND_SLOW_SPAN = 32           # Slow EWMA span for trend filter
+    TREND_FAST_SPAN = 64            # Fast EWMA span for trend filter
+    TREND_SLOW_SPAN = 256           # Slow EWMA span for trend filter
     
     print("=" * 60)
     print("TESTING STRATEGY 6: LONG/SHORT TREND FOLLOWING")
