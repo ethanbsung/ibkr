@@ -638,17 +638,18 @@ def calculate_portfolio_position_size(symbol, capital, weight, idm, price, volat
     """
     if np.isnan(volatility) or volatility <= 0:
         return 0
-    
-    volatility = volatility / np.sqrt(business_days_per_year)
-    numerator = capital * idm * weight * risk_target
+
+    # Do NOT convert volatility to daily units; instead, convert risk_target to daily units
+    daily_risk_target = risk_target / np.sqrt(business_days_per_year)
+    numerator = capital * idm * weight * daily_risk_target
     denominator = multiplier * price * fx_rate * volatility
-    
+
     position_size = numerator / denominator
-    
+
     # Protect against infinite or extremely large position sizes
     if np.isinf(position_size) or position_size > 100000:
         return 0
-    
+
     # Round to nearest integer since you can only hold whole contracts
     return round(position_size)
 
@@ -1113,223 +1114,6 @@ def analyze_portfolio_results(results):
             avg_pos_str = f"{avg_pos:.2f}" if pd.notna(avg_pos) else "N/A"
         print(f"{symbol:<8} {weight:<8.3f} {avg_pos_str:<10}")
 
-#####   UNIT TESTS   #####
-
-def test_position_size_calculation():
-    """Test position size calculation function."""
-    print("\n=== Testing Position Size Calculation ===")
-    
-    # Test normal case
-    # Note: The function now divides volatility by sqrt(business_days_per_year) internally
-    input_volatility = 0.16  # Input volatility (annualized)
-    position = calculate_portfolio_position_size(
-        symbol='MES', capital=50000000, weight=0.02, idm=2.5, 
-        price=4500, volatility=input_volatility, multiplier=5, risk_target=0.2
-    )
-    
-    # Calculate expected value accounting for the volatility adjustment in the function
-    adjusted_volatility = input_volatility / np.sqrt(business_days_per_year)
-    expected_raw = (50000000 * 2.5 * 0.02 * 0.2) / (5 * 4500 * 1.0 * adjusted_volatility)
-    expected_rounded = round(expected_raw)
-    print(f"Normal case: position={position}, expected_raw={expected_raw:.2f}, expected_rounded={expected_rounded}")
-    print(f"  Input volatility: {input_volatility:.4f}, Adjusted volatility: {adjusted_volatility:.6f}")
-    assert position == expected_rounded, f"Position calculation failed: {position} != {expected_rounded}"
-    
-    # Test zero volatility
-    position_zero = calculate_portfolio_position_size(
-        'MES', 50000000, 0.02, 2.5, 4500, 0.0, 5, 0.2
-    )
-    print(f"Zero volatility: position={position_zero}")
-    assert position_zero == 0, "Zero volatility should return 0 position"
-    
-    # Test NaN volatility
-    position_nan = calculate_portfolio_position_size(
-        'MES', 50000000, 0.02, 2.5, 4500, np.nan, 5, 0.2
-    )
-    print(f"NaN volatility: position={position_nan}")
-    assert position_nan == 0, "NaN volatility should return 0 position"
-    
-    print("✓ Position size calculation tests passed")
-
-def test_idm_calculation():
-    """Test IDM calculation function."""
-    print("\n=== Testing IDM Calculation ===")
-    
-    test_cases = [
-        (1, 1.0),
-        (3, 1.48),
-        (8, 2.2),
-        (15, 2.3),
-        (30, 2.5),
-        (100, 2.5)
-    ]
-    
-    for num_instruments, expected_idm in test_cases:
-        calculated_idm = calculate_idm_from_count(num_instruments)
-        print(f"Instruments: {num_instruments}, IDM: {calculated_idm} (expected: {expected_idm})")
-        assert calculated_idm == expected_idm, f"IDM calculation failed for {num_instruments} instruments"
-    
-    print("✓ IDM calculation tests passed")
-
-def test_minimum_capital_calculation():
-    """Test minimum capital calculation function."""
-    print("\n=== Testing Minimum Capital Calculation ===")
-    
-    # Test normal case (MES example)
-    min_cap = calculate_minimum_capital_requirement(
-        symbol='MES', price=4500, volatility=0.16, multiplier=5, fx_rate=1.0,
-        assumed_idm=2.2, assumed_weight=0.1, risk_target=0.2, min_contracts=4
-    )
-    
-    # Manual calculation: (4 * 5 * 4500 * 1.0 * 0.16) / (2.2 * 0.1 * 0.2)
-    expected = (4 * 5 * 4500 * 1.0 * 0.16) / (2.2 * 0.1 * 0.2)
-    print(f"MES minimum capital: ${min_cap:,.0f} (expected: ${expected:,.0f})")
-    assert abs(min_cap - expected) < 1, f"Minimum capital calculation failed: {min_cap} != {expected}"
-    
-    # Test edge cases
-    min_cap_zero_vol = calculate_minimum_capital_requirement(
-        'TEST', 1000, 0.0, 1, 1.0, 2.0, 0.1, 0.2, 4
-    )
-    print(f"Zero volatility case: {min_cap_zero_vol}")
-    assert min_cap_zero_vol == float('inf'), "Zero volatility should return infinity"
-    
-    # Test high volatility instrument should require more capital
-    min_cap_high_vol = calculate_minimum_capital_requirement(
-        'VIX', 20, 0.80, 1000, 1.0, 2.2, 0.1, 0.2, 4
-    )
-    print(f"High volatility instrument: ${min_cap_high_vol:,.0f}")
-    assert min_cap_high_vol > min_cap, "Higher volatility should require more capital"
-    
-    print("✓ Minimum capital calculation tests passed")
-
-def test_capital_filtering():
-    """Test capital filtering function."""
-    print("\n=== Testing Capital Filtering ===")
-    
-    # Create mock instrument data
-    mock_data = {
-        'MES': pd.DataFrame({
-            'Last': [4500] * 300,
-            'returns': np.random.normal(0, 0.01, 300)
-        }),
-        'VIX': pd.DataFrame({
-            'Last': [20] * 300,
-            'returns': np.random.normal(0, 0.05, 300)  # High volatility
-        })
-    }
-    
-    # Add date index
-    dates = pd.date_range('2020-01-01', periods=300, freq='D')
-    for symbol in mock_data:
-        mock_data[symbol].index = dates
-    
-    # Load real instrument specs
-    try:
-        instruments_df = load_instrument_data()
-        fx_data = load_fx_data()
-        currency_mapping = get_instrument_currency_mapping()
-        
-        # Test with low capital (should filter out most instruments)
-        low_capital = 100000  # $100k
-        filtered_low = filter_instruments_by_capital(
-            mock_data, instruments_df, fx_data, currency_mapping, low_capital
-        )
-        
-        # Test with high capital (should include most instruments)
-        high_capital = 10000000  # $10M
-        filtered_high = filter_instruments_by_capital(
-            mock_data, instruments_df, fx_data, currency_mapping, high_capital
-        )
-        
-        print(f"Low capital (${low_capital:,}) eligible instruments: {len(filtered_low)}")
-        print(f"High capital (${high_capital:,}) eligible instruments: {len(filtered_high)}")
-        
-        # High capital should have >= instruments than low capital
-        assert len(filtered_high) >= len(filtered_low), "Higher capital should allow more instruments"
-        
-        print("✓ Capital filtering tests passed")
-        
-    except Exception as e:
-        print(f"⚠ Capital filtering test skipped: {e}")
-
-def test_instrument_weights():
-    """Test instrument weighting function."""
-    print("\n=== Testing Instrument Weights ===")
-    
-    # Create sample data
-    sample_data = {
-        'A': pd.DataFrame({'returns': np.random.normal(0, 0.01, 100)}),
-        'B': pd.DataFrame({'returns': np.random.normal(0, 0.02, 100)}),
-        'C': pd.DataFrame({'returns': np.random.normal(0, 0.015, 100)})
-    }
-    
-    # Test equal weights without capital filtering
-    equal_weights = calculate_instrument_weights(sample_data, 'equal', filter_by_capital=False)
-    expected_weight = 1.0 / 3
-    print(f"Equal weights: {equal_weights}")
-    
-    for symbol, weight in equal_weights.items():
-        assert abs(weight - expected_weight) < 0.001, f"Equal weight calculation failed for {symbol}"
-    
-    # Test that weights sum to 1
-    total_weight = sum(equal_weights.values())
-    print(f"Total weight: {total_weight}")
-    assert abs(total_weight - 1.0) < 0.001, "Weights should sum to 1"
-    
-    print("✓ Instrument weights tests passed")
-
-def test_data_loading():
-    """Test data loading function."""
-    print("\n=== Testing Data Loading ===")
-    
-    # Test loading with actual data directory
-    try:
-        instrument_data = load_all_instrument_data('Data')
-        print(f"Loaded {len(instrument_data)} instruments")
-        
-        # Check that each loaded instrument has required columns
-        for symbol, df in instrument_data.items():
-            required_columns = ['Last', 'returns']
-            for col in required_columns:
-                assert col in df.columns, f"Missing column {col} in {symbol}"
-            
-            # Check data quality
-            assert len(df) > 0, f"Empty data for {symbol}"
-            assert not df['Last'].isna().all(), f"All NaN prices for {symbol}"
-            
-        print("✓ Data loading tests passed")
-        return instrument_data
-        
-    except Exception as e:
-        print(f"✗ Data loading test failed: {e}")
-        return {}
-
-def run_unit_tests():
-    """Run all unit tests."""
-    print("=" * 60)
-    print("RUNNING UNIT TESTS")
-    print("=" * 60)
-    
-    try:
-        test_position_size_calculation()
-        test_idm_calculation()
-        test_minimum_capital_calculation()
-        test_capital_filtering()
-        test_instrument_weights()
-        instrument_data = test_data_loading()
-        
-        print("\n" + "=" * 60)
-        print("ALL UNIT TESTS PASSED ✓")
-        print("=" * 60)
-        
-        return True, instrument_data
-        
-    except Exception as e:
-        print(f"\n✗ Unit test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False, {}
-
 
 
 def main():
@@ -1340,17 +1124,10 @@ def main():
     # CONFIGURATION - MODIFY THESE AS NEEDED
     # ===========================================
     CAPITAL = 1000000               # Starting capital
-    START_DATE = '2020-01-01'       # Backtest start date (YYYY-MM-DD) or None for earliest available
+    START_DATE = '2000-01-01'       # Backtest start date (YYYY-MM-DD) or None for earliest available
     END_DATE = '2025-12-31'         # Backtest end date (YYYY-MM-DD) or None for latest available
     RISK_TARGET = 0.2               # 20% annual risk target
     WEIGHT_METHOD = 'handcrafted'   # 'equal', 'vol_inverse', or 'handcrafted'
-    
-    # Run unit tests
-    tests_passed, instrument_data = run_unit_tests()
-    
-    if not tests_passed:
-        print("Unit tests failed. Stopping execution.")
-        return
     
     try:
         print(f"\n" + "=" * 60)

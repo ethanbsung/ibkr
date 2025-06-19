@@ -369,7 +369,7 @@ def backtest_trend_following_strategy(data_dir='Data', capital=1000000, risk_tar
             try:
                 # Sizing based on previous day's close price and vol forecasts
                 price_for_sizing = df_instrument.loc[previous_trading_date, 'Last']
-                vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast']
+                vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast'] / np.sqrt(business_days_per_year)
                 
                 # Data for P&L calculation for current_date
                 price_at_start_of_trading = df_instrument.loc[previous_trading_date, 'Last']
