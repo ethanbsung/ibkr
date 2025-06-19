@@ -435,7 +435,7 @@ def backtest_trend_following_strategy(data_dir='Data', capital=1000000, risk_tar
                             sr_cost = specs.get('sr_cost', 0.0)
                             if not pd.isna(sr_cost) and sr_cost > 0:
                                 trading_cost = calculate_trading_cost_from_sr(
-                                    symbol, trade_size, price_at_start_of_trading, vol_for_sizing,
+                                    symbol, trade_size, price_at_start_of_trading, vol_for_sizing * np.sqrt(business_days_per_year),
                                     instrument_multiplier, sr_cost, capital_at_start_of_day, fx_rate
                                 )
                         

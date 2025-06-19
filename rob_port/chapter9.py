@@ -415,7 +415,7 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
                 try:
                     # Sizing based on previous day's close price and current day's forecasts
                     price_for_sizing = df_instrument.loc[previous_trading_date, 'Last']
-                    vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast']
+                    vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast'] / np.sqrt(business_days_per_year)
                     forecast_for_sizing = df_instrument.loc[current_date, 'combined_forecast']
                     actual_forecast_used = forecast_for_sizing
                     

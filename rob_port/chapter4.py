@@ -1125,7 +1125,7 @@ def main():
     # ===========================================
     CAPITAL = 1000000               # Starting capital
     START_DATE = '2000-01-01'       # Backtest start date (YYYY-MM-DD) or None for earliest available
-    END_DATE = '2025-12-31'         # Backtest end date (YYYY-MM-DD) or None for latest available
+    END_DATE = '2021-01-31'         # Backtest end date (YYYY-MM-DD) or None for latest available
     RISK_TARGET = 0.2               # 20% annual risk target
     WEIGHT_METHOD = 'handcrafted'   # 'equal', 'vol_inverse', or 'handcrafted'
     

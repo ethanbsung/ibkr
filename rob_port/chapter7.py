@@ -522,7 +522,7 @@ def backtest_forecast_trend_strategy(data_dir='Data', capital=50000000, risk_tar
                 try:
                     # Sizing based on previous day's close price and current day's vol forecasts
                     price_for_sizing = df_instrument.loc[previous_trading_date, 'Last']
-                    vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast']
+                    vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast'] / np.sqrt(business_days_per_year)
                     
                     # Data for P&L calculation for current_date
                     price_at_start_of_trading = df_instrument.loc[previous_trading_date, 'Last']
@@ -583,15 +583,10 @@ def backtest_forecast_trend_strategy(data_dir='Data', capital=50000000, risk_tar
                             # Calculate trading costs
                             previous_position = previous_positions.get(symbol, 0.0)
                             trade_size = calculate_position_change(previous_position, num_contracts)
-                            trading_cost = 0.0
-                            
-                            if trade_size > 0:  # Only apply costs when there are trades
-                                sr_cost = specs.get('sr_cost', 0.0)
-                                if not pd.isna(sr_cost) and sr_cost > 0:
-                                    trading_cost = calculate_trading_cost_from_sr(
-                                        symbol, trade_size, price_at_start_of_trading, vol_for_sizing,
-                                        instrument_multiplier, sr_cost, capital_at_start_of_day, fx_rate
-                                    )
+                            trading_cost = calculate_trading_cost_from_sr(
+                                symbol, trade_size, price_at_start_of_trading, vol_for_sizing * np.sqrt(business_days_per_year),
+                                instrument_multiplier, specs.get('sr_cost', 0.0), capital_at_start_of_day, fx_rate
+                            )
                             
                             # Net P&L after costs
                             instrument_pnl_today = gross_pnl - trading_cost

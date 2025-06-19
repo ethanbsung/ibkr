@@ -610,7 +610,7 @@ def backtest_fast_trend_strategy_with_buffering(data_dir='Data', capital=5000000
                 try:
                     # Sizing based on previous day's close price and current day's forecasts
                     price_for_sizing = df_instrument.loc[previous_trading_date, 'Last']
-                    vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast']
+                    vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast'] / np.sqrt(business_days_per_year)
                     forecast_for_sizing = df_instrument.loc[current_date, 'forecast']
                     actual_forecast_used = forecast_for_sizing
                     
@@ -658,7 +658,7 @@ def backtest_fast_trend_strategy_with_buffering(data_dir='Data', capital=5000000
                             sr_cost = specs.get('sr_cost', 0.0)
                             if not pd.isna(sr_cost) and sr_cost > 0:
                                 trading_cost = calculate_trading_cost_from_sr(
-                                    symbol, abs(trade_size), price_at_start_of_trading, vol_for_sizing,
+                                    symbol, abs(trade_size), price_at_start_of_trading, vol_for_sizing * np.sqrt(business_days_per_year),
                                     instrument_multiplier, sr_cost, capital_at_start_of_day, 1.0
                                 )
                         
