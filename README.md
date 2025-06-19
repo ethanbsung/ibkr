@@ -8,7 +8,7 @@
 ![P&L](https://img.shields.io/badge/P&L-%241%2C174-brightgreen)
 ![Return](https://img.shields.io/badge/Return-%2B3.8%25-brightgreen)
 ![Status](https://img.shields.io/badge/Trading-PAPER-brightgreen)
-![Last Updated](https://img.shields.io/badge/Last_Updated-2025-06-18-lightgrey)
+![Last Updated](https://img.shields.io/badge/Last_Updated-2025-06-19-lightgrey)
 
 A comprehensive algorithmic trading system implementing systematic trading strategies with paper trading execution, extensive backtesting, and Monte Carlo simulation capabilities. This project demonstrates enterprise-level quantitative finance software engineering practices using Interactive Brokers' paper trading environment.
 
@@ -35,7 +35,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Paper Trading Performance
 
-> **Last Updated:** 2025-06-18 21:36 UTC | **Trading Days:** 5
+> **Last Updated:** 2025-06-19 23:15 UTC | **Trading Days:** 5
 
 ### Current Paper Account Status
 | Metric | Value |
@@ -47,18 +47,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 | **Total Return** | +3.80% |
 
 ### Current Positions
-| Strategy | Symbol | Side | Contracts | Entry Price | Entry Date |
-|----------|--------|------|-----------|-------------|------------|
-| **IBS_ES** | MES | Long | 1 | $5985.50 | 2025-06-17 |
-| **IBS_GC** | MGC | Long | 1 | $3406.90 | 2025-06-17 |
-
-### Portfolio Risk Metrics
-| Metric | Value |
-|--------|-------|
-| **Total Notional** | $63,996.50 |
-| **Gross Leverage** | 2.0x |
-| **Risk per Position** | 50.0% avg allocation |
-| **Largest Position** | 53.2% (MGC) |
+*No positions currently open - waiting for entry signals*
 
 ### Recent Performance
 | Period | Return |
