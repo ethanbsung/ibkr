@@ -99,7 +99,7 @@ def apply_trend_filter_to_position(base_position: pd.Series, prices: pd.Series,
 # 1. Calculate base position using calculate_portfolio_position_size
 # 2. Apply trend filter by zeroing out bearish positions using apply_trend_filter_to_position
 
-def backtest_trend_following_strategy(data_dir='Data', capital=50000000, risk_target=0.2,
+def backtest_trend_following_strategy(data_dir='Data', capital=1000000, risk_target=0.2,
                                     short_span=32, long_years=10, min_vol_floor=0.05,
                                     trend_fast_span=64, trend_slow_span=256,
                                     weight_method='handcrafted',
@@ -687,6 +687,80 @@ Strategy 5 (Trend Following):
         import traceback
         traceback.print_exc()
 
+def plot_strategy5_equity_curve(results, save_path='results/strategy5.png'):
+    """
+    Plot Strategy 5 equity curve and save to file.
+    
+    Parameters:
+        results (dict): Results from backtest_trend_following_strategy.
+        save_path (str): Path to save the plot.
+    """
+    try:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        portfolio_df = results['portfolio_data']
+        config = results['config']
+        performance = results['performance']
+        
+        equity_curve = build_account_curve(portfolio_df['portfolio_return'], config['capital'])
+        
+        plt.figure(figsize=(12, 8))
+        
+        plt.subplot(2, 1, 1)
+        plt.plot(equity_curve.index, equity_curve.values, 'g-', linewidth=1.5, label='Strategy 5: Trend Following')
+        plt.title('Strategy 5: Trend Following Portfolio Equity Curve', fontsize=14, fontweight='bold')
+        plt.ylabel('Portfolio Value ($)', fontsize=12)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x/1e6:.1f}M'))
+        
+        plt.subplot(2, 1, 2)
+        drawdown_stats = calculate_maximum_drawdown(equity_curve)
+        drawdown_series = drawdown_stats['drawdown_series'] * 100
+        
+        plt.fill_between(drawdown_series.index, drawdown_series.values, 0, 
+                        color='red', alpha=0.3, label='Drawdown')
+        plt.plot(drawdown_series.index, drawdown_series.values, 'r-', linewidth=1)
+        plt.title('Drawdown', fontsize=12, fontweight='bold')
+        plt.ylabel('Drawdown (%)', fontsize=12)
+        plt.xlabel('Date', fontsize=12)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        for ax in plt.gcf().get_axes():
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+            ax.xaxis.set_major_locator(mdates.YearLocator(2))
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+        
+        time_in_market = (performance['avg_long_signals'] / performance['num_instruments']) * 100
+        
+        textstr = f'''Performance Summary:
+Total Return: {performance['total_return']:.1%}
+Annualized Return: {performance['annualized_return']:.1%}
+Volatility: {performance['annualized_volatility']:.1%}
+Sharpe Ratio: {performance['sharpe_ratio']:.3f}
+Max Drawdown: {performance['max_drawdown_pct']:.1f}%
+Time in Market: {time_in_market:.1f}%
+Instruments: {performance.get('num_instruments', 'N/A')} 
+Period: {config['backtest_start'].strftime('%Y-%m-%d')} to {config['backtest_end'].strftime('%Y-%m-%d')}'''
+        
+        plt.figtext(0.02, 0.02, textstr, fontsize=9, verticalalignment='bottom',
+                   bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.subplots_adjust(bottom=0.25)
+        
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        print(f"\n✅ Strategy 5 equity curve saved to: {save_path}")
+        
+    except Exception as e:
+        print(f"Error plotting equity curve: {e}")
+        import traceback
+        traceback.print_exc()
+
 def plot_equity_curves_only(strategy4_results, strategy5_results, save_path='results/equity_curves_comparison.png'):
     """
     Plot only the equity curves for Strategy 4 vs Strategy 5 comparison.
@@ -739,12 +813,18 @@ def plot_equity_curves_only(strategy4_results, strategy5_results, save_path='res
         import traceback
         traceback.print_exc()
 
-def compare_strategies(strategy5_results=None):
+def compare_strategies(strategy5_results=None, capital=1000000, risk_target=0.2, 
+                      start_date=None, end_date=None, weight_method='handcrafted'):
     """
     Compare Strategy 4 (no trend filter) vs Strategy 5 (with trend filter).
     
     Parameters:
         strategy5_results (dict): Pre-computed Strategy 5 results to avoid re-running.
+        capital (float): Starting capital for Strategy 4 comparison.
+        risk_target (float): Risk target for Strategy 4 comparison.
+        start_date (str): Start date for Strategy 4 comparison.
+        end_date (str): End date for Strategy 4 comparison.
+        weight_method (str): Weight method for Strategy 4 comparison.
     """
     print("\n" + "=" * 80)
     print("STRATEGY COMPARISON: STRATEGY 4 vs STRATEGY 5")
@@ -752,34 +832,38 @@ def compare_strategies(strategy5_results=None):
     
     try:
         # Strategy 4 (no trend filter)
-        print("Running Strategy 4 (no trend filter)...")
+        print("Running Strategy 4 (no trend filter) for comparison...")
         strategy4_results = backtest_multi_instrument_strategy(
             data_dir='Data',
-            capital=50000000,
-            risk_target=0.2,
+            capital=capital,
+            risk_target=risk_target,
             short_span=32,
             long_years=10,
             min_vol_floor=0.05,
-            weight_method='handcrafted',
+            weight_method=weight_method,
             common_hypothetical_SR=0.3,
-            annual_turnover_T=7.0
+            annual_turnover_T=7.0,
+            start_date=start_date,
+            end_date=end_date
         )
         
         # Use pre-computed Strategy 5 results if provided
         if strategy5_results is None:
-            print("Running Strategy 5 (with trend filter)...")
+            print("Running Strategy 5 (with trend filter) for comparison...")
             strategy5_results = backtest_trend_following_strategy(
                 data_dir='Data',
-                capital=50000000,
-                risk_target=0.2,
+                capital=capital,
+                risk_target=risk_target,
                 short_span=32,
                 long_years=10,
                 min_vol_floor=0.05,
                 trend_fast_span=64,
                 trend_slow_span=256,
-                weight_method='handcrafted',
+                weight_method=weight_method,
                 common_hypothetical_SR=0.3,
-                annual_turnover_T=7.0
+                annual_turnover_T=7.0,
+                start_date=start_date,
+                end_date=end_date
             )
         else:
             print("Using pre-computed Strategy 5 results...")
@@ -842,31 +926,64 @@ def main():
     """
     Test Strategy 5 implementation.
     """
+    # ===========================================
+    # CONFIGURATION - MODIFY THESE AS NEEDED
+    # ===========================================
+    CAPITAL = 1000000               # Starting capital
+    START_DATE = '2000-01-01'       # Backtest start date (YYYY-MM-DD) or None for earliest available
+    END_DATE = '2025-12-31'         # Backtest end date (YYYY-MM-DD) or None for latest available
+    RISK_TARGET = 0.2               # 20% annual risk target
+    WEIGHT_METHOD = 'handcrafted'   # 'equal', 'vol_inverse', or 'handcrafted'
+    TREND_FAST_SPAN = 64            # Fast EWMA span for trend filter
+    TREND_SLOW_SPAN = 256           # Slow EWMA span for trend filter
+    
     print("=" * 60)
     print("TESTING STRATEGY 5: TREND FOLLOWING")
+    print("=" * 60)
+    print(f"Configuration:")
+    print(f"  Capital: ${CAPITAL:,}")
+    print(f"  Date Range: {START_DATE or 'earliest'} to {END_DATE or 'latest'}")
+    print(f"  Risk Target: {RISK_TARGET:.1%}")
+    print(f"  Weight Method: {WEIGHT_METHOD}")
+    print(f"  Trend Filter: EWMA({TREND_FAST_SPAN},{TREND_SLOW_SPAN})")
     print("=" * 60)
     
     try:
         # Run Strategy 5 backtest
         results = backtest_trend_following_strategy(
             data_dir='Data',
-            capital=50000000,
-            risk_target=0.2,
+            capital=CAPITAL,
+            risk_target=RISK_TARGET,
             short_span=32,
             long_years=10,
             min_vol_floor=0.05,
-            trend_fast_span=64,
-            trend_slow_span=256,
-            weight_method='handcrafted',
+            trend_fast_span=TREND_FAST_SPAN,
+            trend_slow_span=TREND_SLOW_SPAN,
+            weight_method=WEIGHT_METHOD,
             common_hypothetical_SR=0.3,
-            annual_turnover_T=7.0
+            annual_turnover_T=7.0,
+            start_date=START_DATE,
+            end_date=END_DATE
         )
         
         # Analyze results
         analyze_trend_following_results(results)
-        
+
+        # Plot Strategy 5 equity curve
+        plot_strategy5_equity_curve(results)
+
+        '''
         # Compare strategies using pre-computed Strategy 5 results
-        comparison = compare_strategies(strategy5_results=results)
+        comparison = compare_strategies(
+            strategy5_results=results,
+            capital=CAPITAL,
+            risk_target=RISK_TARGET,
+            start_date=START_DATE,
+            end_date=END_DATE,
+            weight_method=WEIGHT_METHOD
+        )
+        
+        
         
         # Plot strategy comparison
         if comparison and comparison['strategy4'] and comparison['strategy5']:
@@ -874,6 +991,8 @@ def main():
         
         # Plot equity curves only
         plot_equity_curves_only(comparison['strategy4'], comparison['strategy5'])
+
+        '''
         
         print(f"\nStrategy 5 backtest completed successfully!")
         return results

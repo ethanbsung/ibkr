@@ -528,6 +528,84 @@ def analyze_long_short_results(results):
     print(f"Instruments with >25% time short: {sum(1 for stats in instrument_stats.values() if stats['percent_time_short_intended'] > 0.25)}")
     print(f"Instruments with any activity: {len(instrument_stats)}")
 
+def plot_strategy6_equity_curve(results, save_path='results/strategy6.png'):
+    """
+    Plot Strategy 6 equity curve and save to file.
+    
+    Parameters:
+        results (dict): Results from backtest_long_short_trend_strategy.
+        save_path (str): Path to save the plot.
+    """
+    try:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        portfolio_df = results['portfolio_data']
+        config = results['config']
+        performance = results['performance']
+        
+        equity_curve = build_account_curve(portfolio_df['portfolio_return'], config['capital'])
+        
+        plt.figure(figsize=(12, 8))
+        
+        plt.subplot(2, 1, 1)
+        plt.plot(equity_curve.index, equity_curve.values, 'purple', linewidth=1.5, label='Strategy 6: Long/Short Trend Following')
+        plt.title('Strategy 6: Long/Short Trend Following Portfolio Equity Curve', fontsize=14, fontweight='bold')
+        plt.ylabel('Portfolio Value ($)', fontsize=12)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x/1e6:.1f}M'))
+        
+        plt.subplot(2, 1, 2)
+        drawdown_stats = calculate_maximum_drawdown(equity_curve)
+        drawdown_series = drawdown_stats['drawdown_series'] * 100
+        
+        plt.fill_between(drawdown_series.index, drawdown_series.values, 0, 
+                        color='red', alpha=0.3, label='Drawdown')
+        plt.plot(drawdown_series.index, drawdown_series.values, 'r-', linewidth=1)
+        plt.title('Drawdown', fontsize=12, fontweight='bold')
+        plt.ylabel('Drawdown (%)', fontsize=12)
+        plt.xlabel('Date', fontsize=12)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        for ax in plt.gcf().get_axes():
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+            ax.xaxis.set_major_locator(mdates.YearLocator(2))
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+        
+        total_time_in_market = ((performance['avg_long_signals'] + performance['avg_short_signals']) / performance['num_instruments']) * 100
+        time_long = (performance['avg_long_signals'] / performance['num_instruments']) * 100
+        time_short = (performance['avg_short_signals'] / performance['num_instruments']) * 100
+        
+        textstr = f'''Performance Summary:
+Total Return: {performance['total_return']:.1%}
+Annualized Return: {performance['annualized_return']:.1%}
+Volatility: {performance['annualized_volatility']:.1%}
+Sharpe Ratio: {performance['sharpe_ratio']:.3f}
+Max Drawdown: {performance['max_drawdown_pct']:.1f}%
+Time in Market: {total_time_in_market:.1f}%
+Time Long: {time_long:.1f}%
+Time Short: {time_short:.1f}%
+Instruments: {performance.get('num_instruments', 'N/A')} 
+Period: {config['backtest_start'].strftime('%Y-%m-%d')} to {config['backtest_end'].strftime('%Y-%m-%d')}'''
+        
+        plt.figtext(0.02, 0.02, textstr, fontsize=9, verticalalignment='bottom',
+                   bbox=dict(boxstyle='round', facecolor='lavender', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.subplots_adjust(bottom=0.25)
+        
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        print(f"\n✅ Strategy 6 equity curve saved to: {save_path}")
+        
+    except Exception as e:
+        print(f"Error plotting equity curve: {e}")
+        import traceback
+        traceback.print_exc()
+
 def plot_strategy4_vs_strategy6_equity_curves(strategy4_results, strategy6_results, save_path='results/strategy4_vs_strategy6_equity_curves.png'):
     """
     Plot only the equity curves for Strategy 4 vs Strategy 6 comparison.
@@ -698,35 +776,58 @@ def main():
     """
     Test Strategy 6 implementation.
     """
+    # ===========================================
+    # CONFIGURATION - MODIFY THESE AS NEEDED
+    # ===========================================
+    CAPITAL = 1000000               # Starting capital
+    START_DATE = '2000-01-01'       # Backtest start date (YYYY-MM-DD) or None for earliest available
+    END_DATE = '2020-01-01'         # Backtest end date (YYYY-MM-DD) or None for latest available
+    RISK_TARGET = 0.2               # 20% annual risk target
+    WEIGHT_METHOD = 'handcrafted'   # 'equal', 'vol_inverse', or 'handcrafted'
+    TREND_FAST_SPAN = 8            # Fast EWMA span for trend filter
+    TREND_SLOW_SPAN = 32           # Slow EWMA span for trend filter
+    
     print("=" * 60)
     print("TESTING STRATEGY 6: LONG/SHORT TREND FOLLOWING")
+    print("=" * 60)
+    print(f"Configuration:")
+    print(f"  Capital: ${CAPITAL:,}")
+    print(f"  Date Range: {START_DATE or 'earliest'} to {END_DATE or 'latest'}")
+    print(f"  Risk Target: {RISK_TARGET:.1%}")
+    print(f"  Weight Method: {WEIGHT_METHOD}")
+    print(f"  Trend Filter: EWMA({TREND_FAST_SPAN},{TREND_SLOW_SPAN}) Long/Short")
     print("=" * 60)
     
     try:
         # Run Strategy 6 backtest
         results = backtest_long_short_trend_strategy(
             data_dir='Data',
-            capital=50000000,
-            risk_target=0.2,
+            capital=CAPITAL,
+            risk_target=RISK_TARGET,
             short_span=32,
             long_years=10,
             min_vol_floor=0.05,
-            trend_fast_span=64,
-            trend_slow_span=256,
-            weight_method='handcrafted',
+            trend_fast_span=TREND_FAST_SPAN,
+            trend_slow_span=TREND_SLOW_SPAN,
+            weight_method=WEIGHT_METHOD,
             common_hypothetical_SR=0.3,
-            annual_turnover_T=7.0
+            annual_turnover_T=7.0,
+            start_date=START_DATE,
+            end_date=END_DATE
         )
         
         # Analyze results
         analyze_long_short_results(results)
         
+        # Plot Strategy 6 equity curve
+        plot_strategy6_equity_curve(results)
+        
         # Compare all strategies
-        comparison = compare_all_strategies()
+        # comparison = compare_all_strategies()
         
         # Plot Strategy 4 vs Strategy 6 equity curves
-        if comparison and comparison['strategy4'] and comparison['strategy6']:
-            plot_strategy4_vs_strategy6_equity_curves(comparison['strategy4'], comparison['strategy6'])
+        # if comparison and comparison['strategy4'] and comparison['strategy6']:
+        #     plot_strategy4_vs_strategy6_equity_curves(comparison['strategy4'], comparison['strategy6'])
         
         print(f"\nStrategy 6 backtest completed successfully!")
         return results
