@@ -639,6 +639,7 @@ def calculate_portfolio_position_size(symbol, capital, weight, idm, price, volat
     if np.isnan(volatility) or volatility <= 0:
         return 0
     
+    volatility = volatility / np.sqrt(business_days_per_year)
     numerator = capital * idm * weight * risk_target
     denominator = multiplier * price * fx_rate * volatility
     
@@ -868,7 +869,7 @@ def backtest_multi_instrument_strategy(data_dir='Data', capital=1000000, risk_ta
             try:
                 # Sizing based on previous day's close price and current day's vol forecast (made from prev day's data)
                 price_for_sizing = df_instrument.loc[previous_trading_date, 'Last']
-                vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast']
+                vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast'] / np.sqrt(business_days_per_year)
                 
                 # Data for P&L calculation for current_date
                 price_at_start_of_trading = df_instrument.loc[previous_trading_date, 'Last'] # Same as price_for_sizing
@@ -1119,13 +1120,19 @@ def test_position_size_calculation():
     print("\n=== Testing Position Size Calculation ===")
     
     # Test normal case
+    # Note: The function now divides volatility by sqrt(business_days_per_year) internally
+    input_volatility = 0.16  # Input volatility (annualized)
     position = calculate_portfolio_position_size(
         symbol='MES', capital=50000000, weight=0.02, idm=2.5, 
-        price=4500, volatility=0.16, multiplier=5, risk_target=0.2
+        price=4500, volatility=input_volatility, multiplier=5, risk_target=0.2
     )
-    expected_raw = (50000000 * 2.5 * 0.02 * 0.2) / (5 * 4500 * 1.0 * 0.16)
+    
+    # Calculate expected value accounting for the volatility adjustment in the function
+    adjusted_volatility = input_volatility / np.sqrt(business_days_per_year)
+    expected_raw = (50000000 * 2.5 * 0.02 * 0.2) / (5 * 4500 * 1.0 * adjusted_volatility)
     expected_rounded = round(expected_raw)
     print(f"Normal case: position={position}, expected_raw={expected_raw:.2f}, expected_rounded={expected_rounded}")
+    print(f"  Input volatility: {input_volatility:.4f}, Adjusted volatility: {adjusted_volatility:.6f}")
     assert position == expected_rounded, f"Position calculation failed: {position} != {expected_rounded}"
     
     # Test zero volatility

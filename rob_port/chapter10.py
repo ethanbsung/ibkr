@@ -1,3 +1,4 @@
+from chapter9 import *
 from chapter8 import *
 from chapter7 import *
 from chapter6 import *
@@ -16,134 +17,112 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 warnings.filterwarnings('ignore')
 
-#####   STRATEGY 9: MULTIPLE TREND FOLLOWING RULES   #####
+#####   STRATEGY 10: BOLLINGER BANDS MEAN REVERSION   #####
 
-def get_trend_filter_configs():
+def calculate_bollinger_bands(prices: pd.Series, window: int = 20, num_std: float = 2.0) -> pd.DataFrame:
     """
-    Get trend filter configurations from the book.
-    
-    From book: Uses multiple EWMAC variations with different speeds.
-    Table 29 shows forecast scalars for different speeds.
-    
-    Returns:
-        dict: Dictionary of trend filter configurations.
-    """
-    return {
-        'EWMAC2': {'fast_span': 2, 'slow_span': 8, 'forecast_scalar': 12.1},
-        'EWMAC4': {'fast_span': 4, 'slow_span': 16, 'forecast_scalar': 8.53},
-        'EWMAC8': {'fast_span': 8, 'slow_span': 32, 'forecast_scalar': 5.95},
-        'EWMAC16': {'fast_span': 16, 'slow_span': 64, 'forecast_scalar': 4.10},
-        'EWMAC32': {'fast_span': 32, 'slow_span': 128, 'forecast_scalar': 2.79},
-        'EWMAC64': {'fast_span': 64, 'slow_span': 256, 'forecast_scalar': 1.91}
-    }
-
-def get_forecast_weights_and_fdm():
-    """
-    Get forecast weights and FDM values from the book's Table 36.
-    
-    From book: Different combinations of trend filters with their weights and FDM.
-    
-    Returns:
-        dict: Dictionary of forecast weight configurations.
-    """
-    return {
-        'six_filters': {
-            'filters': ['EWMAC2', 'EWMAC4', 'EWMAC8', 'EWMAC16', 'EWMAC32', 'EWMAC64'],
-            'weights': [0.167, 0.167, 0.167, 0.167, 0.167, 0.167],
-            'fdm': 1.26
-        },
-        'five_filters': {
-            'filters': ['EWMAC4', 'EWMAC8', 'EWMAC16', 'EWMAC32', 'EWMAC64'],
-            'weights': [0.2, 0.2, 0.2, 0.2, 0.2],
-            'fdm': 1.19
-        },
-        'four_filters': {
-            'filters': ['EWMAC8', 'EWMAC16', 'EWMAC32', 'EWMAC64'],
-            'weights': [0.25, 0.25, 0.25, 0.25],
-            'fdm': 1.13
-        },
-        'three_filters': {
-            'filters': ['EWMAC16', 'EWMAC32', 'EWMAC64'],
-            'weights': [0.333, 0.333, 0.333],
-            'fdm': 1.08
-        },
-        'two_filters': {
-            'filters': ['EWMAC32', 'EWMAC64'],
-            'weights': [0.50, 0.50],
-            'fdm': 1.03
-        }
-    }
-
-def calculate_multiple_trend_forecasts(prices: pd.Series, filter_config: dict, 
-                                     forecast_config: dict, cap: float = 20.0,
-                                     short_span: int = 32, long_years: int = 10, min_vol_floor: float = 0.05) -> pd.Series:
-    """
-    Calculate combined forecast from multiple trend filters.
-    
-    From book:
-        1. Calculate individual forecasts for each filter
-        2. Take weighted average: Raw combined forecast = w1×f1 + w2×f2 + ...
-        3. Apply FDM: Scaled combined forecast = Raw combined forecast × FDM
-        4. Cap result: Capped combined forecast = Max(Min(Scaled, +20), -20)
+    Calculate Bollinger Bands: SMA ± (std_dev * num_std).
     
     Parameters:
         prices (pd.Series): Price series.
-        filter_config (dict): Trend filter configurations.
-        forecast_config (dict): Forecast weights and FDM configuration.
-        cap (float): Maximum absolute forecast value.
-        short_span (int): EWMA span for short-run volatility.
-        long_years (int): Years for long-run volatility average.
-        min_vol_floor (float): Minimum volatility floor.
+        window (int): Rolling window for SMA and std calculation.
+        num_std (float): Number of standard deviations for bands.
     
     Returns:
-        pd.Series: Combined capped forecast.
+        pd.DataFrame: DataFrame with columns ['sma', 'upper_band', 'lower_band', 'bb_width', 'bb_position'].
     """
-    individual_forecasts = {}
+    # Calculate Simple Moving Average
+    sma = prices.rolling(window=window, min_periods=window).mean()
     
-    # Calculate individual forecasts for each filter
-    for filter_name in forecast_config['filters']:
-        if filter_name in filter_config:
-            config = filter_config[filter_name]
-            
-            # Calculate raw forecast using the standardized method
-            raw_forecast = calculate_fast_raw_forecast(
-                prices, 
-                config['fast_span'], 
-                config['slow_span'],
-                short_span,
-                long_years,
-                min_vol_floor
-            )
-            
-            # Scale and cap individual forecast
-            scaled_forecast = raw_forecast * config['forecast_scalar']
-            capped_forecast = np.clip(scaled_forecast, -cap, cap)
-            
-            individual_forecasts[filter_name] = capped_forecast
+    # Calculate rolling standard deviation
+    rolling_std = prices.rolling(window=window, min_periods=window).std()
     
-    # Combine forecasts using weights
-    combined_forecast = pd.Series(0.0, index=prices.index)
+    # Calculate Bollinger Bands
+    upper_band = sma + (rolling_std * num_std)
+    lower_band = sma - (rolling_std * num_std)
     
-    for i, filter_name in enumerate(forecast_config['filters']):
-        if filter_name in individual_forecasts:
-            weight = forecast_config['weights'][i]
-            combined_forecast += weight * individual_forecasts[filter_name]
+    # Calculate band width (normalized)
+    bb_width = (upper_band - lower_band) / sma
     
-    # Apply forecast diversification multiplier (FDM)
-    scaled_combined_forecast = combined_forecast * forecast_config['fdm']
+    # Calculate position within bands (0 = lower band, 0.5 = middle, 1 = upper band)
+    bb_position = (prices - lower_band) / (upper_band - lower_band)
     
-    # Cap the final combined forecast
-    capped_combined_forecast = np.clip(scaled_combined_forecast, -cap, cap)
-    
-    return capped_combined_forecast
+    return pd.DataFrame({
+        'sma': sma,
+        'upper_band': upper_band,
+        'lower_band': lower_band,
+        'bb_width': bb_width,
+        'bb_position': bb_position
+    }, index=prices.index)
 
-def calculate_strategy9_position_size(symbol, capital, weight, idm, price, volatility, 
-                                    multiplier, combined_forecast, risk_target=0.2, fx_rate=1.0):
+def calculate_mean_reversion_forecast(prices: pd.Series, window: int = 20, num_std: float = 2.0,
+                                    entry_threshold: float = 0.1, exit_threshold: float = 0.5,
+                                    max_forecast: float = 20.0) -> pd.Series:
     """
-    Calculate position size for Strategy 9 with combined forecast scaling.
+    Calculate mean reversion forecast based on Bollinger Bands.
     
-    From book: Same position sizing as Strategy 8 but uses combined forecast
-        N = Combined forecast × Capital × IDM × Weight × τ ÷ (10 × Multiplier × Price × FX × σ%)
+    Mean reversion logic:
+    - Strong buy signal when price is below lower band (bb_position < entry_threshold)
+    - Strong sell signal when price is above upper band (bb_position > 1 - entry_threshold)
+    - Exit signals when price returns to middle (bb_position near exit_threshold)
+    
+    Parameters:
+        prices (pd.Series): Price series.
+        window (int): Bollinger Bands window.
+        num_std (float): Number of standard deviations for bands.
+        entry_threshold (float): Threshold for entry signals (0.1 = 10% into bands).
+        exit_threshold (float): Threshold for exit signals (0.5 = middle of bands).
+        max_forecast (float): Maximum absolute forecast value.
+    
+    Returns:
+        pd.Series: Mean reversion forecast (-20 to +20).
+    """
+    bb_data = calculate_bollinger_bands(prices, window, num_std)
+    bb_position = bb_data['bb_position']
+    bb_width = bb_data['bb_width']
+    
+    # Initialize forecast series
+    forecast = pd.Series(0.0, index=prices.index)
+    
+    # Mean reversion signals based on position within bands
+    # Stronger signals when bands are wider (more volatile periods)
+    volatility_multiplier = np.clip(bb_width / bb_width.rolling(window=window*2).median(), 0.5, 2.0)
+    volatility_multiplier = volatility_multiplier.fillna(1.0)
+    
+    # Buy signals (positive forecast) when price is near lower band
+    buy_signal_strength = np.where(
+        bb_position < entry_threshold,
+        (entry_threshold - bb_position) / entry_threshold,  # Stronger as we go below lower band
+        0.0
+    )
+    
+    # Sell signals (negative forecast) when price is near upper band  
+    sell_signal_strength = np.where(
+        bb_position > (1 - entry_threshold),
+        (bb_position - (1 - entry_threshold)) / entry_threshold,  # Stronger as we go above upper band
+        0.0
+    )
+    
+    # Calculate raw forecast
+    raw_forecast = (buy_signal_strength - sell_signal_strength) * volatility_multiplier
+    
+    # Scale to max forecast and apply to series
+    forecast = raw_forecast * max_forecast
+    
+    # Smooth the forecast to reduce noise
+    forecast = forecast.rolling(window=3, min_periods=1).mean()
+    
+    # Cap the forecast
+    forecast = np.clip(forecast, -max_forecast, max_forecast)
+    
+    return forecast
+
+def calculate_strategy10_position_size(symbol, capital, weight, idm, price, volatility, 
+                                     multiplier, mean_reversion_forecast, risk_target=0.2, fx_rate=1.0):
+    """
+    Calculate position size for Strategy 10 with mean reversion forecast scaling.
+    
+    Formula: N = MR_forecast × Capital × IDM × Weight × τ ÷ (10 × Multiplier × Price × FX × σ%)
     
     Parameters:
         symbol (str): Instrument symbol.
@@ -153,18 +132,18 @@ def calculate_strategy9_position_size(symbol, capital, weight, idm, price, volat
         price (float): Current price.
         volatility (float): Annualized volatility forecast.
         multiplier (float): Contract multiplier.
-        combined_forecast (float): Combined capped forecast value.
+        mean_reversion_forecast (float): Mean reversion forecast value (-20 to +20).
         risk_target (float): Target risk fraction.
         fx_rate (float): FX rate for currency conversion.
     
     Returns:
         float: Number of contracts for this instrument.
     """
-    if np.isnan(volatility) or volatility <= 0 or np.isnan(combined_forecast):
+    if np.isnan(volatility) or volatility <= 0 or np.isnan(mean_reversion_forecast):
         return 0
     
-    # Calculate position size with combined forecast scaling
-    numerator = combined_forecast * capital * idm * weight * risk_target
+    # Calculate position size with mean reversion forecast scaling
+    numerator = mean_reversion_forecast * capital * idm * weight * risk_target
     denominator = 10 * multiplier * price * fx_rate * volatility
     
     position_size = numerator / denominator
@@ -175,21 +154,21 @@ def calculate_strategy9_position_size(symbol, capital, weight, idm, price, volat
     
     return position_size
 
-def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_target=0.2,
-                                   short_span=32, long_years=10, min_vol_floor=0.05,
-                                   forecast_combination='five_filters',
-                                   buffer_fraction=0.1,
-                                   weight_method='handcrafted',
-                                   common_hypothetical_SR=0.3, annual_turnover_T=7.0,
-                                   start_date=None, end_date=None,
-                                   debug_forecasts=False):
+def backtest_bollinger_mean_reversion_strategy(data_dir='Data', capital=50000000, risk_target=0.2,
+                                             short_span=32, long_years=10, min_vol_floor=0.05,
+                                             bb_window=20, bb_std=2.0, entry_threshold=0.1, 
+                                             exit_threshold=0.5, max_forecast=20.0,
+                                             buffer_fraction=0.1,
+                                             weight_method='handcrafted',
+                                             common_hypothetical_SR=0.3, annual_turnover_T=7.0,
+                                             start_date=None, end_date=None,
+                                             debug_forecasts=False):
     """
-    Backtest Strategy 9: Multiple trend following rules with buffering.
+    Backtest Strategy 10: Bollinger Bands mean reversion with buffering.
     
-    Implementation follows book exactly: "Trade a portfolio of one or more instruments, 
-    each with positions scaled for a variable risk estimate. Calculate a number of 
-    forecasts for different speeds of trend filter. Place a position based on the 
-    combined forecast."
+    Implementation: "Trade a portfolio of one or more instruments using mean reversion 
+    signals from Bollinger Bands. Go long when price breaks below lower band, 
+    go short when price breaks above upper band, with positions scaled by forecast strength."
     
     Parameters:
         data_dir (str): Directory containing price data files.
@@ -198,7 +177,11 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
         short_span (int): EWMA span for short-run volatility.
         long_years (int): Years for long-run volatility average.
         min_vol_floor (float): Minimum volatility floor.
-        forecast_combination (str): Which forecast combination to use.
+        bb_window (int): Bollinger Bands window (default 20).
+        bb_std (float): Bollinger Bands standard deviations (default 2.0).
+        entry_threshold (float): Entry threshold for mean reversion signals.
+        exit_threshold (float): Exit threshold for mean reversion signals.
+        max_forecast (float): Maximum absolute forecast value.
         buffer_fraction (float): Buffer fraction for trading.
         weight_method (str): Method for calculating instrument weights.
         common_hypothetical_SR (float): Common hypothetical Sharpe Ratio.
@@ -211,35 +194,30 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
         dict: Comprehensive backtest results.
     """
     print("=" * 60)
-    print("STRATEGY 9: MULTIPLE TREND FOLLOWING RULES")
+    print("STRATEGY 10: BOLLINGER BANDS MEAN REVERSION")
     print("=" * 60)
     
-    # Load all instrument data using the same function as chapter 4-8
+    # Load all instrument data using the same function as previous chapters
     all_instruments_specs_df = load_instrument_data()
     raw_instrument_data = load_all_instrument_data(data_dir)
     
     if not raw_instrument_data:
         raise ValueError("No instrument data loaded successfully")
     
-    # Get trend filter and forecast configurations
-    filter_config = get_trend_filter_configs()
-    forecast_configs = get_forecast_weights_and_fdm()
-    selected_config = forecast_configs[forecast_combination]
-    
     print(f"\nPortfolio Configuration:")
     print(f"  Instruments initially loaded: {len(raw_instrument_data)}")
     print(f"  Capital: ${capital:,.0f}")
     print(f"  Risk Target: {risk_target:.1%}")
     print(f"  Weight Method: {weight_method}")
-    print(f"  Forecast Combination: {forecast_combination}")
-    print(f"  Trend Filters: {', '.join(selected_config['filters'])}")
-    print(f"  Forecast Weights: {selected_config['weights']}")
-    print(f"  FDM: {selected_config['fdm']}")
+    print(f"  Bollinger Bands: {bb_window}-period, {bb_std} std dev")
+    print(f"  Entry Threshold: {entry_threshold}")
+    print(f"  Exit Threshold: {exit_threshold}")
+    print(f"  Max Forecast: ±{max_forecast}")
     print(f"  Buffer Fraction: {buffer_fraction}")
     print(f"  Common Hypothetical SR for SR': {common_hypothetical_SR}")
     print(f"  Annual Turnover T for SR': {annual_turnover_T}")
 
-    # Preprocess: Calculate returns, vol forecasts, and combined trend forecasts for each instrument
+    # Preprocess: Calculate returns, vol forecasts, and mean reversion forecasts for each instrument
     processed_instrument_data = {}
     for symbol, df_orig in raw_instrument_data.items():
         df = df_orig.copy()
@@ -251,32 +229,32 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
         
         # Volatility forecast for day D is made using data up to D-1 (no lookahead bias)
         raw_returns_for_vol = df['daily_price_change_pct'].dropna()
-        if len(raw_returns_for_vol) < 300:  # Need sufficient data for slowest trend filter (256 + buffer)
-            print(f"Skipping {symbol}: Insufficient data for vol forecast and trend ({len(raw_returns_for_vol)} days).")
+        if len(raw_returns_for_vol) < max(short_span, bb_window * 2):  # Need sufficient data
+            print(f"Skipping {symbol}: Insufficient data for vol forecast and BB ({len(raw_returns_for_vol)} days).")
             continue
 
-        # Calculate blended volatility (same as Strategy 4-8)
+        # Calculate blended volatility (same as previous strategies)
         blended_vol_series = calculate_blended_volatility(
             raw_returns_for_vol, short_span=short_span, long_years=long_years, min_vol_floor=min_vol_floor
         )
         # Shift to prevent lookahead bias - forecast for day T uses data up to T-1
         df['vol_forecast'] = blended_vol_series.shift(1).reindex(df.index).ffill().fillna(min_vol_floor)
         
-        # Calculate combined forecast using multiple trend filters (no lookahead bias)
-        combined_forecast_series = calculate_multiple_trend_forecasts(
-            df['Last'], filter_config, selected_config, 20.0, short_span, long_years, min_vol_floor
+        # Calculate mean reversion forecast using Bollinger Bands (no lookahead bias)
+        mr_forecast_series = calculate_mean_reversion_forecast(
+            df['Last'], bb_window, bb_std, entry_threshold, exit_threshold, max_forecast
         )
         # Shift to prevent lookahead bias - forecast for day T uses data up to T-1
-        df['combined_forecast'] = combined_forecast_series.shift(1).reindex(df.index).fillna(0)
+        df['mr_forecast'] = mr_forecast_series.shift(1).reindex(df.index).fillna(0)
         
         # Debug first instrument forecasts if requested
         if debug_forecasts and symbol == list(raw_instrument_data.keys())[0]:
             print(f"\n=== FORECAST DEBUG FOR {symbol} ===")
-            sample_forecasts = df['combined_forecast'].dropna()[:10]
+            sample_forecasts = df['mr_forecast'].dropna()[:10]
             if len(sample_forecasts) > 0:
-                print(f"Sample Combined Forecasts: {sample_forecasts.values}")
-                print(f"Average Combined Forecast: {df['combined_forecast'].mean():.3f}")
-                print(f"Average Absolute Forecast: {df['combined_forecast'].abs().mean():.3f}")
+                print(f"Sample MR Forecasts: {sample_forecasts.values}")
+                print(f"Average MR Forecast: {df['mr_forecast'].mean():.3f}")
+                print(f"Average Absolute Forecast: {df['mr_forecast'].abs().mean():.3f}")
         
         # Ensure critical data is present
         df.dropna(subset=['Last', 'vol_forecast', 'daily_price_change_pct'], inplace=True)
@@ -291,7 +269,7 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
     
     print(f"  Instruments after preprocessing: {len(processed_instrument_data)}")
 
-    # Determine common date range for backtest (same logic as chapter 4-8)
+    # Determine common date range for backtest (same logic as previous strategies)
     all_indices = [df.index for df in processed_instrument_data.values() if not df.empty]
     if not all_indices:
         raise ValueError("No valid instrument data in processed_instrument_data to determine date range.")
@@ -320,7 +298,7 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
     print(f"  End: {trading_days_range.max().date()}")
     print(f"  Duration: {len(trading_days_range)} trading days")
 
-    # Initialize portfolio tracking (same structure as chapter 4-8)
+    # Initialize portfolio tracking (same structure as previous strategies)
     current_portfolio_equity = capital
     portfolio_daily_records = []
     known_eligible_instruments = set()
@@ -359,10 +337,10 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
         current_iteration_eligible_instruments = set()
         for s, df_full in processed_instrument_data.items():
             df_upto_cutoff = df_full[df_full.index <= effective_data_cutoff_date]
-            if not df_upto_cutoff.empty and len(df_upto_cutoff) > 300:  # Need sufficient data for slowest filter
+            if not df_upto_cutoff.empty and len(df_upto_cutoff) > max(short_span, bb_window * 2):
                 current_iteration_eligible_instruments.add(s)
         
-        # Check if reweighting is needed (same logic as chapter 4-8)
+        # Check if reweighting is needed (same logic as previous strategies)
         perform_reweight = False
         if idx == 1:  # First actual trading day
             perform_reweight = True
@@ -416,7 +394,7 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
                     # Sizing based on previous day's close price and current day's forecasts
                     price_for_sizing = df_instrument.loc[previous_trading_date, 'Last']
                     vol_for_sizing = df_instrument.loc[current_date, 'vol_forecast']
-                    forecast_for_sizing = df_instrument.loc[current_date, 'combined_forecast']
+                    forecast_for_sizing = df_instrument.loc[current_date, 'mr_forecast']
                     actual_forecast_used = forecast_for_sizing
                     
                     # Data for P&L calculation for current_date
@@ -432,11 +410,11 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
                     else:
                         vol_for_sizing = max(vol_for_sizing, min_vol_floor)
                         
-                        # Calculate optimal position size with combined forecast scaling
-                        optimal_position = calculate_strategy9_position_size(
+                        # Calculate optimal position size with mean reversion forecast scaling
+                        optimal_position = calculate_strategy10_position_size(
                             symbol=symbol, capital=capital_at_start_of_day, weight=instrument_weight, 
                             idm=idm, price=price_for_sizing, volatility=vol_for_sizing, 
-                            multiplier=instrument_multiplier, combined_forecast=forecast_for_sizing, 
+                            multiplier=instrument_multiplier, mean_reversion_forecast=forecast_for_sizing, 
                             risk_target=risk_target
                         )
                         
@@ -485,7 +463,7 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
         avg_forecast = np.mean(daily_forecasts) if daily_forecasts else 0.0
         avg_abs_forecast = np.mean([abs(f) for f in daily_forecasts]) if daily_forecasts else 0.0
 
-        # Update portfolio equity (same as chapter 4-8)
+        # Update portfolio equity (same as previous strategies)
         portfolio_daily_percentage_return = daily_total_pnl / capital_at_start_of_day if capital_at_start_of_day > 0 else 0.0
         current_portfolio_equity = capital_at_start_of_day * (1 + portfolio_daily_percentage_return)
 
@@ -511,7 +489,7 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
             if f'{s_proc}_forecast' not in record:
                 forecast_val_fill = 0.0
                 if current_date in processed_instrument_data[s_proc].index:
-                    sig = processed_instrument_data[s_proc].loc[current_date, 'combined_forecast']
+                    sig = processed_instrument_data[s_proc].loc[current_date, 'mr_forecast']
                     if pd.notna(sig):
                         forecast_val_fill = sig
                 record[f'{s_proc}_forecast'] = forecast_val_fill
@@ -520,7 +498,7 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
                 
         portfolio_daily_records.append(record)
 
-    # Post-loop processing (same as chapter 4-8)
+    # Post-loop processing (same as previous strategies)
     if not portfolio_daily_records:
         raise ValueError("No daily records generated during backtest.")
         
@@ -530,7 +508,7 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
     print(f"Portfolio backtest loop completed. {len(portfolio_df)} daily records.")
     if portfolio_df.empty or 'portfolio_return' not in portfolio_df.columns or portfolio_df['portfolio_return'].std() == 0:
         print(f"Average active instruments: {portfolio_df['num_active_instruments'].mean():.1f}")
-        print(f"Average combined forecast: {portfolio_df['avg_forecast'].mean():.2f}")
+        print(f"Average mean reversion forecast: {portfolio_df['avg_forecast'].mean():.2f}")
         print(f"Average absolute forecast: {portfolio_df['avg_abs_forecast'].mean():.2f}")
         print(f"Average daily trades (events): {portfolio_df['total_trades'].mean():.1f}")
     
@@ -549,10 +527,11 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
     performance['weight_method'] = weight_method
     performance['backtest_start'] = trading_days_range.min()
     performance['backtest_end'] = trading_days_range.max()
-    performance['forecast_combination'] = forecast_combination
-    performance['selected_filters'] = selected_config['filters']
-    performance['forecast_weights'] = selected_config['weights']
-    performance['fdm'] = selected_config['fdm']
+    performance['bb_window'] = bb_window
+    performance['bb_std'] = bb_std
+    performance['entry_threshold'] = entry_threshold
+    performance['exit_threshold'] = exit_threshold
+    performance['max_forecast'] = max_forecast
     performance['buffer_fraction'] = buffer_fraction
 
     # Calculate per-instrument statistics (simplified for now)
@@ -592,10 +571,11 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
             'short_span': short_span,
             'long_years': long_years,
             'min_vol_floor': min_vol_floor,
-            'forecast_combination': forecast_combination,
-            'selected_filters': selected_config['filters'],
-            'forecast_weights': selected_config['weights'],
-            'fdm': selected_config['fdm'],
+            'bb_window': bb_window,
+            'bb_std': bb_std,
+            'entry_threshold': entry_threshold,
+            'exit_threshold': exit_threshold,
+            'max_forecast': max_forecast,
             'buffer_fraction': buffer_fraction,
             'weight_method': weight_method,
             'common_hypothetical_SR': common_hypothetical_SR,
@@ -605,127 +585,19 @@ def backtest_multiple_trend_strategy(data_dir='Data', capital=50000000, risk_tar
         }
     }
 
-def plot_equity_curves(strategy_results_dict, save_path=None, figsize=(15, 10)):
+def analyze_bollinger_mean_reversion_results(results):
     """
-    Plot equity curves for multiple strategies comparison.
+    Analyze and display comprehensive Bollinger Bands mean reversion results.
     
     Parameters:
-        strategy_results_dict (dict): Dictionary of strategy results.
-        save_path (str): Optional path to save the plot.
-        figsize (tuple): Figure size.
-    
-    Returns:
-        matplotlib.figure.Figure: The created figure.
-    """
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=figsize)
-    fig.suptitle('Strategy Performance Comparison', fontsize=16, fontweight='bold')
-    
-    # Colors for different strategies
-    colors = {
-        'strategy4': '#1f77b4',  # Blue
-        'strategy5': '#ff7f0e',  # Orange
-        'strategy6': '#2ca02c',  # Green
-        'strategy7': '#d62728',  # Red
-        'strategy8': '#9467bd',  # Purple
-        'strategy9': '#8c564b',  # Brown
-    }
-    
-    strategy_names = {
-        'strategy4': 'Strategy 4: Always Long',
-        'strategy5': 'Strategy 5: Long/Flat',
-        'strategy6': 'Strategy 6: Long/Short',
-        'strategy7': 'Strategy 7: Slow Forecasts',
-        'strategy8': 'Strategy 8: Fast + Buffering',
-        'strategy9': 'Strategy 9: Multiple Trends'
-    }
-    
-    # Plot 1: Equity Curves
-    for strategy_name, results in strategy_results_dict.items():
-        if 'portfolio_data' in results:
-            portfolio_data = results['portfolio_data']
-            equity_curve = build_account_curve(portfolio_data['portfolio_return'], 100)
-            
-            ax1.plot(equity_curve.index, equity_curve.values, 
-                    label=strategy_names.get(strategy_name, strategy_name), 
-                    color=colors.get(strategy_name, 'black'), linewidth=2)
-    
-    ax1.set_title('Cumulative Equity Curves', fontweight='bold')
-    ax1.set_ylabel('Portfolio Value')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
-    
-    # Plot 2: Annual Returns
-    annual_returns = []
-    strategy_labels = []
-    for strategy_name, results in strategy_results_dict.items():
-        if 'performance' in results:
-            annual_returns.append(results['performance']['annualized_return'] * 100)
-            strategy_labels.append(strategy_names.get(strategy_name, strategy_name).replace('Strategy ', 'S'))
-    
-    bars = ax2.bar(strategy_labels, annual_returns, color=[colors.get(f'strategy{i+4}', 'gray') for i in range(len(annual_returns))])
-    ax2.set_title('Annualized Returns (%)', fontweight='bold')
-    ax2.set_ylabel('Return (%)')
-    ax2.grid(True, alpha=0.3, axis='y')
-    
-    # Add value labels on bars
-    for bar, value in zip(bars, annual_returns):
-        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1, 
-                f'{value:.1f}%', ha='center', va='bottom', fontweight='bold')
-    
-    # Plot 3: Sharpe Ratios
-    sharpe_ratios = []
-    for strategy_name, results in strategy_results_dict.items():
-        if 'performance' in results:
-            sharpe_ratios.append(results['performance']['sharpe_ratio'])
-    
-    bars = ax3.bar(strategy_labels, sharpe_ratios, color=[colors.get(f'strategy{i+4}', 'gray') for i in range(len(sharpe_ratios))])
-    ax3.set_title('Sharpe Ratios', fontweight='bold')
-    ax3.set_ylabel('Sharpe Ratio')
-    ax3.grid(True, alpha=0.3, axis='y')
-    
-    # Add value labels on bars
-    for bar, value in zip(bars, sharpe_ratios):
-        ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
-                f'{value:.3f}', ha='center', va='bottom', fontweight='bold')
-    
-    # Plot 4: Max Drawdowns
-    max_drawdowns = []
-    for strategy_name, results in strategy_results_dict.items():
-        if 'performance' in results:
-            max_drawdowns.append(abs(results['performance']['max_drawdown_pct']))
-    
-    bars = ax4.bar(strategy_labels, max_drawdowns, color=[colors.get(f'strategy{i+4}', 'gray') for i in range(len(max_drawdowns))])
-    ax4.set_title('Maximum Drawdowns (%)', fontweight='bold')
-    ax4.set_ylabel('Max Drawdown (%)')
-    ax4.grid(True, alpha=0.3, axis='y')
-    
-    # Add value labels on bars
-    for bar, value in zip(bars, max_drawdowns):
-        ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.2, 
-                f'{value:.1f}%', ha='center', va='bottom', fontweight='bold')
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Equity curves plot saved to: {save_path}")
-    
-    return fig
-
-def analyze_multiple_trend_results(results):
-    """
-    Analyze and display comprehensive multiple trend following results.
-    
-    Parameters:
-        results (dict): Results from backtest_multiple_trend_strategy.
+        results (dict): Results from backtest_bollinger_mean_reversion_strategy.
     """
     performance = results['performance']
     instrument_stats = results['instrument_stats']
     config = results['config']
     
     print("\n" + "=" * 60)
-    print("MULTIPLE TREND FOLLOWING PERFORMANCE ANALYSIS")
+    print("BOLLINGER BANDS MEAN REVERSION PERFORMANCE ANALYSIS")
     print("=" * 60)
     
     # Overall performance
@@ -737,17 +609,16 @@ def analyze_multiple_trend_results(results):
     print(f"Max Drawdown: {performance['max_drawdown_pct']:.1f}%")
     print(f"Skewness: {performance['skewness']:.3f}")
     
-    # Multiple trend characteristics
-    print(f"\n--- Multiple Trend Characteristics ---")
+    # Mean reversion characteristics
+    print(f"\n--- Mean Reversion Characteristics ---")
     print(f"Average Active Instruments: {performance['avg_active_instruments']:.1f}")
-    print(f"Average Combined Forecast: {performance['avg_forecast']:.2f}")
+    print(f"Average MR Forecast: {performance['avg_forecast']:.2f}")
     print(f"Average Absolute Forecast: {performance['avg_abs_forecast']:.2f}")
     print(f"Total Trades: {performance['total_trades']:,}")
     print(f"Average Daily Trades: {performance['avg_daily_trades']:.1f}")
-    print(f"Forecast Combination: {config['forecast_combination']}")
-    print(f"Trend Filters: {', '.join(config['selected_filters'])}")
-    print(f"Forecast Weights: {config['forecast_weights']}")
-    print(f"FDM: {config['fdm']}")
+    print(f"Bollinger Bands: {config['bb_window']}-period, {config['bb_std']} std dev")
+    print(f"Entry/Exit Thresholds: {config['entry_threshold']}/{config['exit_threshold']}")
+    print(f"Max Forecast: ±{config['max_forecast']}")
     print(f"Buffer Fraction: {config['buffer_fraction']}")
     
     # Portfolio characteristics
@@ -773,184 +644,41 @@ def analyze_multiple_trend_results(results):
         print(f"{symbol:<8} {stats['weight']:<8.3f} {stats['avg_position']:<10.2f} "
               f"{stats['avg_forecast']:<8.2f} {stats['total_trades']:<8} {stats['active_days']:<6}")
     
-    # Show instruments with highest forecast activity
-    print(f"\n--- Top 10 Most Active Multiple Trend Instruments (by Days Active) ---")
+    # Show instruments with highest mean reversion activity
+    print(f"\n--- Top 10 Most Active Mean Reversion Instruments (by Days Active) ---")
     sorted_by_activity = sorted(
         instrument_stats.items(), 
         key=lambda x: x[1]['active_days'], 
         reverse=True
     )
     
-    print(f"{'Symbol':<8} {'Days':<6} {'AvgFcst':<8} {'AbsFcst':<8} {'Trades':<8} {'Weight':<8} {'Avg Pos':<10}")
-    print("-" * 80)
+    print(f"{'Symbol':<8} {'Days':<6} {'AvgFcst':<8} {'AbsFcst':<8} {'MinFcst':<8} {'MaxFcst':<8} {'Trades':<8} {'Weight':<8}")
+    print("-" * 85)
     
     for symbol, stats in sorted_by_activity[:10]:
         print(f"{symbol:<8} {stats['active_days']:<6} {stats['avg_forecast']:<8.2f} "
-              f"{stats['avg_abs_forecast']:<8.2f} {stats['total_trades']:<8} {stats['weight']:<8.3f} {stats['avg_position']:<10.2f}")
+              f"{stats['avg_abs_forecast']:<8.2f} {stats['min_forecast']:<8.2f} {stats['max_forecast']:<8.2f} "
+              f"{stats['total_trades']:<8} {stats['weight']:<8.3f}")
     
-    # Summary of multiple trend characteristics
+    # Summary of mean reversion characteristics
     total_active_days = sum(stats['active_days'] for stats in instrument_stats.values())
     avg_forecast_all = sum(stats['avg_forecast'] for stats in instrument_stats.values()) / len(instrument_stats)
     avg_abs_forecast_all = sum(stats['avg_abs_forecast'] for stats in instrument_stats.values()) / len(instrument_stats)
     total_trades_all = sum(stats['total_trades'] for stats in instrument_stats.values())
     
-    print(f"\n--- Multiple Trend Summary ---")
+    print(f"\n--- Mean Reversion Summary ---")
     print(f"Total instrument-days with positions: {total_active_days:,}")
-    print(f"Average combined forecast across all instruments: {avg_forecast_all:.2f}")
+    print(f"Average MR forecast across all instruments: {avg_forecast_all:.2f}")
     print(f"Average absolute forecast across all instruments: {avg_abs_forecast_all:.2f}")
     print(f"Total individual instrument trades: {total_trades_all:,}")
     print(f"Instruments with any activity: {len(instrument_stats)}")
 
-def compare_all_strategies():
+def plot_strategy10_equity_curve(results, save_path='results/strategy10_equity_curve.png'):
     """
-    Compare all strategies (4 through 9) using cached results where possible.
-    """
-    print("\n" + "=" * 80)
-    print("STRATEGY COMPARISON: STRATEGY 4 vs 5 vs 6 vs 7 vs 8 vs 9")
-    print("=" * 80)
-    
-    # Standard config for all strategies
-    standard_config = {
-        'capital': 50000000,
-        'risk_target': 0.2,
-        'weight_method': 'handcrafted'
-    }
-    
-    # Get cached results for strategies 4-8
-    cached_results = get_cached_strategy_results()
-    
-    strategy_results = {}
-    
-    # Strategy 4 (no trend filter)
-    if 'strategy4' in cached_results:
-        print("Using cached Strategy 4 results...")
-        strategy_results['strategy4'] = cached_results['strategy4']
-    else:
-        print("Running Strategy 4 (no trend filter)...")
-        strategy4_results = backtest_multi_instrument_strategy(
-            data_dir='Data', **standard_config
-        )
-        save_strategy_results('strategy4', strategy4_results, standard_config)
-        strategy_results['strategy4'] = strategy4_results
-    
-    # Strategy 5 (with trend filter, long only)
-    if 'strategy5' in cached_results:
-        print("Using cached Strategy 5 results...")
-        strategy_results['strategy5'] = cached_results['strategy5']
-    else:
-        print("Running Strategy 5 (trend filter, long only)...")
-        strategy5_results = backtest_trend_following_strategy(
-            data_dir='Data', **standard_config
-        )
-        save_strategy_results('strategy5', strategy5_results, standard_config)
-        strategy_results['strategy5'] = strategy5_results
-    
-    # Strategy 6 (with trend filter, long/short)
-    if 'strategy6' in cached_results:
-        print("Using cached Strategy 6 results...")
-        strategy_results['strategy6'] = cached_results['strategy6']
-    else:
-        print("Running Strategy 6 (trend filter, long/short)...")
-        strategy6_results = backtest_long_short_trend_strategy(
-            data_dir='Data', **standard_config
-        )
-        save_strategy_results('strategy6', strategy6_results, standard_config)
-        strategy_results['strategy6'] = strategy6_results
-    
-    # Strategy 7 (with forecasts)
-    if 'strategy7' in cached_results:
-        print("Using cached Strategy 7 results...")
-        strategy_results['strategy7'] = cached_results['strategy7']
-    else:
-        print("Running Strategy 7 (trend filter with forecasts)...")
-        strategy7_results = backtest_forecast_trend_strategy(
-            data_dir='Data', **standard_config
-        )
-        save_strategy_results('strategy7', strategy7_results, standard_config)
-        strategy_results['strategy7'] = strategy7_results
-    
-    # Strategy 8 (fast trend with buffering)
-    print("Running Strategy 8 (fast trend with buffering)...")
-    strategy8_config = {**standard_config}
-    strategy8_results = backtest_fast_trend_strategy_with_buffering(
-        data_dir='Data', debug_buffering=False, **strategy8_config
-    )
-    save_strategy_results('strategy8', strategy8_results, strategy8_config)
-    strategy_results['strategy8'] = strategy8_results
-    
-    # Strategy 9 (multiple trend with buffering) - always run fresh
-    print("Running Strategy 9 (multiple trend with buffering)...")
-    strategy9_config = {**standard_config, 'forecast_combination': 'five_filters'}
-    strategy9_results = backtest_multiple_trend_strategy(
-        data_dir='Data', debug_forecasts=False, **strategy9_config
-    )
-    save_strategy_results('strategy9', strategy9_results, strategy9_config)
-    strategy_results['strategy9'] = strategy9_results
-    
-    # Performance comparison table
-    if all(strategy_results.values()):
-        performances = {name: results['performance'] for name, results in strategy_results.items()}
-        
-        print(f"\n{'Strategy':<15} {'Ann. Return':<12} {'Volatility':<12} {'Sharpe':<8} {'Max DD':<8} {'Trades/Day':<12} {'Special':<25}")
-        print("-" * 115)
-        
-        strategy_descriptions = {
-            'strategy4': 'Always Long',
-            'strategy5': 'Long/Flat',
-            'strategy6': 'Long/Short',
-            'strategy7': 'Slow Forecasts',
-            'strategy8': 'Fast + Buffering',
-            'strategy9': 'Multiple Trends'
-        }
-        
-        for strategy_name, perf in performances.items():
-            trades_day = perf.get('avg_daily_trades', 'N/A')
-            trades_str = f"{trades_day:.1f}" if trades_day != 'N/A' else 'N/A'
-            
-            print(f"{strategy_name.replace('strategy', 'Strategy '):<15} {perf['annualized_return']:<12.2%} "
-                  f"{perf['annualized_volatility']:<12.2%} "
-                  f"{perf['sharpe_ratio']:<8.3f} "
-                  f"{perf['max_drawdown_pct']:<8.1f}% "
-                  f"{trades_str:<12} "
-                  f"{strategy_descriptions[strategy_name]:<25}")
-        
-        print(f"\n--- Strategy 9 vs Strategy 8 Analysis ---")
-        s8_perf = performances['strategy8']
-        s9_perf = performances['strategy9']
-        
-        return_diff = s9_perf['annualized_return'] - s8_perf['annualized_return']
-        vol_diff = s9_perf['annualized_volatility'] - s8_perf['annualized_volatility']
-        sharpe_diff = s9_perf['sharpe_ratio'] - s8_perf['sharpe_ratio']
-        dd_diff = s9_perf['max_drawdown_pct'] - s8_perf['max_drawdown_pct']
-        
-        print(f"Return Difference: {return_diff:+.2%}")
-        print(f"Volatility Difference: {vol_diff:+.2%}")
-        print(f"Sharpe Difference: {sharpe_diff:+.3f}")
-        print(f"Max Drawdown Difference: {dd_diff:+.1f}%")
-        
-        if 'avg_forecast' in s9_perf:
-            print(f"\nStrategy 9 Characteristics:")
-            print(f"  Average Combined Forecast: {s9_perf['avg_forecast']:.2f}")
-            print(f"  Average Absolute Forecast: {s9_perf['avg_abs_forecast']:.2f}")
-            print(f"  Average Daily Trades: {s9_perf['avg_daily_trades']:.1f}")
-        
-        # Create and display equity curves plot
-        print(f"\n--- Generating Equity Curves Plot ---")
-        try:
-            fig = plot_equity_curves(strategy_results, save_path='results/equity_curves_comparison.png')
-            plt.show()
-        except Exception as e:
-            print(f"Error creating plot: {e}")
-        
-        return strategy_results
-    
-
-def plot_strategy9_equity_curve(results, save_path='results/strategy9_equity_curve.png'):
-    """
-    Plot Strategy 9 equity curve and save to file.
+    Plot Strategy 10 equity curve and save to file.
     
     Parameters:
-        results (dict): Results from backtest_multiple_trend_strategy.
+        results (dict): Results from backtest_bollinger_mean_reversion_strategy.
         save_path (str): Path to save the plot.
     """
     try:
@@ -966,9 +694,9 @@ def plot_strategy9_equity_curve(results, save_path='results/strategy9_equity_cur
         
         # Main equity curve
         plt.subplot(3, 1, 1)
-        plt.plot(equity_curve.index, equity_curve.values/1e6, 'darkblue', linewidth=2, 
-                label=f'Strategy 9: Multiple Trend Following (SR: {performance["sharpe_ratio"]:.3f})')
-        plt.title('Strategy 9: Multiple Trend Following Equity Curve', fontsize=14, fontweight='bold')
+        plt.plot(equity_curve.index, equity_curve.values/1e6, 'purple', linewidth=2, 
+                label=f'Strategy 10: Bollinger Bands Mean Reversion (SR: {performance["sharpe_ratio"]:.3f})')
+        plt.title('Strategy 10: Bollinger Bands Mean Reversion Equity Curve', fontsize=14, fontweight='bold')
         plt.ylabel('Portfolio Value ($M)', fontsize=12)
         plt.grid(True, alpha=0.3)
         plt.legend()
@@ -986,17 +714,17 @@ def plot_strategy9_equity_curve(results, save_path='results/strategy9_equity_cur
         plt.grid(True, alpha=0.3)
         plt.legend()
         
-        # Combined forecast and trading activity over time
+        # Mean reversion forecast and trading activity over time
         plt.subplot(3, 1, 3)
-        plt.plot(portfolio_df.index, portfolio_df['avg_forecast'], 'green', linewidth=1, 
-                label='Average Combined Forecast')
+        plt.plot(portfolio_df.index, portfolio_df['avg_forecast'], 'blue', linewidth=1, 
+                label='Average MR Forecast')
         plt.plot(portfolio_df.index, portfolio_df['avg_abs_forecast'], 'orange', linewidth=1, 
                 label='Average Absolute Forecast')
-        plt.plot(portfolio_df.index, portfolio_df['total_trades'], 'purple', linewidth=1, alpha=0.7,
+        plt.plot(portfolio_df.index, portfolio_df['total_trades'], 'green', linewidth=1, alpha=0.7,
                 label='Daily Trades')
         plt.axhline(y=0, color='black', linestyle='--', alpha=0.5)
         
-        plt.title('Combined Forecast & Trading Activity Over Time', fontsize=12, fontweight='bold')
+        plt.title('Mean Reversion Forecast & Trading Activity Over Time', fontsize=12, fontweight='bold')
         plt.ylabel('Forecast Value / Trade Count', fontsize=12)
         plt.xlabel('Date', fontsize=12)
         plt.grid(True, alpha=0.3)
@@ -1009,20 +737,21 @@ def plot_strategy9_equity_curve(results, save_path='results/strategy9_equity_cur
             plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
         
         # Performance summary text
-        textstr = f'''Strategy 9 Performance Summary:
+        textstr = f'''Strategy 10 Performance Summary:
 Total Return: {performance['total_return']:.1%}
 Annualized Return: {performance['annualized_return']:.1%}
 Volatility: {performance['annualized_volatility']:.1%}
 Sharpe Ratio: {performance['sharpe_ratio']:.3f}
 Max Drawdown: {performance['max_drawdown_pct']:.1f}%
 Instruments: {performance.get('num_instruments', 'N/A')}
-Average Combined Forecast: {performance.get('avg_forecast', 0):.2f}
+Average MR Forecast: {performance.get('avg_forecast', 0):.2f}
 Total Trades: {performance.get('total_trades', 0):,}
-Forecast Combination: {config.get('forecast_combination', 'N/A')}
+Bollinger Bands: {config.get('bb_window', 20)}-period, {config.get('bb_std', 2.0)} std
+Entry/Exit: {config.get('entry_threshold', 0.1)}/{config.get('exit_threshold', 0.5)}
 Period: {config['backtest_start'].strftime('%Y-%m-%d')} to {config['backtest_end'].strftime('%Y-%m-%d')}'''
         
         plt.figtext(0.02, 0.02, textstr, fontsize=9, verticalalignment='bottom',
-                   bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.8))
+                   bbox=dict(boxstyle='round', facecolor='lavender', alpha=0.8))
         
         plt.tight_layout()
         plt.subplots_adjust(bottom=0.35)  # Make room for performance text
@@ -1030,31 +759,35 @@ Period: {config['backtest_start'].strftime('%Y-%m-%d')} to {config['backtest_end
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.show()
         
-        print(f"\n✅ Strategy 9 equity curve saved to: {save_path}")
+        print(f"\n✅ Strategy 10 equity curve saved to: {save_path}")
         
     except Exception as e:
-        print(f"Error plotting Strategy 9 equity curve: {e}")
+        print(f"Error plotting Strategy 10 equity curve: {e}")
         import traceback
         traceback.print_exc()
 
 def main():
     """
-    Test Strategy 9 implementation and compare all strategies.
+    Test Strategy 10 implementation: Bollinger Bands mean reversion.
     """
     print("=" * 60)
-    print("TESTING STRATEGY 9: MULTIPLE TREND FOLLOWING RULES")
+    print("TESTING STRATEGY 10: BOLLINGER BANDS MEAN REVERSION")
     print("=" * 60)
     
     try:
-        # Run Strategy 9 backtest
-        results = backtest_multiple_trend_strategy(
+        # Run Strategy 10 backtest
+        results = backtest_bollinger_mean_reversion_strategy(
             data_dir='Data',
             capital=1000000,
             risk_target=0.2,
             short_span=32,
             long_years=10,
             min_vol_floor=0.05,
-            forecast_combination='five_filters',
+            bb_window=20,
+            bb_std=2.0,
+            entry_threshold=0.1,
+            exit_threshold=0.5,
+            max_forecast=20.0,
             buffer_fraction=0.1,
             weight_method='handcrafted',
             common_hypothetical_SR=0.3,
@@ -1063,21 +796,19 @@ def main():
         )
         
         # Analyze results
-        analyze_multiple_trend_results(results)
+        analyze_bollinger_mean_reversion_results(results)
         
-        # Plot Strategy 9 equity curve
-        plot_strategy9_equity_curve(results)
+        # Plot Strategy 10 equity curve
+        plot_strategy10_equity_curve(results)
         
-        print(f"\nStrategy 9 backtest completed successfully!")
+        print(f"\nStrategy 10 backtest completed successfully!")
         return results
         
     except Exception as e:
-        print(f"Error in Strategy 9 testing: {e}")
+        print(f"Error in Strategy 10 testing: {e}")
         import traceback
         traceback.print_exc()
         return None
-
-
 
 if __name__ == "__main__":
     main() 
