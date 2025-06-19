@@ -651,7 +651,7 @@ def calculate_portfolio_position_size(symbol, capital, weight, idm, price, volat
     # Round to nearest integer since you can only hold whole contracts
     return round(position_size)
 
-def backtest_multi_instrument_strategy(data_dir='Data', capital=50000000, risk_target=0.2,
+def backtest_multi_instrument_strategy(data_dir='Data', capital=1000000, risk_target=0.2,
                                      short_span=32, long_years=10, min_vol_floor=0.05,
                                      weight_method='equal',
                                      common_hypothetical_SR=0.3, annual_turnover_T=7.0,
@@ -731,18 +731,18 @@ def backtest_multi_instrument_strategy(data_dir='Data', capital=50000000, risk_t
     global_max_date = max(all_available_end_dates) if all_available_end_dates else pd.Timestamp.max
     
     # Start from earliest available data if no start_date specified
-    # If start_date is specified, use the earlier of start_date or earliest available data
+    # If start_date is specified, use the later of start_date or earliest available data (i.e., respect user preference)
     if start_date:
         user_start_dt = pd.to_datetime(start_date)
-        backtest_start_dt = min(user_start_dt, global_min_date)  # Use earlier date
+        backtest_start_dt = max(user_start_dt, global_min_date)  # Use user's start date if data is available
     else:
         backtest_start_dt = global_min_date
     
     # End at latest available data if no end_date specified
-    # If end_date is specified, use the later of end_date or latest available data
+    # If end_date is specified, use the earlier of end_date or latest available data (i.e., respect user preference)
     if end_date:
         user_end_dt = pd.to_datetime(end_date)
-        backtest_end_dt = max(user_end_dt, global_max_date)  # Use later date
+        backtest_end_dt = min(user_end_dt, global_max_date)  # Use user's end date if data is available
     else:
         backtest_end_dt = global_max_date
 
@@ -1323,122 +1323,21 @@ def run_unit_tests():
         traceback.print_exc()
         return False, {}
 
-def test_capital_levels():
-    """
-    Test the system with different capital levels to demonstrate filtering.
-    """
-    print("\n" + "=" * 80)
-    print("TESTING DIFFERENT CAPITAL LEVELS")
-    print("=" * 80)
-    
-    capital_levels = [50000, 100000, 500000, 1000000, 5000000]  # Different capital levels to test
-    
-    for capital in capital_levels:
-        print(f"\n{'='*20} TESTING WITH ${capital:,.0f} CAPITAL {'='*20}")
-        
-        try:
-            results = backtest_multi_instrument_strategy(
-                data_dir='Data',
-                capital=capital,
-                risk_target=0.2,
-                weight_method='equal',  # Use equal for simplicity
-                common_hypothetical_SR=0.3,
-                annual_turnover_T=7.0
-            )
-            
-            if results and results.get('performance'):
-                perf = results['performance']
-                num_instruments = results['performance'].get('num_instruments', 0)
-                print(f"\n${capital:,.0f} CAPITAL RESULTS:")
-                print(f"  Instruments Used: {num_instruments}")
-                print(f"  Total Return: {perf['total_return']:.2%}")
-                print(f"  Annualized Return: {perf['annualized_return']:.2%}")
-                print(f"  Sharpe Ratio: {perf['sharpe_ratio']:.3f}")
-            else:
-                print(f"  No valid strategy results for ${capital:,.0f}")
-                
-        except Exception as e:
-            print(f"  Error with ${capital:,.0f} capital: {e}")
-    
-    return True
 
-def compare_weighting_methods():
-    """
-    Compare different weighting methods.
-    """
-    print("\n" + "=" * 80)
-    print("COMPARING WEIGHTING METHODS")
-    print("=" * 80)
-    
-    methods = ['equal', 'handcrafted']
-    results_by_method = {}
-    
-    for method in methods:
-        print(f"\n{'='*20} TESTING {method.upper()} WEIGHTING {'='*20}")
-        
-        try:
-            results = backtest_multi_instrument_strategy(
-                data_dir='Data',
-                capital=50000000,
-                risk_target=0.2,
-                weight_method=method,
-                common_hypothetical_SR=0.3, # Add example value
-                annual_turnover_T=7.0       # Add example value
-            )
-            results_by_method[method] = results
-            
-            # Brief summary
-            perf = results['performance']
-            print(f"\n{method.upper()} SUMMARY:")
-            print(f"  Total Return: {perf['total_return']:.2%}")
-            print(f"  Annualized Return: {perf['annualized_return']:.2%}")
-            print(f"  Sharpe Ratio: {perf['sharpe_ratio']:.3f}")
-            print(f"  Max Drawdown: {perf['max_drawdown_pct']:.1f}%")
-            
-        except Exception as e:
-            print(f"Error with {method} method: {e}")
-            results_by_method[method] = None
-    
-    # Detailed comparison
-    if len(results_by_method) >= 2:
-        print(f"\n" + "=" * 80)
-        print("WEIGHTING METHOD COMPARISON")
-        print("=" * 80)
-        
-        print(f"{'Metric':<25} {'Equal':<15} {'Handcrafted':<15} {'Difference':<15}")
-        print("-" * 80)
-        
-        equal_result = results_by_method.get('equal', {})
-        handcrafted_result = results_by_method.get('handcrafted', {})
-        
-        equal_perf = equal_result.get('performance', {}) if equal_result else {}
-        handcrafted_perf = handcrafted_result.get('performance', {}) if handcrafted_result else {}
-        
-        if equal_perf and handcrafted_perf:
-            metrics = [
-                ('Total Return', 'total_return', '%'),
-                ('Annualized Return', 'annualized_return', '%'),
-                ('Volatility', 'annualized_volatility', '%'),
-                ('Sharpe Ratio', 'sharpe_ratio', ''),
-                ('Max Drawdown', 'max_drawdown_pct', '%')
-            ]
-            
-            for name, key, unit in metrics:
-                equal_val = equal_perf.get(key, 0)
-                handcrafted_val = handcrafted_perf.get(key, 0)
-                diff = handcrafted_val - equal_val
-                
-                if unit == '%':
-                    print(f"{name:<25} {equal_val:<15.2%} {handcrafted_val:<15.2%} {diff:<15.2%}")
-                else:
-                    print(f"{name:<25} {equal_val:<15.3f} {handcrafted_val:<15.3f} {diff:<15.3f}")
-    
-    return results_by_method
 
 def main():
     """
     Test Strategy 4 implementation with unit tests, capital filtering, and FX functionality.
     """
+    # ===========================================
+    # CONFIGURATION - MODIFY THESE AS NEEDED
+    # ===========================================
+    CAPITAL = 1000000               # Starting capital
+    START_DATE = '2020-01-01'       # Backtest start date (YYYY-MM-DD) or None for earliest available
+    END_DATE = '2025-12-31'         # Backtest end date (YYYY-MM-DD) or None for latest available
+    RISK_TARGET = 0.2               # 20% annual risk target
+    WEIGHT_METHOD = 'handcrafted'   # 'equal', 'vol_inverse', or 'handcrafted'
+    
     # Run unit tests
     tests_passed, instrument_data = run_unit_tests()
     
@@ -1446,37 +1345,38 @@ def main():
         print("Unit tests failed. Stopping execution.")
         return
     
-    # Test different capital levels to demonstrate minimum capital filtering
-    test_capital_levels()
-    
     try:
-        # results_by_method = compare_weighting_methods() # This also calls backtest_multi_instrument_strategy
-        # For a single run with handcrafted, call directly:
         print(f"\n" + "=" * 60)
-        print("RUNNING HANDCRAFTED STRATEGY (DEFAULT)")
+        print("RUNNING STRATEGY 4: MULTI-INSTRUMENT PORTFOLIO")
+        print("=" * 60)
+        print(f"Configuration:")
+        print(f"  Capital: ${CAPITAL:,}")
+        print(f"  Date Range: {START_DATE or 'earliest'} to {END_DATE or 'latest'}")
+        print(f"  Risk Target: {RISK_TARGET:.1%}")
+        print(f"  Weight Method: {WEIGHT_METHOD}")
         print("=" * 60)
         results = backtest_multi_instrument_strategy(
             data_dir='Data',
-            capital=50000000, # Example capital
-            risk_target=0.2,
-            short_span=32, # Default from Chapter 3
-            long_years=10, # Default from Chapter 3
-            min_vol_floor=0.05, # Consistent with Chapter 3
-            weight_method='handcrafted', # or 'equal'
-            common_hypothetical_SR=0.3, # Example: Pass new SR parameters
-            annual_turnover_T=7.0,      # Example: Pass new SR parameters
-            # start_date='YYYY-MM-DD', # Optional
-            # end_date='YYYY-MM-DD'   # Optional
+            capital=CAPITAL,
+            risk_target=RISK_TARGET,
+            short_span=32,
+            long_years=10,
+            min_vol_floor=0.05,
+            weight_method=WEIGHT_METHOD,
+            common_hypothetical_SR=0.3,
+            annual_turnover_T=7.0,
+            start_date=START_DATE,
+            end_date=END_DATE
         )
 
         if results:
             print(f"\n" + "=" * 60)
-            print("DETAILED HANDCRAFTED STRATEGY ANALYSIS")
+            print("STRATEGY 4 PERFORMANCE ANALYSIS")
             print("=" * 60)
             analyze_portfolio_results(results)
             plot_strategy4_equity_curve(results)
         else:
-            print("Handcrafted strategy backtest did not produce results.")
+            print("Strategy 4 backtest did not produce results.")
         
         # ... (Comparison with MES single instrument strategy from Chapter 3, needs careful date alignment) ...
         # This part requires results to be non-None from the handcrafted run
