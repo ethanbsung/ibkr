@@ -38,10 +38,10 @@ allocation_percentages = {
 
 # Contract Specifications and Multipliers (matching aggregate_port.py exactly)
 contract_specs = {
-    'ES': {'multiplier': 5, 'contract_month': '202506', 'exchange': 'CME'},      # MES multiplier
-    'YM': {'multiplier': 0.50, 'contract_month': '202506', 'exchange': 'CBOT'},   # MYM multiplier  
+    'ES': {'multiplier': 5, 'contract_month': '202509', 'exchange': 'CME'},      # MES multiplier
+    'YM': {'multiplier': 0.50, 'contract_month': '202509', 'exchange': 'CBOT'},   # MYM multiplier  
     'GC': {'multiplier': 10, 'contract_month': '202508', 'exchange': 'COMEX'},     # MGC multiplier - moved to August to avoid delivery window
-    'NQ': {'multiplier': 2, 'contract_month': '202506', 'exchange': 'CME'}      # MNQ multiplier
+    'NQ': {'multiplier': 2, 'contract_month': '202509', 'exchange': 'CME'}      # MNQ multiplier
 }
 
 # IBS entry/exit thresholds

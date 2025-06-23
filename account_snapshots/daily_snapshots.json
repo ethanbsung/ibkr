@@ -33,5 +33,12 @@
     "unrealized_pnl": 606.26,
     "realized_pnl": 567.77,
     "total_cash": 31316.23
+  },
+  {
+    "date": "2025-06-20",
+    "net_liquidation": 31394.28,
+    "unrealized_pnl": 668.81,
+    "realized_pnl": 0.0,
+    "total_cash": 31394.28
   }
 ]
