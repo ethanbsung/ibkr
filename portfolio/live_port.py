@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta
 import pytz
 from collections import defaultdict
+import calendar
 
 # -------------------------------
 # Configuration Parameters
@@ -36,6 +37,95 @@ allocation_percentages = {
 
 # Note: Position sizing automatically maintains target allocations as equity changes
 
+# -------------------------------
+# Contract Rollover Configuration
+# -------------------------------
+# Days before expiration to trigger rollover
+ROLLOVER_DAYS_BEFORE_EXPIRATION = 5
+
+# Contract month progression for each instrument
+# Format: {'current_month': 'next_month', ...}
+CONTRACT_ROLLOVER_CHAINS = {
+    'ES': {  # E-mini S&P 500 - Quarterly (Mar, Jun, Sep, Dec)
+        '202506': '202509',  # Aug -> Sep (special case)
+        '202509': '202512',  # Sep -> Dec
+        '202512': '202603',  # Dec -> Mar
+        '202603': '202606',  # Mar -> Jun
+        '202606': '202609',  # Jun -> Sep
+        '202609': '202612',  # Sep -> Dec (future)
+    },
+    'YM': {  # E-mini Dow - Quarterly (Mar, Jun, Sep, Dec)
+        '202506': '202509',  # Aug -> Sep (special case)
+        '202509': '202512',  # Sep -> Dec
+        '202512': '202603',  # Dec -> Mar
+        '202603': '202606',  # Mar -> Jun
+        '202606': '202609',  # Jun -> Sep
+        '202609': '202612',  # Sep -> Dec (future)
+    },
+    'GC': {  # Gold - Monthly except Jan, Mar, May, Jul, Oct, Dec are most liquid
+        '202508': '202510',  # Aug -> Oct
+        '202510': '202512',  # Oct -> Dec
+        '202512': '202602',  # Dec -> Feb
+        '202602': '202604',  # Feb -> Apr
+        '202604': '202606',  # Apr -> Jun
+        '202606': '202608',  # Jun -> Aug
+    },
+    'NQ': {  # E-mini NASDAQ - Quarterly (Mar, Jun, Sep, Dec)
+        '202506': '202509',  # Aug -> Sep (special case)
+        '202509': '202512',  # Sep -> Dec
+        '202512': '202603',  # Dec -> Mar
+        '202603': '202606',  # Mar -> Jun
+        '202606': '202609',  # Jun -> Sep
+        '202609': '202612',  # Sep -> Dec (future)
+    }
+}
+
+# ⚠️  CRITICAL: EXPIRATION DATES MUST BE VERIFIED WITH OFFICIAL SOURCES
+# 
+# These expiration dates are placeholders and MUST be updated with official 
+# dates from CME Group and COMEX before use in live trading.
+# 
+# Official sources:
+# - CME Group: https://www.cmegroup.com/trading/equity-index/files/Equity_Expiration_Calendar_2025.pdf
+# - COMEX Gold: https://www.cmegroup.com/trading/metals/precious/gold.html
+#
+# ⚠️  DO NOT USE THESE PLACEHOLDER DATES FOR ACTUAL TRADING ⚠️
+CONTRACT_EXPIRATION_DATES = {
+    'ES': {
+        # PLACEHOLDER - VERIFY WITH CME GROUP OFFICIAL CALENDAR
+        '202508': None,  # Must verify August expiration
+        '202509': datetime(2025, 9, 19),  # September 19, 2025 (verified)
+        '202512': None,  # Must verify December expiration
+        '202603': None,  # Must verify March 2026 expiration
+        '202606': None,  # Must verify June 2026 expiration
+    },
+    'YM': {
+        # PLACEHOLDER - VERIFY WITH CME GROUP OFFICIAL CALENDAR
+        '202508': None,  # Must verify August expiration
+        '202509': datetime(2025, 9, 19),  # September 19, 2025 (same as ES)
+        '202512': None,  # Must verify December expiration
+        '202603': None,  # Must verify March 2026 expiration
+        '202606': None,  # Must verify June 2026 expiration
+    },
+    'GC': {
+        # PLACEHOLDER - VERIFY WITH COMEX OFFICIAL CALENDAR
+        '202508': datetime(2025, 8, 27),  # August 27, 2025 (verified)
+        '202510': None,  # Must verify October expiration
+        '202512': None,  # Must verify December expiration
+        '202602': None,  # Must verify February 2026 expiration
+        '202604': None,  # Must verify April 2026 expiration
+        '202606': None,  # Must verify June 2026 expiration
+    },
+    'NQ': {
+        # PLACEHOLDER - VERIFY WITH CME GROUP OFFICIAL CALENDAR
+        '202508': None,  # Must verify August expiration
+        '202509': datetime(2025, 9, 19),  # September 19, 2025 (same as ES/YM)
+        '202512': None,  # Must verify December expiration
+        '202603': None,  # Must verify March 2026 expiration
+        '202606': None,  # Must verify June 2026 expiration
+    }
+}
+
 # Contract Specifications and Multipliers (matching aggregate_port.py exactly)
 contract_specs = {
     'ES': {'multiplier': 5, 'contract_month': '202509', 'exchange': 'CME'},      # MES multiplier
@@ -52,6 +142,181 @@ ibs_exit_threshold  = 0.9       # Exit when IBS > 0.9
 williams_period = 2             # 2-day lookback
 wr_buy_threshold  = -90
 wr_sell_threshold = -30
+
+# -------------------------------
+# Rollover Management Functions
+# -------------------------------
+def get_contract_expiration_date(symbol, contract_month):
+    """Get the expiration date for a specific contract"""
+    logger = logging.getLogger()
+    try:
+        expiration_date = CONTRACT_EXPIRATION_DATES[symbol][contract_month]
+        if expiration_date is None:
+            logger.error(f"⚠️  CRITICAL: Expiration date for {symbol} {contract_month} not verified!")
+            logger.error(f"   Must check official CME/COMEX calendar before trading")
+            logger.error(f"   https://www.cmegroup.com/trading/equity-index/files/Equity_Expiration_Calendar_2025.pdf")
+            return None
+        return expiration_date
+    except KeyError:
+        logger.warning(f"No expiration date configured for {symbol} {contract_month}")
+        return None
+
+def get_days_to_expiration(symbol, contract_month):
+    """Calculate days until contract expiration"""
+    expiration_date = get_contract_expiration_date(symbol, contract_month)
+    if expiration_date is None:
+        return None
+    
+    today = datetime.now().date()
+    expiration_date = expiration_date.date()
+    
+    days_to_expiration = (expiration_date - today).days
+    return days_to_expiration
+
+def get_next_contract_month(symbol, current_month):
+    """Get the next contract month for rollover"""
+    try:
+        return CONTRACT_ROLLOVER_CHAINS[symbol][current_month]
+    except KeyError:
+        logger = logging.getLogger()
+        logger.warning(f"No rollover chain found for {symbol} {current_month}")
+        return None
+
+def should_rollover_contract(symbol, contract_month):
+    """Check if a contract should be rolled over"""
+    days_to_expiration = get_days_to_expiration(symbol, contract_month)
+    
+    if days_to_expiration is None:
+        return False
+    
+    return days_to_expiration <= ROLLOVER_DAYS_BEFORE_EXPIRATION
+
+def update_contract_specs_for_rollover(symbol, new_contract_month):
+    """Update the global contract_specs with new contract month"""
+    if symbol in contract_specs:
+        old_month = contract_specs[symbol]['contract_month']
+        contract_specs[symbol]['contract_month'] = new_contract_month
+        
+        logger = logging.getLogger()
+        logger.info(f"Updated {symbol} contract from {old_month} to {new_contract_month}")
+        return True
+    return False
+
+def check_and_update_rollover_chains():
+    """Automatically update rollover chains for future dates"""
+    logger = logging.getLogger()
+    
+    for symbol in CONTRACT_ROLLOVER_CHAINS:
+        current_year = datetime.now().year
+        
+        # Generate additional rollover mappings for next year if needed
+        if symbol in ['ES', 'YM', 'NQ']:  # Quarterly contracts
+            quarters = ['03', '06', '09', '12']
+            for year in [current_year, current_year + 1]:
+                for i, quarter in enumerate(quarters):
+                    current_contract = f"{year}{quarter}"
+                    next_quarter_idx = (i + 1) % len(quarters)
+                    next_year = year if next_quarter_idx > i else year + 1
+                    next_contract = f"{next_year}{quarters[next_quarter_idx]}"
+                    
+                    if current_contract not in CONTRACT_ROLLOVER_CHAINS[symbol]:
+                        CONTRACT_ROLLOVER_CHAINS[symbol][current_contract] = next_contract
+        
+        elif symbol == 'GC':  # Monthly contracts (simplified to bimonthly for liquidity)
+            months = ['02', '04', '06', '08', '10', '12']
+            for year in [current_year, current_year + 1]:
+                for i, month in enumerate(months):
+                    current_contract = f"{year}{month}"
+                    next_month_idx = (i + 1) % len(months)
+                    next_year = year if next_month_idx > i else year + 1
+                    next_contract = f"{next_year}{months[next_month_idx]}"
+                    
+                    if current_contract not in CONTRACT_ROLLOVER_CHAINS[symbol]:
+                        CONTRACT_ROLLOVER_CHAINS[symbol][current_contract] = next_contract
+
+def execute_contract_rollover(ib, symbol, old_contract, new_contract, router):
+    """Execute the actual contract rollover"""
+    logger = logging.getLogger()
+    
+    old_contract_month = old_contract.lastTradeDateOrContractMonth
+    new_contract_month = new_contract.lastTradeDateOrContractMonth
+    
+    try:
+        logger.info(f"=== EXECUTING ROLLOVER FOR {symbol} ===")
+        logger.info(f"Rolling from {old_contract.symbol} {old_contract_month}")
+        logger.info(f"Rolling to {new_contract.symbol} {new_contract_month}")
+        
+        # Get current virtual positions for this symbol from router
+        symbol_strategies = [s for s in allocation_percentages.keys() if s.endswith(f'_{symbol}')]
+        
+        total_virtual_position = 0
+        strategy_positions = {}
+        
+        for strategy in symbol_strategies:
+            virtual_lots = router.strategy_lots.get(strategy, 0)
+            strategy_positions[strategy] = virtual_lots
+            total_virtual_position += virtual_lots
+            
+        logger.info(f"Current virtual positions for {symbol}: {strategy_positions}")
+        logger.info(f"Total virtual position to roll: {total_virtual_position}")
+        
+        if total_virtual_position == 0:
+            logger.info(f"No positions to roll for {symbol}")
+            # Update contract specs even with no positions
+            update_contract_specs_for_rollover(symbol, new_contract_month)
+            router.contract = new_contract
+            return True
+        
+        # Step 1: Close all positions in the old contract
+        logger.info(f"Step 1: Closing positions in old contract")
+        close_positions = {strategy: 0 for strategy in symbol_strategies}
+        router.sync(close_positions)
+        ib.sleep(2)
+        
+        # Step 2: Update contract specifications
+        logger.info(f"Step 2: Updating contract specifications")
+        update_contract_specs_for_rollover(symbol, new_contract_month)
+        
+        # Step 3: Update router contract reference
+        logger.info(f"Step 3: Updating router contract reference")
+        router.contract = new_contract
+        
+        # Step 4: Re-establish positions in new contract
+        logger.info(f"Step 4: Re-establishing positions in new contract")
+        router.sync(strategy_positions)
+        ib.sleep(2)
+        
+        logger.info(f"=== ROLLOVER COMPLETED FOR {symbol} ===")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error during rollover execution for {symbol}: {e}")
+        return False
+
+def check_rollover_requirements(contracts):
+    """Check all contracts for rollover requirements and warn if needed"""
+    logger = logging.getLogger()
+    
+    rollover_warnings = []
+    
+    for symbol, contract in contracts.items():
+        current_month = contract_specs[symbol]['contract_month']
+        days_to_expiration = get_days_to_expiration(symbol, current_month)
+        
+        if days_to_expiration is not None:
+            if should_rollover_contract(symbol, current_month):
+                next_month = get_next_contract_month(symbol, current_month)
+                rollover_warnings.append({
+                    'symbol': symbol,
+                    'current_month': current_month,
+                    'next_month': next_month,
+                    'days_to_expiration': days_to_expiration
+                })
+                logger.warning(f"ROLLOVER NEEDED: {symbol} contract {current_month} expires in {days_to_expiration} days -> Roll to {next_month}")
+            else:
+                logger.info(f"{symbol} contract {current_month}: {days_to_expiration} days to expiration")
+    
+    return rollover_warnings
 
 # -------------------------------
 # Dynamic Position Sizing Functions (matching aggregate_port.py exactly)
@@ -82,8 +347,6 @@ def calculate_position_size(current_equity, target_allocation_pct, price, multip
     contracts = max(min_contracts, round(calculated_contracts))
     
     return int(contracts)
-
-
 
 # -------------------------------
 # State Management
@@ -670,6 +933,9 @@ def run_daily_signals(ib):
     # Load current portfolio state
     state = load_portfolio_state()
     
+    # Check and update rollover chains for future contracts
+    check_and_update_rollover_chains()
+    
     # Qualify all contracts
     contracts = qualify_contracts(ib)
     if contracts is None:
@@ -685,6 +951,20 @@ def run_daily_signals(ib):
     for symbol in ['ES', 'YM', 'GC', 'NQ']:
         routers[symbol] = PositionRouter(ib, contracts[symbol], symbol, state)
         desired_positions[symbol] = {}  # will hold IBS and Williams target lots for this symbol
+    
+    # ========== ROLLOVER CHECK ==========
+    # Check if any contracts need to be rolled (warning only - manual rollover required)
+    logger.info("=== CHECKING ROLLOVER REQUIREMENTS ===")
+    rollover_warnings = check_rollover_requirements(contracts)
+    
+    if rollover_warnings:
+        logger.warning("⚠️  MANUAL ROLLOVER REQUIRED FOR THE FOLLOWING CONTRACTS:")
+        for warning in rollover_warnings:
+            logger.warning(f"  {warning['symbol']}: {warning['current_month']} -> {warning['next_month']} ({warning['days_to_expiration']} days)")
+        logger.warning("Use --force-rollover [SYMBOL] to manually execute rollover")
+    else:
+        logger.info("✅ No contract rollovers needed")
+    # ====================================
     
     # Get current account equity
     current_equity = get_account_equity(ib)
@@ -909,6 +1189,31 @@ def run_daily_signals(ib):
         else:
             logger.info(f"{strategy}: NO POSITION")
 
+def print_rollover_status():
+    """Print contract rollover status for all instruments"""
+    logger = logging.getLogger()
+    
+    logger.info("=== CONTRACT ROLLOVER STATUS ===")
+    
+    for symbol in ['ES', 'YM', 'GC', 'NQ']:
+        current_month = contract_specs[symbol]['contract_month']
+        days_to_expiration = get_days_to_expiration(symbol, current_month)
+        next_month = get_next_contract_month(symbol, current_month)
+        
+        if days_to_expiration is not None:
+            if days_to_expiration <= ROLLOVER_DAYS_BEFORE_EXPIRATION:
+                status = f"⚠️  ROLLOVER NEEDED"
+            elif days_to_expiration <= 10:
+                status = f"⚡ APPROACHING EXPIRATION"
+            else:
+                status = f"✅ OK"
+                
+            logger.info(f"{symbol} {current_month}: {days_to_expiration} days to expiration - {status}")
+            if next_month:
+                logger.info(f"  → Next contract: {next_month}")
+        else:
+            logger.warning(f"{symbol} {current_month}: Expiration date unknown")
+
 def print_portfolio_summary(ib):
     """Print portfolio summary and recent OHLC data"""
     logger = logging.getLogger()
@@ -933,6 +1238,9 @@ def print_portfolio_summary(ib):
         
     logger.info(f"  • Risk Multiplier: {risk_multiplier}x (LARGER POSITION SIZES)")
     logger.info("  • Enhanced risk/reward with larger position sizes")
+    
+    # Display rollover status
+    print_rollover_status()
     
     # Get current equity from IBKR if not available in state
     current_equity = state['current_equity']
@@ -976,9 +1284,25 @@ def print_portfolio_summary(ib):
                 logger.info(f"{symbol}: Date: {recent_bar.date}, O: {recent_bar.open}, H: {recent_bar.high}, L: {recent_bar.low}, C: {recent_bar.close}")
 
 def main():
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Live Portfolio Trading with Rollover Management')
+    parser.add_argument('--check-rollover', action='store_true', 
+                       help='Check rollover status without running trading logic')
+    parser.add_argument('--force-rollover', type=str, 
+                       help='Force rollover for specific symbol (ES, YM, GC, NQ)')
+    args = parser.parse_args()
+    
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger()
+    
+    # Handle rollover check mode
+    if args.check_rollover:
+        logger.info("=== ROLLOVER STATUS CHECK MODE ===")
+        print_rollover_status()
+        return
     
     # Check current time and next market close
     tz = pytz.timezone('US/Eastern')
@@ -1001,6 +1325,73 @@ def main():
         logger.info("Connected to IBKR.")
     except Exception as e:
         logger.error(f"Connection failed: {e}")
+        return
+
+    # Handle force rollover mode
+    if args.force_rollover:
+        symbol = args.force_rollover.upper()
+        if symbol not in ['ES', 'YM', 'GC', 'NQ']:
+            logger.error(f"Invalid symbol for force rollover: {symbol}")
+            ib.disconnect()
+            return
+            
+        logger.info(f"=== FORCING ROLLOVER FOR {symbol} ===")
+        
+        # Qualify contracts and set up routers
+        contracts = qualify_contracts(ib)
+        if contracts is None:
+            logger.error("Failed to qualify contracts")
+            ib.disconnect()
+            return
+            
+        state = load_portfolio_state()
+        routers = {}
+        for sym in ['ES', 'YM', 'GC', 'NQ']:
+            routers[sym] = PositionRouter(ib, contracts[sym], sym, state)
+        
+        # Force rollover for specified symbol
+        current_month = contract_specs[symbol]['contract_month']
+        next_month = get_next_contract_month(symbol, current_month)
+        
+        if next_month is None:
+            logger.error(f"Cannot determine next contract month for {symbol}")
+            ib.disconnect()
+            return
+            
+        # Create new contract and execute rollover
+        try:
+            if symbol == 'ES':
+                new_contract = Future(symbol='MES', lastTradeDateOrContractMonth=next_month,
+                                    exchange=contract_specs[symbol]['exchange'], currency='USD')
+            elif symbol == 'YM':
+                new_contract = Future(symbol='MYM', lastTradeDateOrContractMonth=next_month,
+                                    exchange=contract_specs[symbol]['exchange'], currency='USD')
+            elif symbol == 'GC':
+                new_contract = Future(symbol='MGC', lastTradeDateOrContractMonth=next_month,
+                                    exchange=contract_specs[symbol]['exchange'], currency='USD')
+            elif symbol == 'NQ':
+                new_contract = Future(symbol='MNQ', lastTradeDateOrContractMonth=next_month,
+                                    exchange=contract_specs[symbol]['exchange'], currency='USD')
+            
+            qualified = ib.qualifyContracts(new_contract)
+            if not qualified:
+                logger.error(f"Failed to qualify new contract for {symbol} {next_month}")
+                ib.disconnect()
+                return
+                
+            new_contract = qualified[0]
+            success = execute_contract_rollover(ib, symbol, contracts[symbol], new_contract, 
+                                              routers[symbol])
+            
+            if success:
+                logger.info(f"Force rollover completed successfully for {symbol}")
+            else:
+                logger.error(f"Force rollover failed for {symbol}")
+                
+        except Exception as e:
+            logger.error(f"Error during force rollover: {e}")
+        
+        ib.disconnect()
         return
 
     # Print portfolio summary on startup
