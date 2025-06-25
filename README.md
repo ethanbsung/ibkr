@@ -9,7 +9,7 @@
 ![Return](https://img.shields.io/badge/Return-%2B2.5%25-brightgreen)
 ![Max DD](https://img.shields.io/badge/Max_DD-5.6%2525-red)
 ![Status](https://img.shields.io/badge/Trading-PAPER-brightgreen)
-![Last Updated](https://img.shields.io/badge/Last_Updated-2025-06-24-lightgrey)
+![Last Updated](https://img.shields.io/badge/Last_Updated-2025-06-25-lightgrey)
 
 A comprehensive algorithmic trading system implementing systematic trading strategies with paper trading execution, extensive backtesting, and Monte Carlo simulation capabilities. This project demonstrates enterprise-level quantitative finance software engineering practices using Interactive Brokers' paper trading environment.
 
@@ -36,7 +36,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Paper Trading Performance
 
-> **Last Updated:** 2025-06-24 23:15 UTC | **Trading Days:** 8
+> **Last Updated:** 2025-06-25 23:15 UTC | **Trading Days:** 8
 
 ### Current Paper Account Status
 | Metric | Value |
