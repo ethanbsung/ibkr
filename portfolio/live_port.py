@@ -93,7 +93,6 @@ CONTRACT_ROLLOVER_CHAINS = {
 CONTRACT_EXPIRATION_DATES = {
     'ES': {
         # PLACEHOLDER - VERIFY WITH CME GROUP OFFICIAL CALENDAR
-        '202508': None,  # Must verify August expiration
         '202509': datetime(2025, 9, 19),  # September 19, 2025 (verified)
         '202512': None,  # Must verify December expiration
         '202603': None,  # Must verify March 2026 expiration
@@ -101,7 +100,6 @@ CONTRACT_EXPIRATION_DATES = {
     },
     'YM': {
         # PLACEHOLDER - VERIFY WITH CME GROUP OFFICIAL CALENDAR
-        '202508': None,  # Must verify August expiration
         '202509': datetime(2025, 9, 19),  # September 19, 2025 (same as ES)
         '202512': None,  # Must verify December expiration
         '202603': None,  # Must verify March 2026 expiration
@@ -118,7 +116,6 @@ CONTRACT_EXPIRATION_DATES = {
     },
     'NQ': {
         # PLACEHOLDER - VERIFY WITH CME GROUP OFFICIAL CALENDAR
-        '202508': None,  # Must verify August expiration
         '202509': datetime(2025, 9, 19),  # September 19, 2025 (same as ES/YM)
         '202512': None,  # Must verify December expiration
         '202603': None,  # Must verify March 2026 expiration
