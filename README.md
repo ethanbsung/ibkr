@@ -36,7 +36,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Paper Trading Performance
 
-> **Last Updated:** 2025-06-30 16:09 UTC | **Trading Days:** 11
+> **Last Updated:** 2025-06-30 23:15 UTC | **Trading Days:** 11
 
 ### Current Paper Account Status
 | Metric | Value |
@@ -49,20 +49,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 | **Max Drawdown** | 7.2%* |
 
 ### Current Positions
-| Strategy | Symbol | Side | Contracts | Entry Price | Notional Value | Entry Date |
-|----------|--------|------|-----------|-------------|----------------|------------|
-| **IBS_GC** | MGC | Long | 1 | $3406.90 | $34,069.00 | 2025-06-17 |
-
-**Portfolio Summary:** 1 positions, $34,069.00 total notional, 1.1x leverage
-
-### Portfolio Risk Metrics
-| Metric | Value | Notes |
-|--------|-------|-------|
-| **Total Notional** | $34,069.00 | Combined exposure |
-| **Gross Leverage** | 1.12x | Account value multiple |
-| **Positions Count** | 1 | Active strategies |
-| **Largest Position** | 100.0% | MGC (IBS_GC) |
-| **IBS Exposure** | 100.0% | $34,069.00 notional |
+*No positions currently open - waiting for entry signals*
 
 ### Recent Performance
 | Period | Return |
