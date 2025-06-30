@@ -44,13 +44,26 @@ def load_position_data() -> List[Dict]:
                         except:
                             entry_time = entry_time.split('T')[0]  # Fallback
                     
+                    # Calculate position metrics
+                    contracts = pos.get('contracts', 0)
+                    entry_price = pos.get('entry_price', 0)
+                    
+                    # Contract multipliers for notional value calculation
+                    multipliers = {
+                        'MES': 5, 'MYM': 0.5, 'MGC': 10, 'MNQ': 2, 'ZQ': 2000
+                    }
+                    multiplier = multipliers.get(symbol, 1)
+                    notional_value = contracts * entry_price * multiplier
+                    
                     positions.append({
                         'strategy': strategy,
                         'symbol': symbol,
-                        'side': 'Long' if pos.get('contracts', 0) > 0 else 'Short',
-                        'contracts': abs(pos.get('contracts', 0)),
-                        'entry_price': pos.get('entry_price', 0),
-                        'entry_time': entry_time
+                        'side': 'Long' if contracts > 0 else 'Short',
+                        'contracts': abs(contracts),
+                        'entry_price': entry_price,
+                        'entry_time': entry_time,
+                        'notional_value': notional_value,
+                        'multiplier': multiplier
                     })
         
         return positions
@@ -79,8 +92,8 @@ def load_trading_metrics() -> Optional[Dict]:
             'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M UTC'),
             'account_value': latest['net_liquidation'],
             'unrealized_pnl': latest['unrealized_pnl'],
-            'realized_pnl': latest['realized_pnl'],
-            'total_pnl': latest['unrealized_pnl'] + latest['realized_pnl'],
+            'realized_pnl': latest.get('cumulative_realized_pnl', latest['realized_pnl']),  # Use cumulative if available
+            'total_pnl': latest['unrealized_pnl'] + latest.get('cumulative_realized_pnl', latest['realized_pnl']),
             'total_pnl_pct': 0,  # Will calculate if we have historical data
             'trading_days': len(snapshots),
             'sharpe_ratio': 0,  # Will calculate if enough data
@@ -91,13 +104,66 @@ def load_trading_metrics() -> Optional[Dict]:
         
         # Calculate performance over time if we have multiple snapshots
         if len(snapshots) > 1:
-            # Calculate returns from first snapshot (initial capital)
+            # Use the first snapshot to determine initial capital
             first_snapshot = sorted(snapshots, key=lambda x: x['date'])[0]
-            initial_value = first_snapshot['net_liquidation'] - first_snapshot['unrealized_pnl'] - first_snapshot['realized_pnl']
             
-            if initial_value > 0:
-                total_return = (latest['net_liquidation'] - initial_value) / initial_value * 100
-                metrics['total_pnl_pct'] = total_return
+            # For proper initial capital calculation:
+            # If first snapshot has no P&L, use net_liquidation as initial capital
+            # Otherwise, calculate initial capital by removing P&L from first snapshot
+            if first_snapshot['unrealized_pnl'] == 0 and first_snapshot['realized_pnl'] == 0:
+                initial_capital = first_snapshot['net_liquidation']
+            else:
+                # Back out the initial capital from first snapshot
+                initial_capital = first_snapshot['net_liquidation'] - first_snapshot['unrealized_pnl'] - first_snapshot['realized_pnl']
+            
+            # Calculate total P&L across all time - special handling for existing data
+            current_account_value = latest['net_liquidation']
+            
+            # For existing data without cumulative tracking, calculate cumulative realized P&L
+            # by looking for account value changes that aren't explained by unrealized P&L changes
+            if 'cumulative_realized_pnl' not in latest:
+                cumulative_realized_pnl = 0
+                
+                # Look through snapshots to estimate cumulative realized P&L
+                for i in range(len(snapshots)):
+                    daily_realized = snapshots[i]['realized_pnl']
+                    
+                    # If there's a daily realized P&L, add it to cumulative
+                    if daily_realized != 0:
+                        cumulative_realized_pnl += daily_realized
+                
+                # Also check for unexplained account value changes (closed positions not tracked)
+                # This is a heuristic: if account value changed more than unrealized P&L change suggests
+                if len(snapshots) >= 2:
+                    for i in range(1, len(snapshots)):
+                        prev_snapshot = snapshots[i-1]
+                        curr_snapshot = snapshots[i]
+                        
+                        # Expected account value based on previous value and unrealized P&L change
+                        prev_base_value = prev_snapshot['net_liquidation'] - prev_snapshot['unrealized_pnl']
+                        expected_account_value = prev_base_value + curr_snapshot['unrealized_pnl']
+                        actual_account_value = curr_snapshot['net_liquidation']
+                        
+                        # If there's a significant difference not explained by recorded realized P&L
+                        diff = actual_account_value - expected_account_value
+                        if abs(diff) > 1 and curr_snapshot['realized_pnl'] == 0:
+                            cumulative_realized_pnl += diff
+                
+                # Update the realized P&L to use our calculated cumulative
+                metrics['realized_pnl'] = cumulative_realized_pnl
+            else:
+                cumulative_realized_pnl = latest['cumulative_realized_pnl']
+            
+            total_account_change = current_account_value - initial_capital
+            
+            # Use account value change as the true total P&L measure, but also show components
+            metrics['total_pnl'] = total_account_change
+            
+            # Also store component-based total for comparison
+            component_total_pnl = latest['unrealized_pnl'] + cumulative_realized_pnl
+            
+            if initial_capital > 0:
+                metrics['total_pnl_pct'] = (total_account_change / initial_capital) * 100
                 
                 # Calculate advanced risk metrics if we have enough data
                 if len(snapshots) >= 7:  # Need at least a week of data
@@ -121,10 +187,10 @@ def load_trading_metrics() -> Optional[Dict]:
                         if std_return > 0:
                             metrics['sharpe_ratio'] = (mean_return / std_return) * np.sqrt(252)  # Annualized
                         
-                        # Calculate Maximum Drawdown
-                        peak = daily_values[0]
+                        # Calculate Maximum Drawdown from peak to trough
+                        peak = initial_capital
                         max_dd = 0
-                        for value in daily_values:
+                        for value in [initial_capital] + daily_values:
                             if value > peak:
                                 peak = value
                             drawdown = (peak - value) / peak
@@ -139,11 +205,10 @@ def load_trading_metrics() -> Optional[Dict]:
                         period_return = (latest['net_liquidation'] - period_snapshot['net_liquidation']) / period_snapshot['net_liquidation'] * 100
                         metrics[f'{period_name}_return'] = period_return
         else:
-            # If only one snapshot, try to estimate return from P&L
-            total_pnl = latest['unrealized_pnl'] + latest['realized_pnl']
-            estimated_initial = latest['net_liquidation'] - total_pnl
-            if estimated_initial > 0:
-                metrics['total_pnl_pct'] = (total_pnl / estimated_initial) * 100
+            # If only one snapshot, we can't calculate meaningful returns
+            # Use the P&L values as reported but note uncertainty
+            metrics['total_pnl'] = latest['unrealized_pnl'] + latest['realized_pnl']
+            # Don't calculate percentage without baseline
         
         return metrics
         
@@ -278,48 +343,58 @@ def generate_metrics_section(metrics: Dict, positions: List[Dict]) -> str:
     if metrics.get('max_drawdown_pct', 0) > 0:
         section += f"| **Max Drawdown** | {metrics['max_drawdown_pct']:.1f}%* |\n"
     
-    # Add current positions
+    # Add current positions with enhanced detail
     if positions:
         section += f"\n### Current Positions\n"
-        section += f"| Strategy | Symbol | Side | Contracts | Entry Price | Entry Date |\n"
-        section += f"|----------|--------|------|-----------|-------------|------------|\n"
+        section += f"| Strategy | Symbol | Side | Contracts | Entry Price | Notional Value | Entry Date |\n"
+        section += f"|----------|--------|------|-----------|-------------|----------------|------------|\n"
         
+        total_notional = 0
         for pos in positions:
-            section += f"| **{pos['strategy']}** | {pos['symbol']} | {pos['side']} | {pos['contracts']} | ${pos['entry_price']:.2f} | {pos['entry_time']} |\n"
+            section += f"| **{pos['strategy']}** | {pos['symbol']} | {pos['side']} | {pos['contracts']} | ${pos['entry_price']:.2f} | {format_currency(pos['notional_value'])} | {pos['entry_time']} |\n"
+            total_notional += pos['notional_value']
+        
+        # Add position summary
+        leverage = total_notional / metrics['account_value'] if metrics['account_value'] > 0 else 0
+        section += f"\n**Portfolio Summary:** {len(positions)} positions, {format_currency(total_notional)} total notional, {leverage:.1f}x leverage\n"
     else:
         section += f"\n### Current Positions\n"
         section += f"*No positions currently open - waiting for entry signals*\n"
     
-    # Add portfolio risk metrics
+    # Add portfolio risk metrics with enhanced detail
     if positions:
-        # Calculate portfolio exposure
-        total_notional = 0
-        contract_multipliers = {
-            'MES': 5, 'MYM': 0.5, 'MGC': 10, 'MNQ': 2, 'ZQ': 2000
-        }
-        
         section += f"\n### Portfolio Risk Metrics\n"
-        section += f"| Metric | Value |\n"
-        section += f"|--------|-------|\n"
+        section += f"| Metric | Value | Notes |\n"
+        section += f"|--------|-------|-------|\n"
         
-        for pos in positions:
-            multiplier = contract_multipliers.get(pos['symbol'], 1)
-            notional = pos['contracts'] * pos['entry_price'] * multiplier
-            total_notional += notional
-        
+        # Calculate risk metrics
+        total_notional = sum(pos['notional_value'] for pos in positions)
         leverage = total_notional / metrics['account_value'] if metrics['account_value'] > 0 else 0
-        section += f"| **Total Notional** | {format_currency(total_notional)} |\n"
-        section += f"| **Gross Leverage** | {leverage:.1f}x |\n"
-        section += f"| **Risk per Position** | {100/len(positions):.1f}% avg allocation |\n"
+        
+        section += f"| **Total Notional** | {format_currency(total_notional)} | Combined exposure |\n"
+        section += f"| **Gross Leverage** | {leverage:.2f}x | Account value multiple |\n"
+        section += f"| **Positions Count** | {len(positions)} | Active strategies |\n"
         
         # Calculate position concentration
-        largest_position = max(positions, key=lambda p: contract_multipliers.get(p['symbol'], 1) * p['contracts'] * p['entry_price'])
-        largest_notional = contract_multipliers.get(largest_position['symbol'], 1) * largest_position['contracts'] * largest_position['entry_price']
-        concentration = (largest_notional / total_notional) * 100 if total_notional > 0 else 0
-        section += f"| **Largest Position** | {concentration:.1f}% ({largest_position['symbol']}) |\n"
+        if total_notional > 0:
+            largest_position = max(positions, key=lambda p: p['notional_value'])
+            concentration = (largest_position['notional_value'] / total_notional) * 100
+            section += f"| **Largest Position** | {concentration:.1f}% | {largest_position['symbol']} ({largest_position['strategy']}) |\n"
+            
+            # Add strategy breakdown
+            strategy_exposure = {}
+            for pos in positions:
+                strategy_type = pos['strategy'].split('_')[0]  # IBS or Williams
+                if strategy_type not in strategy_exposure:
+                    strategy_exposure[strategy_type] = 0
+                strategy_exposure[strategy_type] += pos['notional_value']
+            
+            for strategy_type, exposure in strategy_exposure.items():
+                pct = (exposure / total_notional) * 100
+                section += f"| **{strategy_type} Exposure** | {pct:.1f}% | {format_currency(exposure)} notional |\n"
     
     # Add period returns if available
-    if '1_week_return' in metrics:
+    if any(key.endswith('_return') for key in metrics.keys()):
         section += f"\n### Recent Performance\n"
         section += f"| Period | Return |\n"
         section += f"|--------|--------|\n"

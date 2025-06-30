@@ -208,36 +208,87 @@ def save_daily_snapshot(ib):
         
         today = datetime.now().strftime('%Y-%m-%d')
         
+        # Get portfolio data for more detailed P&L calculation
+        portfolio = ib.portfolio()
+        
+        # Calculate total realized P&L from all positions
+        total_realized_pnl = 0
+        total_unrealized_pnl = 0
+        
+        for item in portfolio:
+            if hasattr(item, 'realizedPNL') and item.realizedPNL:
+                total_realized_pnl += item.realizedPNL
+            if hasattr(item, 'unrealizedPNL') and item.unrealizedPNL:
+                total_unrealized_pnl += item.unrealizedPNL
+        
+        # Use account values as primary source, portfolio as backup
+        net_liquidation = float(account_lookup.get('NetLiquidation', {}).value or 0)
+        unrealized_pnl = float(account_lookup.get('UnrealizedPnL', {}).value or total_unrealized_pnl or 0)
+        
+        # For realized P&L, try to get cumulative value
+        # IBKR sometimes resets daily, so we'll track cumulative ourselves
+        account_realized_pnl = float(account_lookup.get('RealizedPnL', {}).value or 0)
+        
+        # Load existing snapshots to calculate cumulative realized P&L
+        snapshots_file = 'account_snapshots/daily_snapshots.json'
+        existing_snapshots = []
+        if os.path.exists(snapshots_file):
+            with open(snapshots_file, 'r') as f:
+                existing_snapshots = json.load(f)
+        
+        # Calculate cumulative realized P&L if we have historical data
+        cumulative_realized_pnl = account_realized_pnl
+        if existing_snapshots:
+            # Check if we have yesterday's data
+            yesterday_snapshots = [s for s in existing_snapshots if s['date'] < today]
+            if yesterday_snapshots:
+                last_snapshot = sorted(yesterday_snapshots, key=lambda x: x['date'])[-1]
+                
+                # If current account shows 0 realized P&L but we had some before,
+                # it means IBKR reset the counter, so we maintain our cumulative tracking
+                if account_realized_pnl == 0 and last_snapshot.get('cumulative_realized_pnl', 0) != 0:
+                    # Check if account value changed in a way that suggests realized gains
+                    expected_account_value = last_snapshot['net_liquidation'] - last_snapshot['unrealized_pnl'] + unrealized_pnl
+                    account_value_diff = net_liquidation - expected_account_value
+                    
+                    # If there's a difference, it's likely realized P&L
+                    if abs(account_value_diff) > 0.01:  # More than 1 cent difference
+                        cumulative_realized_pnl = last_snapshot.get('cumulative_realized_pnl', 0) + account_value_diff
+                    else:
+                        cumulative_realized_pnl = last_snapshot.get('cumulative_realized_pnl', 0)
+                else:
+                    # Normal case: add to existing cumulative
+                    cumulative_realized_pnl = last_snapshot.get('cumulative_realized_pnl', 0) + account_realized_pnl
+        
         snapshot = {
             'date': today,
-            'net_liquidation': float(account_lookup.get('NetLiquidation', {}).value or 0),
-            'unrealized_pnl': float(account_lookup.get('UnrealizedPnL', {}).value or 0),
-            'realized_pnl': float(account_lookup.get('RealizedPnL', {}).value or 0),
-            'total_cash': float(account_lookup.get('TotalCashValue', {}).value or 0)
+            'net_liquidation': net_liquidation,
+            'unrealized_pnl': unrealized_pnl,
+            'realized_pnl': account_realized_pnl,  # Daily realized P&L from IBKR
+            'cumulative_realized_pnl': cumulative_realized_pnl,  # Our cumulative tracking
+            'total_cash': float(account_lookup.get('TotalCashValue', {}).value or 0),
+            'gross_position_value': float(account_lookup.get('GrossPositionValue', {}).value or 0)
         }
         
         # Create snapshots directory if it doesn't exist
         os.makedirs('account_snapshots', exist_ok=True)
         
-        # Load existing snapshots
-        snapshots_file = 'account_snapshots/daily_snapshots.json'
-        snapshots = []
-        if os.path.exists(snapshots_file):
-            with open(snapshots_file, 'r') as f:
-                snapshots = json.load(f)
-        
         # Add today's snapshot (replace if already exists)
-        snapshots = [s for s in snapshots if s['date'] != today]
-        snapshots.append(snapshot)
+        existing_snapshots = [s for s in existing_snapshots if s['date'] != today]
+        existing_snapshots.append(snapshot)
         
         # Keep only last 400 days of data
-        snapshots = sorted(snapshots, key=lambda x: x['date'])[-400:]
+        existing_snapshots = sorted(existing_snapshots, key=lambda x: x['date'])[-400:]
         
         # Save updated snapshots
         with open(snapshots_file, 'w') as f:
-            json.dump(snapshots, f, indent=2)
+            json.dump(existing_snapshots, f, indent=2)
         
         print(f"Daily snapshot saved for {today}")
+        print(f"  Net Liquidation: ${net_liquidation:,.2f}")
+        print(f"  Unrealized P&L: ${unrealized_pnl:,.2f}")
+        print(f"  Daily Realized P&L: ${account_realized_pnl:,.2f}")
+        print(f"  Cumulative Realized P&L: ${cumulative_realized_pnl:,.2f}")
         return True
         
     except Exception as e:
