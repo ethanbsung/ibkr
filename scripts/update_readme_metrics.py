@@ -281,7 +281,7 @@ def generate_dynamic_badges(metrics: Dict) -> str:
     
     drawdown_badge = ""
     if metrics.get('max_drawdown_pct', 0) > 0:
-        dd_value = f"{metrics['max_drawdown_pct']:.1f}%25"
+        dd_value = f"{metrics['max_drawdown_pct']:.1f}%"
         # More conservative colors since end-of-day data underestimates true drawdown
         dd_color = "green" if metrics['max_drawdown_pct'] < 2 else "yellow" if metrics['max_drawdown_pct'] < 5 else "red"
         drawdown_badge = f"![Max DD](https://img.shields.io/badge/Max_DD-{urllib.parse.quote(dd_value)}-{dd_color})\n"

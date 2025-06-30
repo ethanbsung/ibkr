@@ -7,7 +7,7 @@
 ![Account Value](https://img.shields.io/badge/Account-%2430%2C410-blue)
 ![P&L](https://img.shields.io/badge/P&L-%24239-brightgreen)
 ![Return](https://img.shields.io/badge/Return-%2B0.8%25-brightgreen)
-![Max DD](https://img.shields.io/badge/Max_DD-7.2%2525-red)
+![Max DD](https://img.shields.io/badge/Max_DD-7.2%25-red)
 ![Status](https://img.shields.io/badge/Trading-PAPER-brightgreen)
 ![Last Updated](https://img.shields.io/badge/Last_Updated-2025-06-30-lightgrey)
 
@@ -36,7 +36,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Paper Trading Performance
 
-> **Last Updated:** 2025-06-30 16:07 UTC | **Trading Days:** 11
+> **Last Updated:** 2025-06-30 16:09 UTC | **Trading Days:** 11
 
 ### Current Paper Account Status
 | Metric | Value |
