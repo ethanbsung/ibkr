@@ -87,13 +87,59 @@ def load_trading_metrics() -> Optional[Dict]:
         # Get the latest snapshot
         latest = sorted(snapshots, key=lambda x: x['date'])[-1]
         
+        # Cross-validate with position data to ensure consistency
+        positions_exist = False
+        try:
+            with open('portfolio_state.json', 'r') as f:
+                portfolio_state = json.load(f)
+            
+            # Check if any strategy has an open position
+            for strategy, pos_data in portfolio_state.get('positions', {}).items():
+                if pos_data.get('in_position', False):
+                    positions_exist = True
+                    break
+        except:
+            pass  # If we can't read portfolio state, use snapshot data as-is
+        
+        # If no positions exist but unrealized P&L is non-zero, it's likely stale data
+        unrealized_pnl = latest['unrealized_pnl']
+        if not positions_exist and unrealized_pnl != 0:
+            print(f"Warning: No positions found but unrealized P&L is {unrealized_pnl}. Setting to 0 (likely stale IBKR data).")
+            unrealized_pnl = 0.0
+        
+        # Calculate initial capital and total P&L first to determine if realized P&L needs correction
+        if len(snapshots) > 1:
+            first_snapshot = sorted(snapshots, key=lambda x: x['date'])[0]
+            
+            # Calculate initial capital
+            if first_snapshot['unrealized_pnl'] == 0 and first_snapshot['realized_pnl'] == 0:
+                initial_capital = first_snapshot['net_liquidation']
+            else:
+                initial_capital = first_snapshot['net_liquidation'] - first_snapshot['unrealized_pnl'] - first_snapshot['realized_pnl']
+            
+            # Calculate accurate total P&L
+            total_account_change = latest['net_liquidation'] - initial_capital
+        else:
+            initial_capital = 0
+            total_account_change = latest.get('cumulative_realized_pnl', latest['realized_pnl'])
+        
+        # Get realized P&L - if no positions exist, it should equal total P&L
+        if not positions_exist and unrealized_pnl == 0:
+            # When no positions are open, all P&L should be realized
+            realized_pnl = total_account_change
+            if latest.get('cumulative_realized_pnl', latest['realized_pnl']) != realized_pnl:
+                print(f"Correcting realized P&L: {latest.get('cumulative_realized_pnl', latest['realized_pnl'])} -> {realized_pnl} (no positions open)")
+        else:
+            # Use tracked cumulative or fallback to snapshot data
+            realized_pnl = latest.get('cumulative_realized_pnl', latest['realized_pnl'])
+        
         # Calculate historical performance if we have enough data
         metrics = {
             'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M UTC'),
             'account_value': latest['net_liquidation'],
-            'unrealized_pnl': latest['unrealized_pnl'],
-            'realized_pnl': latest.get('cumulative_realized_pnl', latest['realized_pnl']),  # Use cumulative if available
-            'total_pnl': latest['unrealized_pnl'] + latest.get('cumulative_realized_pnl', latest['realized_pnl']),
+            'unrealized_pnl': unrealized_pnl,  # Use corrected value
+            'realized_pnl': realized_pnl,  # Use corrected realized P&L
+            'total_pnl': total_account_change,  # Use accurate total P&L
             'total_pnl_pct': 0,  # Will calculate if we have historical data
             'trading_days': len(snapshots),
             'sharpe_ratio': 0,  # Will calculate if enough data
@@ -102,108 +148,49 @@ def load_trading_metrics() -> Optional[Dict]:
             'total_trades': 0  # Placeholder for now
         }
         
-        # Calculate performance over time if we have multiple snapshots
-        if len(snapshots) > 1:
-            # Use the first snapshot to determine initial capital
-            first_snapshot = sorted(snapshots, key=lambda x: x['date'])[0]
+        # Calculate performance metrics if we have multiple snapshots
+        if len(snapshots) > 1 and initial_capital > 0:
+            metrics['total_pnl_pct'] = (total_account_change / initial_capital) * 100
             
-            # For proper initial capital calculation:
-            # If first snapshot has no P&L, use net_liquidation as initial capital
-            # Otherwise, calculate initial capital by removing P&L from first snapshot
-            if first_snapshot['unrealized_pnl'] == 0 and first_snapshot['realized_pnl'] == 0:
-                initial_capital = first_snapshot['net_liquidation']
-            else:
-                # Back out the initial capital from first snapshot
-                initial_capital = first_snapshot['net_liquidation'] - first_snapshot['unrealized_pnl'] - first_snapshot['realized_pnl']
-            
-            # Calculate total P&L across all time - special handling for existing data
-            current_account_value = latest['net_liquidation']
-            
-            # For existing data without cumulative tracking, calculate cumulative realized P&L
-            # by looking for account value changes that aren't explained by unrealized P&L changes
-            if 'cumulative_realized_pnl' not in latest:
-                cumulative_realized_pnl = 0
+            # Calculate advanced risk metrics if we have enough data
+            if len(snapshots) >= 7:  # Need at least a week of data
+                daily_returns = []
+                daily_values = []
                 
-                # Look through snapshots to estimate cumulative realized P&L
-                for i in range(len(snapshots)):
-                    daily_realized = snapshots[i]['realized_pnl']
+                for i in range(1, len(snapshots)):
+                    prev_val = snapshots[i-1]['net_liquidation']
+                    curr_val = snapshots[i]['net_liquidation']
+                    if prev_val > 0:
+                        daily_return = (curr_val - prev_val) / prev_val
+                        daily_returns.append(daily_return)
+                        daily_values.append(curr_val)
+                
+                if daily_returns:
+                    import numpy as np
                     
-                    # If there's a daily realized P&L, add it to cumulative
-                    if daily_realized != 0:
-                        cumulative_realized_pnl += daily_realized
-                
-                # Also check for unexplained account value changes (closed positions not tracked)
-                # This is a heuristic: if account value changed more than unrealized P&L change suggests
-                if len(snapshots) >= 2:
-                    for i in range(1, len(snapshots)):
-                        prev_snapshot = snapshots[i-1]
-                        curr_snapshot = snapshots[i]
-                        
-                        # Expected account value based on previous value and unrealized P&L change
-                        prev_base_value = prev_snapshot['net_liquidation'] - prev_snapshot['unrealized_pnl']
-                        expected_account_value = prev_base_value + curr_snapshot['unrealized_pnl']
-                        actual_account_value = curr_snapshot['net_liquidation']
-                        
-                        # If there's a significant difference not explained by recorded realized P&L
-                        diff = actual_account_value - expected_account_value
-                        if abs(diff) > 1 and curr_snapshot['realized_pnl'] == 0:
-                            cumulative_realized_pnl += diff
-                
-                # Update the realized P&L to use our calculated cumulative
-                metrics['realized_pnl'] = cumulative_realized_pnl
-            else:
-                cumulative_realized_pnl = latest['cumulative_realized_pnl']
-            
-            total_account_change = current_account_value - initial_capital
-            
-            # Use account value change as the true total P&L measure, but also show components
-            metrics['total_pnl'] = total_account_change
-            
-            # Also store component-based total for comparison
-            component_total_pnl = latest['unrealized_pnl'] + cumulative_realized_pnl
-            
-            if initial_capital > 0:
-                metrics['total_pnl_pct'] = (total_account_change / initial_capital) * 100
-                
-                # Calculate advanced risk metrics if we have enough data
-                if len(snapshots) >= 7:  # Need at least a week of data
-                    daily_returns = []
-                    daily_values = []
+                    # Calculate Sharpe Ratio (annualized)
+                    mean_return = np.mean(daily_returns)
+                    std_return = np.std(daily_returns)
+                    if std_return > 0:
+                        metrics['sharpe_ratio'] = (mean_return / std_return) * np.sqrt(252)  # Annualized
                     
-                    for i in range(1, len(snapshots)):
-                        prev_val = snapshots[i-1]['net_liquidation']
-                        curr_val = snapshots[i]['net_liquidation']
-                        if prev_val > 0:
-                            daily_return = (curr_val - prev_val) / prev_val
-                            daily_returns.append(daily_return)
-                            daily_values.append(curr_val)
-                    
-                    if daily_returns:
-                        import numpy as np
-                        
-                        # Calculate Sharpe Ratio (annualized)
-                        mean_return = np.mean(daily_returns)
-                        std_return = np.std(daily_returns)
-                        if std_return > 0:
-                            metrics['sharpe_ratio'] = (mean_return / std_return) * np.sqrt(252)  # Annualized
-                        
-                        # Calculate Maximum Drawdown from peak to trough
-                        peak = initial_capital
-                        max_dd = 0
-                        for value in [initial_capital] + daily_values:
-                            if value > peak:
-                                peak = value
-                            drawdown = (peak - value) / peak
-                            max_dd = max(max_dd, drawdown)
-                        metrics['max_drawdown_pct'] = max_dd * 100
-                
-                # Calculate period returns
-                periods = {'1_week': 7, '1_month': 30, '3_months': 90}
-                for period_name, days_back in periods.items():
-                    period_snapshot = get_snapshot_near_date(snapshots, latest['date'], days_back)
-                    if period_snapshot:
-                        period_return = (latest['net_liquidation'] - period_snapshot['net_liquidation']) / period_snapshot['net_liquidation'] * 100
-                        metrics[f'{period_name}_return'] = period_return
+                    # Calculate Maximum Drawdown from peak to trough
+                    peak = initial_capital
+                    max_dd = 0
+                    for value in [initial_capital] + daily_values:
+                        if value > peak:
+                            peak = value
+                        drawdown = (peak - value) / peak
+                        max_dd = max(max_dd, drawdown)
+                    metrics['max_drawdown_pct'] = max_dd * 100
+            
+            # Calculate period returns
+            periods = {'1_week': 7, '1_month': 30, '3_months': 90}
+            for period_name, days_back in periods.items():
+                period_snapshot = get_snapshot_near_date(snapshots, latest['date'], days_back)
+                if period_snapshot:
+                    period_return = (latest['net_liquidation'] - period_snapshot['net_liquidation']) / period_snapshot['net_liquidation'] * 100
+                    metrics[f'{period_name}_return'] = period_return
         else:
             # If only one snapshot, we can't calculate meaningful returns
             # Use the P&L values as reported but note uncertainty
