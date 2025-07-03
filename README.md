@@ -4,12 +4,12 @@
 [![Interactive Brokers](https://img.shields.io/badge/Broker-Interactive%20Brokers-green.svg)](https://www.interactivebrokers.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-![Account Value](https://img.shields.io/badge/Account-%2430%2C696-blue)
-![P&L](https://img.shields.io/badge/P&L-%24525-brightgreen)
-![Return](https://img.shields.io/badge/Return-%2B1.7%25-brightgreen)
+![Account Value](https://img.shields.io/badge/Account-%2430%2C734-blue)
+![P&L](https://img.shields.io/badge/P&L-%24564-brightgreen)
+![Return](https://img.shields.io/badge/Return-%2B1.9%25-brightgreen)
 ![Max DD](https://img.shields.io/badge/Max_DD-7.2%25-red)
 ![Status](https://img.shields.io/badge/Trading-PAPER-brightgreen)
-![Last Updated](https://img.shields.io/badge/Last_Updated-2025-07-02-lightgrey)
+![Last Updated](https://img.shields.io/badge/Last_Updated-2025-07-03-lightgrey)
 
 A comprehensive algorithmic trading system implementing systematic trading strategies with paper trading execution, extensive backtesting, and Monte Carlo simulation capabilities. This project demonstrates enterprise-level quantitative finance software engineering practices using Interactive Brokers' paper trading environment.
 
@@ -36,16 +36,16 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Paper Trading Performance
 
-> **Last Updated:** 2025-07-02 23:15 UTC | **Trading Days:** 12
+> **Last Updated:** 2025-07-03 23:15 UTC | **Trading Days:** 14
 
 ### Current Paper Account Status
 | Metric | Value |
 |--------|-------|
-| **Account Value** | $30,695.79 |
-| **Total P&L** | 📈 $525.43 |
+| **Account Value** | $30,734.16 |
+| **Total P&L** | 📈 $563.80 |
 | **Unrealized P&L** | $0.00 |
-| **Realized P&L** | $525.43 |
-| **Total Return** | +1.74% |
+| **Realized P&L** | $563.80 |
+| **Total Return** | +1.87% |
 | **Max Drawdown** | 7.2%* |
 
 ### Current Positions
@@ -54,7 +54,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 ### Recent Performance
 | Period | Return |
 |--------|--------|
-| **1 Week** | -2.20% |
+| **1 Week** | -0.90% |
 
 *📝 Metrics automatically updated via GitHub Actions from paper trading IBKR account*
 
