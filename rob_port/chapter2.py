@@ -1,4 +1,4 @@
-from chapter1 import *
+from .chapter1 import *
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import os

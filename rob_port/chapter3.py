@@ -1,5 +1,5 @@
-from chapter2 import *
-from chapter1 import *
+from .chapter2 import *
+from .chapter1 import *
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
