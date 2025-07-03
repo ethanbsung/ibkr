@@ -25,6 +25,16 @@ def load_instrument_data(instruments_file='Data/instruments.csv'):
     Returns:
         pd.DataFrame: DataFrame with instrument specifications.
     """
+    # Try multiple paths to handle different working directories
+    if not os.path.exists(instruments_file):
+        # Try parent directory (when running from rob_port/)
+        alt_path = os.path.join('..', instruments_file)
+        if os.path.exists(alt_path):
+            instruments_file = alt_path
+        # Try current directory version
+        elif os.path.exists(os.path.basename(instruments_file)):
+            instruments_file = os.path.basename(instruments_file)
+    
     return pd.read_csv(instruments_file)
 
 def get_instrument_specs(symbol, instruments_df=None):

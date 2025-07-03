@@ -1,0 +1,450 @@
+# SYSTEMATIC TRADING BACKTEST RULES
+
+This document defines the exact structure and requirements for creating systematic trading backtests similar to chapters 4 and 5 in the rob_port folder. These rules ensure consistency, proper implementation of the book's methodologies, and comprehensive analysis.
+
+## CORE ARCHITECTURE REQUIREMENTS
+
+### 1. FILE STRUCTURE AND IMPORTS
+```python
+from chapter4 import *  # For multi-instrument infrastructure
+from chapter3 import *  # For volatility forecasting
+from chapter2 import *  # For position sizing
+from chapter1 import *  # For basic calculations
+import numpy as np
+import pandas as pd
+import os
+from typing import Dict, List, Tuple
+import warnings
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+warnings.filterwarnings('ignore')
+```
+
+### 2. MANDATORY FUNCTION CATEGORIES
+
+Every backtest strategy MUST implement these function categories:
+
+#### A. SIGNAL GENERATION FUNCTIONS
+- **Signal calculation functions** (e.g., `calculate_ewma_trend`, `calculate_mean_reversion_signal`)
+- **Signal filtering functions** (e.g., `apply_trend_filter_to_position`, `apply_regime_filter`)
+- **Signal combination functions** if multiple signals are used
+
+#### B. POSITION SIZING FUNCTIONS
+- **Base position calculation** using `calculate_portfolio_position_size` from chapter4
+- **Signal-adjusted position calculation** (multiply base position by signal strength)
+- **Risk scaling functions** with proper volatility forecasting
+
+#### C. COST CALCULATION FUNCTIONS
+- **Trading cost calculation** using SR_cost methodology
+- **Position change calculation** for tracking turnover
+- **Total cost tracking** including commissions and slippage
+
+#### D. MAIN BACKTEST FUNCTION
+- **Primary backtest function** named `backtest_[strategy_name]_strategy`
+- **Daily rebalancing loop** with proper lookahead bias prevention
+- **Multi-instrument support** with FX handling
+- **Dynamic position sizing** based on current equity
+
+#### E. ANALYSIS AND PLOTTING FUNCTIONS
+- **Performance analysis function** named `analyze_[strategy_name]_results`
+- **Equity curve plotting** function named `plot_[strategy_name]_equity_curve`
+- **Strategy comparison function** for benchmarking
+
+## DETAILED IMPLEMENTATION REQUIREMENTS
+
+### 3. SIGNAL GENERATION STANDARDS
+
+#### Signal Function Naming Convention:
+```python
+def calculate_[signal_name]_signal(prices: pd.Series, **params) -> pd.Series:
+    """
+    Calculate [signal description] signal.
+    
+    Parameters:
+        prices (pd.Series): Price series.
+        **params: Signal-specific parameters.
+    
+    Returns:
+        pd.Series: Signal values (typically -1 to +1 or 0 to +1).
+    """
+```
+
+#### Signal Requirements:
+- All signals MUST be normalized to reasonable ranges (-1 to +1 or 0 to +1)
+- Signals MUST NOT use future information (strict lookahead bias prevention)
+- Document signal interpretation clearly (positive = bullish, etc.)
+- Include minimum data requirements in docstring
+
+#### Example Signal Types:
+- **Trend Following**: EWMAC, moving average crossovers, momentum
+- **Mean Reversion**: Bollinger bands, RSI, price/MA ratios
+- **Volatility**: VIX signals, volatility regime detection
+- **Fundamental**: Economic indicators, seasonality
+
+### 4. POSITION SIZING METHODOLOGY
+
+#### Base Position Calculation:
+```python
+# Always start with chapter4's portfolio position sizing
+base_position = calculate_portfolio_position_size(
+    symbol=symbol,
+    capital=current_equity,
+    weight=instrument_weight, 
+    idm=idm,
+    price=price_for_sizing,
+    volatility=vol_forecast,
+    multiplier=multiplier,
+    risk_target=risk_target,
+    fx_rate=fx_rate
+)
+```
+
+#### Signal Application:
+```python
+# Apply signal to base position
+signal_strength = get_signal_for_date(symbol, current_date)
+final_position = base_position * signal_strength
+```
+
+#### Position Sizing Rules:
+- ALWAYS use blended volatility forecasting from chapter3
+- ALWAYS apply minimum volatility floor (default 5%)
+- ALWAYS use current equity for position sizing (not initial capital)
+- ALWAYS round to whole contracts for actual trading
+- NEVER allow positions to exceed reasonable limits (max 1000 contracts per instrument)
+
+### 5. VOLATILITY FORECASTING REQUIREMENTS
+
+#### Mandatory Volatility Implementation:
+```python
+# Calculate blended volatility for each instrument
+blended_vol_series = calculate_blended_volatility(
+    returns_series, 
+    short_span=32,      # EWMA span
+    long_years=10,      # Long-term average years
+    min_vol_floor=0.05  # 5% minimum annualized volatility
+)
+
+# Apply proper timing - forecast for day T uses data up to day T-1
+vol_forecast = blended_vol_series.shift(1).reindex(analysis_dates).ffill()
+```
+
+#### Volatility Rules:
+- Use 32-day EWMA for short-term component (70% weight)
+- Use 10-year rolling average for long-term component (30% weight)
+- Apply 5% minimum volatility floor to prevent position explosions
+- Ensure no lookahead bias in volatility calculations
+
+### 6. MULTI-INSTRUMENT INFRASTRUCTURE
+
+#### Instrument Loading:
+```python
+# Load all available instruments
+raw_instrument_data = load_all_instrument_data(data_dir)
+instruments_df = load_instrument_data()
+
+# Apply minimum capital filtering
+eligible_instruments = filter_instruments_by_capital(
+    raw_instrument_data, instruments_df, fx_data, currency_mapping,
+    capital, risk_target, assumed_num_instruments=10
+)
+```
+
+#### Weight Calculation:
+```python
+# Calculate instrument weights using specified method
+weights = calculate_instrument_weights(
+    eligible_instruments,
+    method=weight_method,  # 'equal', 'vol_inverse', 'handcrafted'
+    instruments_df=instruments_df,
+    common_hypothetical_SR=0.3,
+    annual_turnover_T=7.0,
+    risk_target=risk_target,
+    capital=capital,
+    fx_data=fx_data,
+    currency_mapping=currency_mapping,
+    filter_by_capital=True
+)
+
+# Calculate IDM based on number of instruments
+num_instruments = len([w for w in weights.values() if w > 1e-6])
+idm = calculate_idm_from_count(num_instruments)
+```
+
+#### FX Handling:
+```python
+# Load FX data for non-USD instruments
+fx_data = load_fx_data(data_dir)
+currency_mapping = get_instrument_currency_mapping()
+
+# Get FX rate for each instrument and date
+fx_rate = get_fx_rate_for_date_and_currency(current_date, instrument_currency, fx_data)
+```
+
+### 7. MAIN BACKTEST LOOP STRUCTURE
+
+#### Standard Backtest Loop:
+```python
+def backtest_[strategy_name]_strategy(data_dir='Data', capital=1000000, risk_target=0.2,
+                                    short_span=32, long_years=10, min_vol_floor=0.05,
+                                    # Strategy-specific parameters here
+                                    weight_method='handcrafted',
+                                    common_hypothetical_SR=0.3, annual_turnover_T=7.0,
+                                    start_date=None, end_date=None):
+    """
+    Backtest Strategy X: [Brief description of strategy].
+    
+    [Detailed description of strategy logic and implementation]
+    
+    Parameters:
+        data_dir (str): Directory containing price data files.
+        capital (float): Initial capital.
+        risk_target (float): Target risk fraction.
+        short_span (int): EWMA span for short-run volatility.
+        long_years (int): Years for long-run volatility average.
+        min_vol_floor (float): Minimum volatility floor.
+        # Strategy-specific parameters
+        weight_method (str): Method for calculating instrument weights.
+        common_hypothetical_SR (float): Common hypothetical SR for SR' calculation.
+        annual_turnover_T (float): Annual turnover T for SR' calculation.
+        start_date (str): Start date for backtest (YYYY-MM-DD).
+        end_date (str): End date for backtest (YYYY-MM-DD).
+    
+    Returns:
+        dict: Comprehensive backtest results.
+    """
+```
+
+#### Daily Loop Requirements:
+```python
+for idx, current_date in enumerate(trading_days_range):
+    if idx == 0:
+        # Initialize portfolio on first day
+        continue
+    
+    previous_date = trading_days_range[idx-1]
+    capital_at_start = current_portfolio_equity
+    daily_total_pnl = 0.0
+    daily_total_costs = 0.0
+    current_day_positions = {}
+    
+    # Handle reweighting when new instruments become available
+    # [Reweighting logic here]
+    
+    for symbol, df_instrument in processed_instrument_data.items():
+        # Get instrument specifications
+        # Calculate signals
+        # Size positions
+        # Calculate P&L
+        # Calculate trading costs
+        # Update tracking variables
+    
+    # Update portfolio equity
+    portfolio_return = (daily_total_pnl - daily_total_costs) / capital_at_start
+    current_portfolio_equity = capital_at_start * (1 + portfolio_return)
+    
+    # Record daily results
+```
+
+### 8. TRADING COST IMPLEMENTATION
+
+#### Cost Calculation:
+```python
+def calculate_trading_cost_from_sr(symbol, trade_size, price, volatility, 
+                                  multiplier, sr_cost, capital, fx_rate=1.0):
+    """Calculate trading cost using SR_cost methodology."""
+    if trade_size == 0 or sr_cost == 0:
+        return 0.0
+    
+    notional_per_contract = price * multiplier * fx_rate
+    cost_per_contract = sr_cost * volatility * notional_per_contract
+    total_cost = abs(trade_size) * cost_per_contract
+    
+    return total_cost
+```
+
+#### Cost Tracking:
+- Track trading costs separately from P&L
+- Include both transaction costs and holding costs
+- Use SR_cost from instruments.csv file
+- Account for FX rates in cost calculations
+
+### 9. PERFORMANCE ANALYSIS REQUIREMENTS
+
+#### Analysis Function Structure:
+```python
+def analyze_[strategy_name]_results(results):
+    """
+    Analyze and display comprehensive strategy results.
+    
+    Parameters:
+        results (dict): Results from backtest function.
+    """
+    performance = results['performance']
+    config = results['config']
+    
+    print("\n" + "=" * 60)
+    print(f"STRATEGY [X] PERFORMANCE ANALYSIS")
+    print("=" * 60)
+    
+    # Overall Performance Metrics
+    print(f"\n--- Overall Performance ---")
+    print(f"Total Return: {performance['total_return']:.2%}")
+    print(f"Annualized Return: {performance['annualized_return']:.2%}")
+    print(f"Annualized Volatility: {performance['annualized_volatility']:.2%}")
+    print(f"Sharpe Ratio: {performance['sharpe_ratio']:.3f}")
+    print(f"Max Drawdown: {performance['max_drawdown_pct']:.1f}%")
+    print(f"Skewness: {performance.get('skewness', 'N/A'):.3f}")
+    
+    # Strategy-Specific Metrics
+    # [Add strategy-specific analysis here]
+    
+    # Instrument Performance
+    # [Add instrument-level analysis here]
+```
+
+#### Required Performance Metrics:
+- Total and annualized returns
+- Volatility and Sharpe ratio
+- Maximum drawdown and duration
+- Skewness and kurtosis
+- Strategy-specific metrics (signal accuracy, turnover, etc.)
+- Instrument-level performance breakdown
+
+### 10. PLOTTING REQUIREMENTS
+
+#### Equity Curve Plot:
+```python
+def plot_[strategy_name]_equity_curve(results, save_path='results/strategy[X].png'):
+    """
+    Plot strategy equity curve and key metrics.
+    
+    Parameters:
+        results (dict): Results from backtest function.
+        save_path (str): Path to save the plot.
+    """
+    # 4-panel plot structure:
+    # 1. Equity curve
+    # 2. Drawdown
+    # 3. Strategy-specific metrics (signals, positions, etc.)
+    # 4. Additional analysis (volatility, costs, etc.)
+```
+
+#### Strategy Comparison Plot:
+```python
+def plot_strategy_comparison(baseline_results, strategy_results, 
+                           save_path='results/strategy_comparison.png'):
+    """Compare current strategy with baseline (typically Strategy 4)."""
+```
+
+### 11. CONFIGURATION AND TESTING
+
+#### Configuration Section:
+```python
+# ===========================================
+# CONFIGURATION - MODIFY THESE AS NEEDED
+# ===========================================
+CAPITAL = 1000000               # Starting capital
+START_DATE = '2000-01-01'       # Backtest start date or None
+END_DATE = '2020-01-01'         # Backtest end date or None
+RISK_TARGET = 0.2               # 20% annual risk target
+WEIGHT_METHOD = 'handcrafted'   # 'equal', 'vol_inverse', 'handcrafted'
+# Strategy-specific parameters here
+```
+
+#### Main Function Requirements:
+```python
+def main():
+    """
+    Test Strategy X implementation with comprehensive analysis.
+    """
+    try:
+        print(f"\n" + "=" * 60)
+        print("RUNNING STRATEGY [X]: [STRATEGY NAME]")
+        print("=" * 60)
+        
+        # Run backtest
+        results = backtest_[strategy_name]_strategy(
+            # Pass all configuration parameters
+        )
+        
+        # Analyze results
+        if results:
+            analyze_[strategy_name]_results(results)
+            plot_[strategy_name]_equity_curve(results)
+            
+            # Compare with baseline (Strategy 4)
+            # [Comparison logic here]
+        
+    except Exception as e:
+        print(f"Error in main: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return results
+
+if __name__ == "__main__":
+    main()
+```
+
+## QUALITY ASSURANCE CHECKLIST
+
+### Before Implementation:
+- [ ] Strategy logic clearly documented
+- [ ] Signal generation methodology defined
+- [ ] Position sizing approach specified
+- [ ] Risk management rules established
+- [ ] Performance benchmarks identified
+
+### During Implementation:
+- [ ] No lookahead bias in any calculations
+- [ ] Proper FX handling for non-USD instruments
+- [ ] Minimum capital filtering applied
+- [ ] Volatility forecasting implemented correctly
+- [ ] Trading costs calculated and tracked
+- [ ] Daily rebalancing loop structure followed
+
+### After Implementation:
+- [ ] Performance metrics calculated correctly
+- [ ] Plots generated and saved properly
+- [ ] Strategy comparison with baseline completed
+- [ ] Error handling implemented
+- [ ] Code documented with proper docstrings
+- [ ] Configuration section clearly defined
+
+### Testing Requirements:
+- [ ] Test with different capital levels
+- [ ] Test with different date ranges
+- [ ] Test with different weight methods
+- [ ] Verify results are reasonable and explainable
+- [ ] Compare with book examples where applicable
+
+## STRATEGY-SPECIFIC ADAPTATIONS
+
+### For Trend Following Strategies:
+- Implement EWMAC or similar trend detection
+- Use proper signal normalization
+- Include trend strength measurement
+- Consider multiple timeframe signals
+
+### For Mean Reversion Strategies:
+- Implement mean reversion signals (RSI, Bollinger Bands, etc.)
+- Use appropriate signal thresholds
+- Consider regime detection for signal conditioning
+- Monitor signal persistence and decay
+
+### For Volatility Strategies:
+- Use VIX or volatility-based signals
+- Implement volatility regime detection
+- Consider volatility term structure signals
+- Monitor volatility clustering effects
+
+### For Fundamental Strategies:
+- Incorporate economic or fundamental data
+- Use appropriate data timing (monthly/quarterly releases)
+- Handle data availability delays
+- Consider seasonal adjustments
+
+## EXAMPLE STRATEGY TEMPLATES
+
+This rules file serves as the foundation for implementing any systematic trading strategy within the rob_port framework. Each new strategy should follow these rules while adapting the specific signal generation and position sizing logic to match the strategy's requirements. 

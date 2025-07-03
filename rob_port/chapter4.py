@@ -646,8 +646,8 @@ def calculate_portfolio_position_size(symbol, capital, weight, idm, price, volat
 
     position_size = numerator / denominator
 
-    # Protect against infinite or extremely large position sizes
-    if np.isinf(position_size) or position_size > 100000:
+    # Protect against infinite, NaN, or extremely large position sizes
+    if np.isinf(position_size) or np.isnan(position_size) or position_size > 100000:
         return 0
 
     # Round to nearest integer since you can only hold whole contracts
