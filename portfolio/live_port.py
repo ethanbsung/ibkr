@@ -429,7 +429,140 @@ def get_williams_bars(ib, contract, end_datetime):
     )
     return bars if bars else []
 
+def get_current_price(ib, contract, symbol):
+    """Get current market price using real-time market data"""
+    logger = logging.getLogger()
+    
+    try:
+        # Request real-time market data
+        ticker = ib.reqMktData(contract, '', False, False)
+        ib.sleep(2)  # Wait for price data
+        
+        current_price = None
+        if ticker.last and ticker.last > 0:
+            current_price = ticker.last
+            price_source = "last"
+        elif ticker.close and ticker.close > 0:
+            current_price = ticker.close
+            price_source = "close"
+        elif ticker.bid and ticker.ask:
+            current_price = (ticker.bid + ticker.ask) / 2
+            price_source = "mid"
+        
+        # Cancel market data subscription
+        ib.cancelMktData(ticker)
+        
+        if current_price:
+            logger.info(f"Current {symbol} price: {current_price} (source: {price_source})")
+            return current_price
+        else:
+            logger.warning(f"Could not get current price for {symbol}")
+            return None
+            
+    except Exception as e:
+        logger.warning(f"Error getting current price for {symbol}: {e}")
+        return None
 
+def get_current_bar_data(ib, contract, symbol, end_datetime_str):
+    """
+    Get current bar data with real-time price updates during trading hours.
+    Returns tuple of (bar_data, current_price, is_live_price)
+    """
+    logger = logging.getLogger()
+    
+    # Always get the most recent daily bar for OHLC data
+    bars = get_daily_bar(ib, contract, end_datetime_str)
+    if not bars:
+        logger.warning(f"No historical bars available for {symbol}")
+        return None, None, False
+    
+    current_bar = bars[-1]
+    
+    # Check if we're in trading hours - if so, get current price
+    if is_trading_window():
+        current_price = get_current_price(ib, contract, symbol)
+        if current_price:
+            # Use current price instead of historical close
+            logger.info(f"{symbol} - Using live price {current_price} instead of historical close {current_bar.close}")
+            return current_bar, current_price, True
+    
+    # Fallback to historical close price
+    logger.info(f"{symbol} - Using historical close price {current_bar.close}")
+    return current_bar, current_bar.close, False
+
+def compute_live_ibs(bar, current_price):
+    """Calculate IBS using current live price instead of historical close"""
+    range_val = bar.high - bar.low
+    
+    # If we have a live price, extend the range if needed
+    if current_price > bar.high:
+        logger = logging.getLogger()
+        logger.info(f"Live price {current_price} above daily high {bar.high} - extending range")
+        range_val = current_price - bar.low
+    elif current_price < bar.low:
+        logger = logging.getLogger()
+        logger.info(f"Live price {current_price} below daily low {bar.low} - extending range")
+        range_val = bar.high - current_price
+    
+    if range_val == 0:
+        return 0.5  # Neutral IBS when no range
+    else:
+        return (current_price - bar.low) / range_val
+
+def get_williams_bar_data(ib, contract, symbol, end_datetime_str):
+    """
+    Get Williams %R bar data with real-time price updates during trading hours.
+    Returns tuple of (bars, current_price, is_live_price)
+    """
+    logger = logging.getLogger()
+    
+    # Always get historical bars for Williams %R calculation
+    bars = get_williams_bars(ib, contract, end_datetime_str)
+    if not bars or len(bars) < williams_period:
+        logger.warning(f"Insufficient Williams data for {symbol} - need at least {williams_period} bars")
+        return None, None, False
+    
+    # Check if we're in trading hours - if so, get current price
+    if is_trading_window():
+        current_price = get_current_price(ib, contract, symbol)
+        if current_price:
+            # Use current price instead of historical close
+            logger.info(f"{symbol} Williams - Using live price {current_price} instead of historical close {bars[-1].close}")
+            return bars, current_price, True
+    
+    # Fallback to historical close price
+    current_price = bars[-1].close
+    logger.info(f"{symbol} Williams - Using historical close price {current_price}")
+    return bars, current_price, False
+
+def compute_live_williams_r(bars, current_price):
+    """
+    Compute Williams %R using live current price with safety check
+    Formula: -100 * (highestHigh - current_close) / (highestHigh - lowestLow)
+    """
+    if len(bars) < williams_period:
+        return -50  # Neutral value
+    
+    # Use last 2 bars for range calculation
+    recent_bars = bars[-williams_period:]
+    highest_high = max(bar.high for bar in recent_bars)
+    lowest_low = min(bar.low for bar in recent_bars)
+    
+    # Extend range if current price is outside historical range
+    if current_price > highest_high:
+        logger = logging.getLogger()
+        logger.info(f"Live price {current_price} above period high {highest_high} - extending range")
+        highest_high = current_price
+    elif current_price < lowest_low:
+        logger = logging.getLogger()
+        logger.info(f"Live price {current_price} below period low {lowest_low} - extending range")
+        lowest_low = current_price
+    
+    range_val = highest_high - lowest_low
+    if range_val == 0:
+        return -50  # Neutral Williams %R when no range
+    else:
+        return -100 * (highest_high - current_price) / range_val
 
 def get_account_equity(ib):
     """Get current account equity from IBKR"""
@@ -718,8 +851,6 @@ def place_limit_order(ib, contract, action, quantity, symbol):
         logger.error(f"Could not get current price for {symbol} limit order")
         return None
 
-
-
 def is_trading_window(timezone='US/Eastern'):
     """Check if we're in the specific trading window (4:58-5:05 PM Eastern) for placing EOD orders"""
     tz = pytz.timezone(timezone)
@@ -759,13 +890,11 @@ def get_next_market_close(timezone='US/Eastern'):
     
     return target_time
 
-
 # ============================================================
 # Symbol‑level position router (used where multiple strategies
 # trade the same contract – e.g. IBS_ES and Williams on MES)
 # ============================================================
 ROUTER_STATE_FILE = 'router_state.json'
-
 
 class PositionRouter:
     """
@@ -1020,20 +1149,19 @@ def run_daily_signals(ib):
 
         logger.info(f"\nProcessing {strategy_key}...")
 
-        # Get recent bars for IBS calculation
-        bars = get_daily_bar(ib, contract, end_datetime_str)
-        if not bars:
-            logger.warning(f"No bars available for {symbol}")
+        # Get current bar data with real-time price updates
+        current_bar, current_price, is_live = get_current_bar_data(ib, contract, symbol, end_datetime_str)
+        if not current_bar or not current_price:
+            logger.warning(f"No price data available for {symbol}")
             continue
 
-        # Use most recent bar
-        current_bar = bars[-1]
-        current_price = current_bar.close
+        # Calculate IBS with current price (live or historical)
+        if is_live:
+            ibs = compute_live_ibs(current_bar, current_price)
+        else:
+            ibs = compute_ibs(current_bar)
 
-        # Calculate IBS with safety check (matching aggregate_port.py exactly)
-        ibs = compute_ibs(current_bar)
-
-        logger.info(f"{symbol} - Price: {current_price}, High: {current_bar.high}, Low: {current_bar.low}, IBS: {ibs:.3f}")
+        logger.info(f"{symbol} - Price: {current_price}, High: {current_bar.high}, Low: {current_bar.low}, IBS: {ibs:.3f} ({'LIVE' if is_live else 'HISTORICAL'})")
 
         # Calculate position size based on current equity and allocation
         target_contracts = calculate_position_size(
@@ -1081,21 +1209,21 @@ def run_daily_signals(ib):
         
         logger.info(f"\nProcessing {strategy_key}...")
 
-        # Get bars for Williams %R calculation
-        bars = get_williams_bars(ib, contract, end_datetime_str)
+        # Get Williams bar data with real-time price updates
+        bars, current_price, is_live = get_williams_bar_data(ib, contract, symbol, end_datetime_str)
 
-        logger.info(f"{strategy_key} - Retrieved {len(bars)} bars, need {williams_period}")
-        if len(bars) > 0:
+        if bars:
+            logger.info(f"{strategy_key} - Retrieved {len(bars)} bars, need {williams_period}")
             logger.info(f"{strategy_key} - Recent bars: {[f'{bar.date}' for bar in bars[-min(3, len(bars)):]]}")
 
-        if len(bars) >= williams_period:
-            current_bar = bars[-1]
-            current_price = current_bar.close
+        if bars and current_price:
+            # Calculate Williams %R with current price (live or historical)
+            if is_live:
+                williams_r = compute_live_williams_r(bars, current_price)
+            else:
+                williams_r = compute_williams_r(bars)
 
-            # Calculate Williams %R with safety check (matching aggregate_port.py exactly)
-            williams_r = compute_williams_r(bars)
-
-            logger.info(f"{symbol} Williams - Price: {current_price}, Williams %R: {williams_r:.2f}")
+            logger.info(f"{symbol} Williams - Price: {current_price}, Williams %R: {williams_r:.2f} ({'LIVE' if is_live else 'HISTORICAL'})")
 
             # Calculate position size
             target_contracts = calculate_position_size(
@@ -1119,10 +1247,10 @@ def run_daily_signals(ib):
                 exit_signal = False
                 if len(bars) >= 2 and current_price > bars[-2].high:
                     exit_signal = True
-                    logger.info(f"{symbol} Williams - Exit signal: price above previous high")
+                    logger.info(f"{symbol} Williams - Exit signal: price above previous high ({current_price} > {bars[-2].high})")
                 if williams_r > wr_sell_threshold:
                     exit_signal = True
-                    logger.info(f"{symbol} Williams - Exit signal: Williams %R > {wr_sell_threshold}")
+                    logger.info(f"{symbol} Williams - Exit signal: Williams %R > {wr_sell_threshold} ({williams_r:.2f})")
                 
                 if exit_signal:
                     desired_qty = 0
@@ -1142,7 +1270,7 @@ def run_daily_signals(ib):
 
             desired_positions[symbol][strategy_key] = desired_qty
         else:
-            logger.warning(f"Insufficient Williams data for {symbol} - need at least {williams_period} bars")
+            logger.warning(f"Insufficient Williams data for {symbol}")
             desired_positions[symbol][strategy_key] = 0
 
     # ---------- execute net orders for all instruments ----------
@@ -1150,12 +1278,17 @@ def run_daily_signals(ib):
         routers[symbol].sync(desired_positions[symbol])
 
         # reflect router outcome in local state (simplified – optimistic)
-        current_price = 0  # Will be set from the last processed bar for this symbol
+        current_price = 0  # Will be set from current market price
         
-        # Get current price for state updates
-        bars = get_daily_bar(ib, contracts[symbol], end_datetime_str)
-        if bars:
-            current_price = bars[-1].close
+        # Get current price for state updates (use live price if available)
+        if is_trading_window():
+            current_price = get_current_price(ib, contracts[symbol], symbol)
+        
+        if not current_price:
+            # Fallback to historical close price
+            bars = get_daily_bar(ib, contracts[symbol], end_datetime_str)
+            if bars:
+                current_price = bars[-1].close
         
         for strat, lots in routers[symbol].strategy_lots.items():
             st = state['positions'][strat]

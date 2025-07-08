@@ -14,7 +14,7 @@ logger = logging.getLogger()
 # -------------------------------
 # Parameters & User Settings
 # -------------------------------
-data_file = "Data/mes_daily_data.csv"  # Path to your CSV file (format: Symbol,Time,Open,High,Low,Last,...)
+data_file = "Data/es_1h_data.csv"  # Path to your CSV file (format: Symbol,Time,Open,High,Low,Last,...)
 initial_capital = 10000.0
 multiplier = 5
 commission_per_order = 1.24
