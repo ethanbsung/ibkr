@@ -783,73 +783,7 @@ def place_order_with_fallback(ib, contract, action, quantity, symbol, dry_run=Fa
     except Exception as e:
         logger.error(f"Order placement failed for {symbol}: {e}")
         return None
-
-def place_limit_order(ib, contract, action, quantity, symbol):
-    """Place a limit order near current market price"""
-    logger = logging.getLogger()
     
-    # Check if we're outside the trading window (4:58-5:05 PM Eastern) - use dry run mode
-    if not is_trading_window():
-        logger.info(f"DRY RUN: Would place LMT {action} order for {quantity} {symbol} contracts (outside trading window)")
-        # Return None for dry run mode - do not update position state
-        return None
-    
-    # Get current price
-    ticker = ib.reqMktData(contract, '', False, False)
-    ib.sleep(2)  # Wait for price data
-    
-    current_price = None
-    if ticker.last and ticker.last > 0:
-        current_price = ticker.last
-    elif ticker.close and ticker.close > 0:
-        current_price = ticker.close
-    elif ticker.bid and ticker.ask:
-        current_price = (ticker.bid + ticker.ask) / 2
-    
-    # Cancel market data subscription
-    ib.cancelMktData(ticker)
-    
-    if current_price:
-        # Set limit price slightly favorable (0.1% buffer)
-        if action == 'BUY':
-            limit_price = current_price * 1.001  # Slightly above current price
-        else:  # SELL
-            limit_price = current_price * 0.999  # Slightly below current price
-        
-        # Define minimum tick sizes for each symbol
-        tick_sizes = {
-            'ES': 0.25,      # MES / ES trades in 0.25-point increments
-            'NQ': 0.25,      # MNQ / NQ trades in 0.25-point increments
-            'YM': 1.0,       # MYM trades in whole-point increments (1-point = $0.50)
-            'GC': 0.1        # MGC trades in 0.1-point increments
-        }
-
-        tick_size = tick_sizes.get(symbol, 0.25)  # Default to 0.25 if unknown
-        limit_price = round(limit_price / tick_size) * tick_size
-        
-        try:
-            order = Order(action=action, totalQuantity=quantity, orderType='LMT', 
-                         lmtPrice=limit_price, tif='DAY')
-            trade = ib.placeOrder(contract, order)
-            logger.info(f"Placed LMT {action} order for {quantity} {symbol} contracts at {limit_price}")
-            
-            # Wait a moment to check for immediate rejection
-            ib.sleep(1)
-            
-            # Check if order was rejected due to delivery window or other issues
-            if trade.orderStatus.status == 'Cancelled':
-                for log_entry in trade.log:
-                    if '201' in log_entry.message or 'physical delivery' in log_entry.message.lower():
-                        logger.error(f"Limit order rejected for {symbol}: Contract in delivery window or near expiration")
-                        return None
-            
-            return trade
-        except Exception as e:
-            logger.error(f"Limit order placement failed for {symbol}: {e}")
-            return None
-    else:
-        logger.error(f"Could not get current price for {symbol} limit order")
-        return None
 
 def is_trading_window(timezone='US/Eastern'):
     """Check if we're in the specific trading window (4:58-5:05 PM Eastern) for placing EOD orders"""
@@ -999,7 +933,6 @@ class PositionRouter:
         
         logger.info(f"Router {self.symbol}: Placing {action} order for {qty} contracts")
 
-        # use existing helper with MOC→LMT fallback
         trade = place_order_with_fallback(
             self.ib,
             self.contract,
