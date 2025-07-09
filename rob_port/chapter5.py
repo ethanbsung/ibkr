@@ -1,7 +1,7 @@
-from chapter4 import *
-from chapter3 import *
-from chapter2 import *
-from chapter1 import *
+from rob_port.chapter4 import *
+from rob_port.chapter3 import *
+from rob_port.chapter2 import *
+from rob_port.chapter1 import *
 import numpy as np
 import pandas as pd
 import os
@@ -209,20 +209,18 @@ def backtest_trend_following_strategy(data_dir='Data', capital=1000000, risk_tar
     print(f"  Common Hypothetical SR for SR': {common_hypothetical_SR}")
     print(f"  Annual Turnover T for SR': {annual_turnover_T}")
 
-    # Preprocess: Calculate returns, vol forecasts, and trend signals for each instrument
+    # Preprocess: Calculate returns and vol forecasts for each instrument (same as Strategy 4)
     processed_instrument_data = {}
     for symbol, df_orig in raw_instrument_data.items():
         df = df_orig.copy()
         if 'Last' not in df.columns:
-            print(f"Skipping {symbol}: 'Last' column missing.")
             continue
         
         df['daily_price_change_pct'] = df['Last'].pct_change()
         
         # Volatility forecast for day D is made using data up to D-1 (no lookahead bias)
         raw_returns_for_vol = df['daily_price_change_pct'].dropna()
-        if len(raw_returns_for_vol) < max(short_span, trend_slow_span):
-            print(f"Skipping {symbol}: Insufficient data for vol forecast and trend ({len(raw_returns_for_vol)} days).")
+        if len(raw_returns_for_vol) < short_span:  # Need enough data for EWMA
             continue
 
         # Calculate blended volatility (same as Strategy 4)
@@ -232,13 +230,9 @@ def backtest_trend_following_strategy(data_dir='Data', capital=1000000, risk_tar
         # Shift to prevent lookahead bias - forecast for day T uses data up to T-1
         df['vol_forecast'] = blended_vol_series.shift(1).reindex(df.index).ffill().fillna(min_vol_floor)
         
-        # Calculate trend signal using EWMAC (no lookahead bias)
-        # No need to shift here since we'll apply the filter directly to positions later
-        
         # Ensure critical data is present
         df.dropna(subset=['Last', 'vol_forecast', 'daily_price_change_pct'], inplace=True)
         if df.empty:
-            print(f"Skipping {symbol}: Empty after dropping NaNs in critical columns.")
             continue
 
         processed_instrument_data[symbol] = df
@@ -247,6 +241,37 @@ def backtest_trend_following_strategy(data_dir='Data', capital=1000000, risk_tar
         raise ValueError("No instruments remaining after preprocessing and volatility calculation.")
     
     print(f"  Instruments after preprocessing: {len(processed_instrument_data)}")
+    
+    # Apply the same instrument selection process as Strategy 4 (including minimum capital filtering)
+    print(f"\nApplying instrument selection with minimum capital requirements...")
+    weights = calculate_instrument_weights(
+        processed_instrument_data, 
+        method=weight_method, 
+        instruments_df=all_instruments_specs_df,
+        common_hypothetical_SR=common_hypothetical_SR,
+        annual_turnover_T=annual_turnover_T,
+        risk_target=risk_target,
+        capital=capital,
+        fx_data=fx_data,
+        currency_mapping=currency_mapping,
+        filter_by_capital=True,  # Enable minimum capital filtering
+        assumed_num_instruments=10
+    )
+    
+    # Filter processed_instrument_data to only include instruments with weights > 0
+    eligible_instruments = {symbol: df for symbol, df in processed_instrument_data.items() 
+                          if weights.get(symbol, 0.0) > 1e-6}
+    
+    if not eligible_instruments:
+        raise ValueError("No instruments remain after minimum capital filtering.")
+    
+    processed_instrument_data = eligible_instruments
+    print(f"  Instruments after capital filtering: {len(processed_instrument_data)}")
+    
+    # Calculate IDM based on filtered instruments
+    num_weighted_instruments = len([w for w in weights.values() if w > 1e-6])
+    idm = calculate_idm_from_count(num_weighted_instruments)
+    print(f"  IDM: {idm:.2f} based on {num_weighted_instruments} eligible instruments")
 
     # Determine common date range for backtest (same logic as chapter 4)
     all_indices = [df.index for df in processed_instrument_data.values() if not df.empty]
@@ -280,9 +305,7 @@ def backtest_trend_following_strategy(data_dir='Data', capital=1000000, risk_tar
     # Initialize portfolio tracking (same structure as chapter 4)
     current_portfolio_equity = capital
     portfolio_daily_records = []
-    known_eligible_instruments = set()
-    weights = {} 
-    idm = 1.0
+    known_eligible_instruments = set(processed_instrument_data.keys())  # Start with filtered instruments
     
     # Initialize position tracking for cost calculation
     previous_positions = {}
@@ -307,57 +330,14 @@ def backtest_trend_following_strategy(data_dir='Data', capital=1000000, risk_tar
         num_active_instruments = 0
         num_long_signals = 0
 
-        effective_data_cutoff_date = previous_trading_date if idx > 0 else current_date - pd.tseries.offsets.BDay(1)
-
-        # Determine current period eligible instruments based on data up to cutoff
-        current_iteration_eligible_instruments = set()
-        for s, df_full in processed_instrument_data.items():
-            df_upto_cutoff = df_full[df_full.index <= effective_data_cutoff_date]
-            if not df_upto_cutoff.empty and len(df_upto_cutoff) > max(short_span, trend_slow_span):
-                current_iteration_eligible_instruments.add(s)
-        
-        # Check if reweighting is needed (same logic as chapter 4)
-        perform_reweight = False
-        if idx == 1:  # First actual trading day
-            perform_reweight = True
-            print(f"Performing initial re-weighting for date: {current_date.date()}")
-        elif len(current_iteration_eligible_instruments) > len(known_eligible_instruments):
-            newly_added = current_iteration_eligible_instruments - known_eligible_instruments
-            perform_reweight = True
-            print(f"Performing re-weighting for date: {current_date.date()} due to new eligible instruments: {newly_added}")
-        
-        if perform_reweight:
-            known_eligible_instruments = current_iteration_eligible_instruments.copy()
-            
-            data_for_reweighting = {}
-            for s_eligible in known_eligible_instruments:
-                df_historical_slice = processed_instrument_data[s_eligible][processed_instrument_data[s_eligible].index <= effective_data_cutoff_date]
-                if not df_historical_slice.empty:
-                     data_for_reweighting[s_eligible] = df_historical_slice
-            
-            if data_for_reweighting:
-                weights = calculate_instrument_weights(
-                    data_for_reweighting, 
-                    weight_method, 
-                    all_instruments_specs_df,
-                    common_hypothetical_SR,
-                    annual_turnover_T,
-                    risk_target
-                )
-                
-                num_weighted_instruments = sum(1 for w_val in weights.values() if w_val > 1e-6)
-                idm = calculate_idm_from_count(num_weighted_instruments)
-                print(f"  New IDM: {idm:.2f} based on {num_weighted_instruments} instruments with weight > 0.")
-            else:
-                print(f"Warning: No data available for reweighting on {current_date.date()} despite eligibility signal.")
+        # Since instruments are already filtered by capital requirements, 
+        # we don't need to re-filter during the backtest loop.
+        # The weights and IDM are already calculated above.
 
         # Calculate positions and P&L for each instrument
         for symbol, df_instrument in processed_instrument_data.items():
-            try:
-                specs = get_instrument_specs(symbol, all_instruments_specs_df)
-                instrument_multiplier = specs['multiplier']
-            except:
-                continue
+            specs = get_instrument_specs(symbol, all_instruments_specs_df)
+            instrument_multiplier = specs['multiplier']
                 
             instrument_weight = weights.get(symbol, 0.0)
 
@@ -1002,10 +982,10 @@ def main():
     # ===========================================
     # CONFIGURATION - MODIFY THESE AS NEEDED
     # ===========================================
-    CAPITAL = 1000000               # Starting capital
+    CAPITAL = 50000000              # Starting capital
     START_DATE = '2000-01-01'       # Backtest start date (YYYY-MM-DD) or None for earliest available
     END_DATE = '2025-12-31'         # Backtest end date (YYYY-MM-DD) or None for latest available
-    RISK_TARGET = 0.2               # 20% annual risk target
+    RISK_TARGET = 0.5               # 20% annual risk target
     WEIGHT_METHOD = 'handcrafted'   # 'equal', 'vol_inverse', or 'handcrafted'
     TREND_FAST_SPAN = 64            # Fast EWMA span for trend filter
     TREND_SLOW_SPAN = 256           # Slow EWMA span for trend filter

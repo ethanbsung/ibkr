@@ -449,8 +449,8 @@ def get_current_price(ib, contract, symbol):
             current_price = (ticker.bid + ticker.ask) / 2
             price_source = "mid"
         
-        # Cancel market data subscription
-        ib.cancelMktData(ticker)
+        # Cancel market data subscription using the contract (not ticker)
+        ib.cancelMktData(contract)
         
         if current_price:
             logger.info(f"Current {symbol} price: {current_price} (source: {price_source})")
