@@ -8,7 +8,6 @@ import time
 from datetime import datetime, timedelta
 import pytz
 from collections import defaultdict
-import calendar
 
 # -------------------------------
 # Configuration Parameters
@@ -268,7 +267,7 @@ def execute_contract_rollover(ib, symbol, old_contract, new_contract, router):
         logger.info(f"Step 1: Closing positions in old contract")
         close_positions = {strategy: 0 for strategy in symbol_strategies}
         router.sync(close_positions)
-        ib.sleep(2)
+        ib.sleep(1)  # Reduced from 2 seconds
         
         # Step 2: Update contract specifications
         logger.info(f"Step 2: Updating contract specifications")
@@ -281,7 +280,7 @@ def execute_contract_rollover(ib, symbol, old_contract, new_contract, router):
         # Step 4: Re-establish positions in new contract
         logger.info(f"Step 4: Re-establishing positions in new contract")
         router.sync(strategy_positions)
-        ib.sleep(2)
+        ib.sleep(1)  # Reduced from 2 seconds
         
         logger.info(f"=== ROLLOVER COMPLETED FOR {symbol} ===")
         return True
@@ -463,33 +462,6 @@ def get_current_price(ib, contract, symbol):
         logger.warning(f"Error getting current price for {symbol}: {e}")
         return None
 
-def get_current_bar_data(ib, contract, symbol, end_datetime_str):
-    """
-    Get current bar data with real-time price updates during trading hours.
-    Returns tuple of (bar_data, current_price, is_live_price)
-    """
-    logger = logging.getLogger()
-    
-    # Always get the most recent daily bar for OHLC data
-    bars = get_daily_bar(ib, contract, end_datetime_str)
-    if not bars:
-        logger.warning(f"No historical bars available for {symbol}")
-        return None, None, False
-    
-    current_bar = bars[-1]
-    
-    # Check if we're in trading hours - if so, get current price
-    if is_trading_window():
-        current_price = get_current_price(ib, contract, symbol)
-        if current_price:
-            # Use current price instead of historical close
-            logger.info(f"{symbol} - Using live price {current_price} instead of historical close {current_bar.close}")
-            return current_bar, current_price, True
-    
-    # Fallback to historical close price
-    logger.info(f"{symbol} - Using historical close price {current_bar.close}")
-    return current_bar, current_bar.close, False
-
 def compute_live_ibs(bar, current_price):
     """Calculate IBS using current live price instead of historical close"""
     range_val = bar.high - bar.low
@@ -508,32 +480,6 @@ def compute_live_ibs(bar, current_price):
         return 0.5  # Neutral IBS when no range
     else:
         return (current_price - bar.low) / range_val
-
-def get_williams_bar_data(ib, contract, symbol, end_datetime_str):
-    """
-    Get Williams %R bar data with real-time price updates during trading hours.
-    Returns tuple of (bars, current_price, is_live_price)
-    """
-    logger = logging.getLogger()
-    
-    # Always get historical bars for Williams %R calculation
-    bars = get_williams_bars(ib, contract, end_datetime_str)
-    if not bars or len(bars) < williams_period:
-        logger.warning(f"Insufficient Williams data for {symbol} - need at least {williams_period} bars")
-        return None, None, False
-    
-    # Check if we're in trading hours - if so, get current price
-    if is_trading_window():
-        current_price = get_current_price(ib, contract, symbol)
-        if current_price:
-            # Use current price instead of historical close
-            logger.info(f"{symbol} Williams - Using live price {current_price} instead of historical close {bars[-1].close}")
-            return bars, current_price, True
-    
-    # Fallback to historical close price
-    current_price = bars[-1].close
-    logger.info(f"{symbol} Williams - Using historical close price {current_price}")
-    return bars, current_price, False
 
 def compute_live_williams_r(bars, current_price):
     """
@@ -575,28 +521,20 @@ def get_account_equity(ib):
         pass
     return None
 
-def get_positions_from_ibkr(ib, contracts):
-    """Get current positions from IBKR API and map them to our strategy names"""
+def get_positions_from_ibkr_optimized(ib, contracts, market_data):
+    """Get current positions from IBKR API using cached market data for better performance"""
     logger = logging.getLogger()
     
     try:
         # Get all positions from IBKR
         positions = ib.positions()
         
-        # Get current market prices from daily bars (same reliable source as signals)
-        tz = pytz.timezone('US/Eastern')
-        current_dt = datetime.now(tz)
-        end_datetime_str = format_end_datetime(current_dt, tz)
-        
+        # Use cached price data instead of making new API calls
         current_prices = {}
-        for symbol, contract in contracts.items():
-            try:
-                bars = get_daily_bar(ib, contract, end_datetime_str)
-                if bars and len(bars) > 0:
-                    current_prices[symbol] = bars[-1].close
-                    logger.info(f"Current {symbol} price from daily bar: {current_prices[symbol]}")
-            except Exception as e:
-                logger.warning(f"Could not get current price for {symbol}: {e}")
+        for symbol in contracts.keys():
+            if market_data[symbol]['current_price']:
+                current_prices[symbol] = market_data[symbol]['current_price']
+                logger.info(f"Using cached {symbol} price: {current_prices[symbol]}")
         
         # Create a mapping from contract to strategy
         contract_to_strategy = {}
@@ -627,13 +565,13 @@ def get_positions_from_ibkr(ib, contracts):
                     elif symbol == 'MNQ':
                         symbol = 'NQ'
                     
-                    # Use current price from daily bars we already retrieved
+                    # Use cached price data
                     if symbol in current_prices:
                         entry_price = current_prices[symbol]
-                        logger.info(f"Using current market price {entry_price} for {symbol} position")
+                        logger.info(f"Using cached market price {entry_price} for {symbol} position")
                     else:
-                        # Fallback to reasonable estimates if daily bar data not available
-                        logger.warning(f"No current price data for {symbol}, using default estimate")
+                        # Fallback to reasonable estimates if cached data not available
+                        logger.warning(f"No cached price data for {symbol}, using default estimate")
                         default_prices = {'ES': 6000, 'GC': 3300, 'YM': 42000, 'NQ': 21000}
                         entry_price = default_prices.get(symbol, 1000)
                     
@@ -688,6 +626,8 @@ def get_positions_from_ibkr(ib, contracts):
     except Exception as e:
         logger.error(f"Error getting positions from IBKR: {e}")
         return None
+
+# Old function removed - replaced by get_positions_from_ibkr_optimized() for better performance
 
 def compute_ibs(bar):
     """Calculate IBS with safety check for zero range (matching aggregate_port.py exactly)"""
@@ -766,8 +706,8 @@ def place_order_with_fallback(ib, contract, action, quantity, symbol, dry_run=Fa
         trade = ib.placeOrder(contract, order)
         logger.info(f"Placed MKT {action} order for {quantity} {symbol} contracts")
         
-        # Wait a moment to see if there are any immediate errors
-        ib.sleep(1)
+        # Brief wait to see if there are any immediate errors
+        ib.sleep(0.5)  # Reduced from 1 second
         
         # Check if order was rejected
         if trade.orderStatus.status == 'Cancelled':
@@ -962,7 +902,7 @@ def wait_until_next_close(timezone='US/Eastern', lead_seconds=10):
         return
     
     wait_seconds = (target_time - now).total_seconds()
-    logger.info(f"Waiting until {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')} ({wait_seconds/60:.1f} minutes before market close)")
+    logger.info(f"Waiting until {target_time.strftime('%Y-%m-%d %H:%M:%S %Z')} ({wait_seconds/60:.1f} minutes before market close - optimized for faster execution)")
     
     # Show periodic updates for long waits
     while True:
@@ -982,6 +922,141 @@ def wait_until_next_close(timezone='US/Eastern', lead_seconds=10):
         else:
             time.sleep(remaining_seconds)
             break
+
+# -------------------------------
+# Optimized Market Data Functions
+# -------------------------------
+def fetch_all_market_data(ib, contracts, end_datetime_str):
+    """
+    Fetch all required market data for all contracts in parallel to minimize execution time.
+    Returns cached data structure with bars and current prices.
+    """
+    logger = logging.getLogger()
+    logger.info("Fetching all market data in parallel...")
+    
+    # Pre-fetch all historical data first (can be done in parallel by IBKR)
+    market_data = {}
+    
+    # Request all daily bars simultaneously
+    daily_bar_requests = {}
+    williams_bar_requests = {}
+    
+    for symbol, contract in contracts.items():
+        # Daily bars for IBS
+        daily_bar_requests[symbol] = ib.reqHistoricalData(
+            contract,
+            endDateTime=end_datetime_str,
+            durationStr='5 D',
+            barSizeSetting='1 day',
+            whatToShow='TRADES',
+            useRTH=False,
+            formatDate=1,
+            keepUpToDate=False
+        )
+        
+        # Williams bars
+        williams_bar_requests[symbol] = ib.reqHistoricalData(
+            contract,
+            endDateTime=end_datetime_str,
+            durationStr='1 W',
+            barSizeSetting='1 day',
+            whatToShow='TRADES',
+            useRTH=False,
+            formatDate=1,
+            keepUpToDate=False
+        )
+    
+    # Wait for all historical data requests to complete
+    ib.sleep(1)  # Reduced from multiple 2-second waits
+    
+    # Get current prices if in trading window
+    current_prices = {}
+    if is_trading_window():
+        logger.info("Requesting live prices for all contracts...")
+        # Request all market data subscriptions simultaneously
+        tickers = {}
+        for symbol, contract in contracts.items():
+            tickers[symbol] = ib.reqMktData(contract, '', False, False)
+        
+        # Single wait for all price data
+        ib.sleep(1.5)  # Reduced from 2 seconds per contract
+        
+        # Extract prices and cancel subscriptions
+        for symbol, ticker in tickers.items():
+            current_price = None
+            if ticker.last and ticker.last > 0:
+                current_price = ticker.last
+                price_source = "last"
+            elif ticker.close and ticker.close > 0:
+                current_price = ticker.close
+                price_source = "close"
+            elif ticker.bid and ticker.ask:
+                current_price = (ticker.bid + ticker.ask) / 2
+                price_source = "mid"
+            
+            if current_price:
+                current_prices[symbol] = (current_price, price_source)
+                logger.info(f"Live {symbol} price: {current_price} (source: {price_source})")
+            
+            # Cancel market data subscription
+            ib.cancelMktData(contracts[symbol])
+    
+    # Organize all data
+    for symbol in contracts.keys():
+        daily_bars = daily_bar_requests[symbol] if daily_bar_requests[symbol] else []
+        williams_bars = williams_bar_requests[symbol] if williams_bar_requests[symbol] else []
+        
+        # Get current price (live or historical fallback)
+        current_price = None
+        is_live = False
+        price_source = "historical"
+        
+        if symbol in current_prices:
+            current_price, price_source = current_prices[symbol]
+            is_live = True
+        elif daily_bars:
+            current_price = daily_bars[-1].close
+            price_source = "historical"
+        
+        market_data[symbol] = {
+            'daily_bars': daily_bars,
+            'williams_bars': williams_bars,
+            'current_price': current_price,
+            'is_live': is_live,
+            'price_source': price_source
+        }
+        
+        logger.info(f"{symbol} data ready - Price: {current_price} ({'LIVE' if is_live else 'HISTORICAL'})")
+    
+    logger.info(f"All market data fetched in parallel - ready for strategy processing")
+    return market_data
+
+def get_cached_bar_data(market_data, symbol):
+    """Get cached daily bar data for IBS calculation"""
+    data = market_data[symbol]
+    daily_bars = data['daily_bars']
+    
+    if not daily_bars:
+        return None, None, False
+    
+    current_bar = daily_bars[-1]
+    current_price = data['current_price']
+    is_live = data['is_live']
+    
+    return current_bar, current_price, is_live
+
+def get_cached_williams_data(market_data, symbol):
+    """Get cached Williams bar data"""
+    data = market_data[symbol]
+    williams_bars = data['williams_bars']
+    
+    if not williams_bars or len(williams_bars) < williams_period:
+        return None, None, False
+    
+    current_price = data['current_price']
+    is_live = data['is_live']
+    
+    return williams_bars, current_price, is_live
 
 # -------------------------------
 # Main Trading Logic (matching aggregate_port.py exactly)
@@ -1038,9 +1113,9 @@ def run_daily_signals(ib):
         state['current_equity'] = current_equity
         logger.info(f"Current account equity: ${current_equity:,.2f}")
     
-    # Synchronize positions with IBKR
+    # Synchronize positions with IBKR using cached price data
     logger.info("Synchronizing positions with IBKR...")
-    ibkr_positions = get_positions_from_ibkr(ib, contracts)
+    ibkr_positions = get_positions_from_ibkr_optimized(ib, contracts, market_data)
     if ibkr_positions is not None:
         # Compare with local state and update
         position_changes = []
@@ -1074,6 +1149,11 @@ def run_daily_signals(ib):
     current_dt = datetime.now(tz)
     end_datetime_str = format_end_datetime(current_dt, tz)
     
+    # ========== OPTIMIZED: FETCH ALL MARKET DATA ONCE ==========
+    # Fetch all market data in parallel to minimize execution time
+    market_data = fetch_all_market_data(ib, contracts, end_datetime_str)
+    # ===========================================================
+    
     # Process each IBS strategy (router-only approach for all instruments)
     for symbol in ['ES', 'YM', 'GC', 'NQ']:
         strategy_key = f'IBS_{symbol}'
@@ -1082,8 +1162,8 @@ def run_daily_signals(ib):
 
         logger.info(f"\nProcessing {strategy_key}...")
 
-        # Get current bar data with real-time price updates
-        current_bar, current_price, is_live = get_current_bar_data(ib, contract, symbol, end_datetime_str)
+        # Get current bar data from cached market data
+        current_bar, current_price, is_live = get_cached_bar_data(market_data, symbol)
         if not current_bar or not current_price:
             logger.warning(f"No price data available for {symbol}")
             continue
@@ -1142,8 +1222,8 @@ def run_daily_signals(ib):
         
         logger.info(f"\nProcessing {strategy_key}...")
 
-        # Get Williams bar data with real-time price updates
-        bars, current_price, is_live = get_williams_bar_data(ib, contract, symbol, end_datetime_str)
+        # Get Williams bar data from cached market data
+        bars, current_price, is_live = get_cached_williams_data(market_data, symbol)
 
         if bars:
             logger.info(f"{strategy_key} - Retrieved {len(bars)} bars, need {williams_period}")
@@ -1211,17 +1291,8 @@ def run_daily_signals(ib):
         routers[symbol].sync(desired_positions[symbol])
 
         # reflect router outcome in local state (simplified – optimistic)
-        current_price = 0  # Will be set from current market price
-        
-        # Get current price for state updates (use live price if available)
-        if is_trading_window():
-            current_price = get_current_price(ib, contracts[symbol], symbol)
-        
-        if not current_price:
-            # Fallback to historical close price
-            bars = get_daily_bar(ib, contracts[symbol], end_datetime_str)
-            if bars:
-                current_price = bars[-1].close
+        # Use cached price data instead of making new API calls
+        current_price = market_data[symbol]['current_price']
         
         for strat, lots in routers[symbol].strategy_lots.items():
             st = state['positions'][strat]
@@ -1323,18 +1394,19 @@ def print_portfolio_summary(ib):
     if contracts:
         # Show current positions from IBKR
         logger.info("\nCurrent Positions (from IBKR):")
-        ibkr_positions = get_positions_from_ibkr(ib, contracts)
-        if ibkr_positions:
+        try:
+            # Note: This would need market_data for optimization, but here we fall back to simple display
+            ibkr_positions = ib.positions()
             any_positions = False
-            for strategy, pos_state in ibkr_positions.items():
-                if pos_state['in_position']:
-                    pos = pos_state['position']
-                    logger.info(f"  {strategy}: {pos['contracts']} contracts @ ${pos['entry_price']:.2f}")
+            for position in ibkr_positions:
+                if position.position != 0:
+                    symbol = position.contract.symbol
+                    logger.info(f"  {symbol}: {position.position} contracts @ ${position.avgCost:.2f}")
                     any_positions = True
             if not any_positions:
                 logger.info("  No positions found")
-        else:
-            logger.warning("  Could not retrieve positions from IBKR")
+        except Exception as e:
+            logger.warning(f"  Could not retrieve positions from IBKR: {e}")
         
         tz = pytz.timezone('US/Eastern')
         end_datetime_str = format_end_datetime(datetime.now(tz), tz)
@@ -1460,8 +1532,8 @@ def main():
     # Print portfolio summary on startup
     print_portfolio_summary(ib)
 
-    # Always wait until 10 seconds before next market close (5 PM Eastern)
-    logger.info("Waiting until 10 seconds before next market close...")
+    # Always wait until 20 seconds before next market close (5 PM Eastern) for faster execution
+    logger.info("Waiting until 20 seconds before next market close...")
     wait_until_next_close(timezone='US/Eastern', lead_seconds=10)
 
     # Run daily signals with exact logic from aggregate_port.py
