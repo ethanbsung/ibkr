@@ -1113,6 +1113,15 @@ def run_daily_signals(ib):
         state['current_equity'] = current_equity
         logger.info(f"Current account equity: ${current_equity:,.2f}")
     
+    tz = pytz.timezone('US/Eastern')
+    current_dt = datetime.now(tz)
+    end_datetime_str = format_end_datetime(current_dt, tz)
+    
+    # ========== OPTIMIZED: FETCH ALL MARKET DATA ONCE ==========
+    # Fetch all market data in parallel to minimize execution time
+    market_data = fetch_all_market_data(ib, contracts, end_datetime_str)
+    # ===========================================================
+    
     # Synchronize positions with IBKR using cached price data
     logger.info("Synchronizing positions with IBKR...")
     ibkr_positions = get_positions_from_ibkr_optimized(ib, contracts, market_data)
@@ -1144,15 +1153,6 @@ def run_daily_signals(ib):
             logger.info("Local positions match IBKR positions")
     else:
         logger.warning("Could not retrieve positions from IBKR, using local state")
-    
-    tz = pytz.timezone('US/Eastern')
-    current_dt = datetime.now(tz)
-    end_datetime_str = format_end_datetime(current_dt, tz)
-    
-    # ========== OPTIMIZED: FETCH ALL MARKET DATA ONCE ==========
-    # Fetch all market data in parallel to minimize execution time
-    market_data = fetch_all_market_data(ib, contracts, end_datetime_str)
-    # ===========================================================
     
     # Process each IBS strategy (router-only approach for all instruments)
     for symbol in ['ES', 'YM', 'GC', 'NQ']:
