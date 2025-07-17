@@ -165,5 +165,14 @@
     "cumulative_realized_pnl": -157.37000000000103,
     "total_cash": 30734.16,
     "gross_position_value": 0.0
+  },
+  {
+    "date": "2025-07-16",
+    "net_liquidation": 30734.16,
+    "unrealized_pnl": 0.0,
+    "realized_pnl": 0.0,
+    "cumulative_realized_pnl": -157.37000000000103,
+    "total_cash": 30734.16,
+    "gross_position_value": 0.0
   }
 ]
