@@ -714,6 +714,25 @@ def place_order_with_fallback(ib, contract, action, quantity, symbol, dry_run=Fa
             for log_entry in trade.log:
                 if '201' in log_entry.message or 'physical delivery' in log_entry.message.lower():
                     logger.error(f"Order rejected for {symbol}: Contract in delivery window or near expiration")
+                    # Trigger automatic rollover for delivery window contracts
+                    logger.info(f"Attempting automatic rollover for {symbol} due to delivery window")
+                    try:
+                        # Get current contract month
+                        current_month = contract_specs[symbol]['contract_month']
+                        next_month = get_next_contract_month(symbol, current_month)
+                        
+                        if next_month:
+                            logger.info(f"Rolling {symbol} from {current_month} to {next_month}")
+                            # Update contract specs to next month
+                            update_contract_specs_for_rollover(symbol, next_month)
+                            # Re-qualify contracts with new month
+                            qualify_contracts(ib)
+                            logger.info(f"Successfully rolled {symbol} to {next_month}")
+                            return None  # Return None to indicate rollover occurred
+                        else:
+                            logger.error(f"No next contract month available for {symbol}")
+                    except Exception as rollover_error:
+                        logger.error(f"Rollover failed for {symbol}: {rollover_error}")
                     return None
                 elif 'exchange is closed' in log_entry.message.lower():
                     logger.error(f"Order rejected for {symbol}: Exchange is closed")
