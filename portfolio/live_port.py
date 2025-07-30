@@ -62,12 +62,12 @@ CONTRACT_ROLLOVER_CHAINS = {
         '202609': '202612',  # Sep -> Dec (future)
     },
     'GC': {  # Gold - Monthly except Jan, Mar, May, Jul, Oct, Dec are most liquid
-        '202508': '202510',  # Aug -> Oct
         '202510': '202512',  # Oct -> Dec
         '202512': '202602',  # Dec -> Feb
         '202602': '202604',  # Feb -> Apr
         '202604': '202606',  # Apr -> Jun
         '202606': '202608',  # Jun -> Aug
+        '202608': '202610',  # Aug -> Oct
     },
     'NQ': {  # E-mini NASDAQ - Quarterly (Mar, Jun, Sep, Dec)
         '202506': '202509',  # Aug -> Sep (special case)
@@ -106,12 +106,12 @@ CONTRACT_EXPIRATION_DATES = {
     },
     'GC': {
         # PLACEHOLDER - VERIFY WITH COMEX OFFICIAL CALENDAR
-        '202508': datetime(2025, 8, 27),  # August 27, 2025 (verified)
-        '202510': None,  # Must verify October expiration
+        '202510': datetime(2025, 10, 29),  # October 29, 2025 (estimated)
         '202512': None,  # Must verify December expiration
         '202602': None,  # Must verify February 2026 expiration
         '202604': None,  # Must verify April 2026 expiration
         '202606': None,  # Must verify June 2026 expiration
+        '202608': None,  # Must verify August 2026 expiration
     },
     'NQ': {
         # PLACEHOLDER - VERIFY WITH CME GROUP OFFICIAL CALENDAR
@@ -126,7 +126,7 @@ CONTRACT_EXPIRATION_DATES = {
 contract_specs = {
     'ES': {'multiplier': 5, 'contract_month': '202509', 'exchange': 'CME'},      # MES multiplier
     'YM': {'multiplier': 0.50, 'contract_month': '202509', 'exchange': 'CBOT'},   # MYM multiplier  
-    'GC': {'multiplier': 10, 'contract_month': '202508', 'exchange': 'COMEX'},     # MGC multiplier - moved to August to avoid delivery window
+    'GC': {'multiplier': 10, 'contract_month': '202510', 'exchange': 'COMEX'},     # MGC multiplier - moved to October to avoid delivery window
     'NQ': {'multiplier': 2, 'contract_month': '202509', 'exchange': 'CME'}      # MNQ multiplier
 }
 
@@ -548,78 +548,151 @@ def get_positions_from_ibkr_optimized(ib, contracts, market_data):
         # Load saved state once for position mapping
         saved_state = load_portfolio_state()
 
-        # Process IBKR positions
+        # Group positions by symbol to handle multiple contracts per symbol
+        symbol_positions = {}
         for position in positions:
             if position.contract.conId in contract_to_strategy:
-                strategies = contract_to_strategy[position.contract.conId]
+                symbol = position.contract.symbol
+                if symbol == 'MES':
+                    symbol = 'ES'
+                elif symbol == 'MYM':
+                    symbol = 'YM'
+                elif symbol == 'MGC':
+                    symbol = 'GC'
+                elif symbol == 'MNQ':
+                    symbol = 'NQ'
                 
-                if position.position != 0:  # Non-zero position
-                    # Get the current market price for entry_price estimation
-                    symbol = position.contract.symbol
-                    if symbol == 'MES':
-                        symbol = 'ES'
-                    elif symbol == 'MYM':
-                        symbol = 'YM'
-                    elif symbol == 'MGC':
-                        symbol = 'GC'
-                    elif symbol == 'MNQ':
-                        symbol = 'NQ'
-                    
-                    # Use cached price data
-                    if symbol in current_prices:
-                        entry_price = current_prices[symbol]
-                        logger.info(f"Using cached market price {entry_price} for {symbol} position")
-                    else:
-                        # Fallback to reasonable estimates if cached data not available
-                        logger.warning(f"No cached price data for {symbol}, using default estimate")
-                        default_prices = {'ES': 6000, 'GC': 3300, 'YM': 42000, 'NQ': 21000}
-                        entry_price = default_prices.get(symbol, 1000)
-                    
-                    position_info = {
-                        'entry_price': entry_price,
-                        'entry_time': datetime.now().isoformat(),  # We don't know actual entry time
-                        'contracts': int(abs(position.position))  # Use absolute value for long positions
+                if symbol not in symbol_positions:
+                    symbol_positions[symbol] = []
+                symbol_positions[symbol].append(position)
+
+        # Process positions by symbol to handle multiple contracts
+        for symbol, positions_list in symbol_positions.items():
+            total_contracts = sum(abs(pos.position) for pos in positions_list)
+            
+            if total_contracts == 0:
+                continue
+                
+            # Get the current market price for entry_price estimation
+            if symbol in current_prices:
+                entry_price = current_prices[symbol]
+                logger.info(f"Using cached market price {entry_price} for {symbol} position")
+            else:
+                # Fallback to reasonable estimates if cached data not available
+                logger.warning(f"No cached price data for {symbol}, using default estimate")
+                default_prices = {'ES': 6000, 'GC': 3300, 'YM': 42000, 'NQ': 21000}
+                entry_price = default_prices.get(symbol, 1000)
+            
+            # Check which strategies expect to have positions for this instrument
+            ibs_strategy = f'IBS_{symbol}'
+            williams_strategy = f'Williams_{symbol}'
+            
+            ibs_expecting = saved_state['positions'][ibs_strategy]['in_position']
+            williams_expecting = saved_state['positions'][williams_strategy]['in_position']
+            
+            # Handle different scenarios based on total contracts and expectations
+            if total_contracts == 1:
+                # Single contract - assign based on expectations
+                if ibs_expecting and not williams_expecting:
+                    ibkr_positions[ibs_strategy] = {
+                        'in_position': True,
+                        'position': {
+                            'entry_price': entry_price,
+                            'entry_time': datetime.now().isoformat(),
+                            'contracts': 1
+                        }
                     }
+                    logger.info(f"Found {ibs_strategy} position: 1 contract")
+                elif williams_expecting and not ibs_expecting:
+                    ibkr_positions[williams_strategy] = {
+                        'in_position': True,
+                        'position': {
+                            'entry_price': entry_price,
+                            'entry_time': datetime.now().isoformat(),
+                            'contracts': 1
+                        }
+                    }
+                    logger.info(f"Found {williams_strategy} position: 1 contract")
+                else:
+                    # Neither expects or both expect - default to IBS
+                    logger.warning(f"Found unexpected {symbol} position, assigning to {ibs_strategy} by default.")
+                    ibkr_positions[ibs_strategy] = {
+                        'in_position': True,
+                        'position': {
+                            'entry_price': entry_price,
+                            'entry_time': datetime.now().isoformat(),
+                            'contracts': 1
+                        }
+                    }
+                    logger.info(f"Found {ibs_strategy} position: 1 contract")
                     
-                    # For all instruments, determine which strategy has the position using loaded state
-                    # Check which strategies expect to have positions for this instrument
-                    ibs_strategy = f'IBS_{symbol}'
-                    williams_strategy = f'Williams_{symbol}'
-                    
-                    ibs_expecting = saved_state['positions'][ibs_strategy]['in_position']
-                    williams_expecting = saved_state['positions'][williams_strategy]['in_position']
-                    
-                    if ibs_expecting and not williams_expecting:
-                        # IBS strategy should have the position
-                        ibkr_positions[ibs_strategy] = {
-                            'in_position': True,
-                            'position': position_info
+            elif total_contracts == 2:
+                # Two contracts - likely one for each strategy
+                if ibs_expecting and williams_expecting:
+                    # Both strategies expect positions - assign one to each
+                    ibkr_positions[ibs_strategy] = {
+                        'in_position': True,
+                        'position': {
+                            'entry_price': entry_price,
+                            'entry_time': datetime.now().isoformat(),
+                            'contracts': 1
                         }
-                        logger.info(f"Found {ibs_strategy} position: {position_info['contracts']} contracts")
-                    elif williams_expecting and not ibs_expecting:
-                        # Williams strategy should have the position
-                        ibkr_positions[williams_strategy] = {
-                            'in_position': True,
-                            'position': position_info
+                    }
+                    ibkr_positions[williams_strategy] = {
+                        'in_position': True,
+                        'position': {
+                            'entry_price': entry_price,
+                            'entry_time': datetime.now().isoformat(),
+                            'contracts': 1
                         }
-                        logger.info(f"Found {williams_strategy} position: {position_info['contracts']} contracts")
-                    elif ibs_expecting and williams_expecting:
-                        # Both expect positions - distribute based on saved position sizes
-                        # This would be handled by the router state, but for now assign to IBS by default
-                        logger.warning(f"Both {ibs_strategy} and {williams_strategy} expect positions but only one exists. Assigning to {ibs_strategy} by default.")
-                        ibkr_positions[ibs_strategy] = {
-                            'in_position': True,
-                            'position': position_info
+                    }
+                    logger.info(f"Found {ibs_strategy} and {williams_strategy} positions: 1 contract each")
+                elif ibs_expecting and not williams_expecting:
+                    # Only IBS expects position - assign both to IBS
+                    ibkr_positions[ibs_strategy] = {
+                        'in_position': True,
+                        'position': {
+                            'entry_price': entry_price,
+                            'entry_time': datetime.now().isoformat(),
+                            'contracts': 2
                         }
-                        logger.info(f"Found {ibs_strategy} position: {position_info['contracts']} contracts")
-                    else:
-                        # Neither expects a position, default to IBS strategy
-                        logger.warning(f"Found unexpected {symbol} position, assigning to {ibs_strategy} by default.")
-                        ibkr_positions[ibs_strategy] = {
-                            'in_position': True,
-                            'position': position_info
+                    }
+                    logger.info(f"Found {ibs_strategy} position: 2 contracts")
+                elif williams_expecting and not ibs_expecting:
+                    # Only Williams expects position - assign both to Williams
+                    ibkr_positions[williams_strategy] = {
+                        'in_position': True,
+                        'position': {
+                            'entry_price': entry_price,
+                            'entry_time': datetime.now().isoformat(),
+                            'contracts': 2
                         }
-                        logger.info(f"Found {ibs_strategy} position: {position_info['contracts']} contracts")
+                    }
+                    logger.info(f"Found {williams_strategy} position: 2 contracts")
+                else:
+                    # Neither expects - default to IBS
+                    logger.warning(f"Found unexpected {symbol} position (2 contracts), assigning to {ibs_strategy} by default.")
+                    ibkr_positions[ibs_strategy] = {
+                        'in_position': True,
+                        'position': {
+                            'entry_price': entry_price,
+                            'entry_time': datetime.now().isoformat(),
+                            'contracts': 2
+                        }
+                    }
+                    logger.info(f"Found {ibs_strategy} position: 2 contracts")
+            else:
+                # More than 2 contracts - assign to IBS by default
+                logger.warning(f"Found {total_contracts} {symbol} contracts, assigning to {ibs_strategy} by default.")
+                ibkr_positions[ibs_strategy] = {
+                    'in_position': True,
+                    'position': {
+                        'entry_price': entry_price,
+                        'entry_time': datetime.now().isoformat(),
+                        'contracts': total_contracts
+                    }
+                }
+                logger.info(f"Found {ibs_strategy} position: {total_contracts} contracts")
         
         return ibkr_positions
         

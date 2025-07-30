@@ -62,12 +62,12 @@ CONTRACT_ROLLOVER_CHAINS = {
         '202609': '202612',  # Sep -> Dec (future)
     },
     'GC': {  # Gold - Monthly except Jan, Mar, May, Jul, Oct, Dec are most liquid
-        '202508': '202510',  # Aug -> Oct
         '202510': '202512',  # Oct -> Dec
         '202512': '202602',  # Dec -> Feb
         '202602': '202604',  # Feb -> Apr
         '202604': '202606',  # Apr -> Jun
         '202606': '202608',  # Jun -> Aug
+        '202608': '202610',  # Aug -> Oct
     },
     'NQ': {  # E-mini NASDAQ - Quarterly (Mar, Jun, Sep, Dec)
         '202506': '202509',  # Aug -> Sep (special case)
@@ -106,12 +106,12 @@ CONTRACT_EXPIRATION_DATES = {
     },
     'GC': {
         # PLACEHOLDER - VERIFY WITH COMEX OFFICIAL CALENDAR
-        '202508': datetime(2025, 8, 27),  # August 27, 2025 (verified)
-        '202510': None,  # Must verify October expiration
+        '202510': datetime(2025, 10, 29),  # October 29, 2025 (estimated)
         '202512': None,  # Must verify December expiration
         '202602': None,  # Must verify February 2026 expiration
         '202604': None,  # Must verify April 2026 expiration
         '202606': None,  # Must verify June 2026 expiration
+        '202608': None,  # Must verify August 2026 expiration
     },
     'NQ': {
         # PLACEHOLDER - VERIFY WITH CME GROUP OFFICIAL CALENDAR
@@ -126,7 +126,7 @@ CONTRACT_EXPIRATION_DATES = {
 contract_specs = {
     'ES': {'multiplier': 5, 'contract_month': '202509', 'exchange': 'CME'},      # MES multiplier
     'YM': {'multiplier': 0.50, 'contract_month': '202509', 'exchange': 'CBOT'},   # MYM multiplier  
-    'GC': {'multiplier': 10, 'contract_month': '202508', 'exchange': 'COMEX'},     # MGC multiplier - moved to August to avoid delivery window
+    'GC': {'multiplier': 10, 'contract_month': '202510', 'exchange': 'COMEX'},     # MGC multiplier - moved to October to avoid delivery window
     'NQ': {'multiplier': 2, 'contract_month': '202509', 'exchange': 'CME'}      # MNQ multiplier
 }
 
