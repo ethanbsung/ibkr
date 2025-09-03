@@ -32,10 +32,10 @@ risk_multiplier = 3.0              # 3x larger positions for higher risk/reward
 # Date ranges for combined backtest
 # Original backtest period (local data)
 original_start_date = '2024-03-01'
-original_end_date = '2025-06-13'
+original_end_date = '2025-03-14'
 
 # IBKR data period (continuation)
-ibkr_start_date = '2025-03-12'  # Start from March 12, 2025
+ibkr_start_date = '2025-03-14'  # Start from June 13, 2025
 ibkr_end_date = datetime.now().strftime('%Y-%m-%d')  # To present
 
 # -------------------------------
@@ -78,10 +78,10 @@ for strategy, pct in sorted(williams_strategies.items()):
 
 # Contract Specifications and Multipliers
 contract_specs = {
-    'ES': {'multiplier': 5, 'contract_month': '202506'},      # MES multiplier
-    'YM': {'multiplier': 0.50, 'contract_month': '202506'},   # MYM multiplier  
-    'GC': {'multiplier': 10, 'contract_month': '202506'},     # MGC multiplier
-    'NQ': {'multiplier': 2, 'contract_month': '202506'}      # MNQ multiplier
+    'ES': {'multiplier': 5, 'contract_month': '202509'},      # MES multiplier
+    'YM': {'multiplier': 0.50, 'contract_month': '202509'},   # MYM multiplier  
+    'GC': {'multiplier': 10, 'contract_month': '202510'},     # MGC multiplier
+    'NQ': {'multiplier': 2, 'contract_month': '202509'}      # MNQ multiplier
 }
 
 # Extract individual multipliers for backward compatibility

@@ -92,21 +92,21 @@ CONTRACT_ROLLOVER_CHAINS = {
 CONTRACT_EXPIRATION_DATES = {
     'ES': {
         # PLACEHOLDER - VERIFY WITH CME GROUP OFFICIAL CALENDAR
-        '202509': datetime(2025, 9, 19),  # September 19, 2025 (verified)
+        '202509': datetime(2025, 9, 25),  # September 25, 2025 (verified)
         '202512': None,  # Must verify December expiration
         '202603': None,  # Must verify March 2026 expiration
         '202606': None,  # Must verify June 2026 expiration
     },
     'YM': {
         # PLACEHOLDER - VERIFY WITH CME GROUP OFFICIAL CALENDAR
-        '202509': datetime(2025, 9, 19),  # September 19, 2025 (same as ES)
+        '202509': datetime(2025, 9, 25),  # September 25, 2025 (same as ES)
         '202512': None,  # Must verify December expiration
         '202603': None,  # Must verify March 2026 expiration
         '202606': None,  # Must verify June 2026 expiration
     },
     'GC': {
         # PLACEHOLDER - VERIFY WITH COMEX OFFICIAL CALENDAR
-        '202510': datetime(2025, 10, 29),  # October 29, 2025 (estimated)
+        '202510': datetime(2025, 10, 25),  # Must verify October expiration
         '202512': None,  # Must verify December expiration
         '202602': None,  # Must verify February 2026 expiration
         '202604': None,  # Must verify April 2026 expiration
@@ -115,7 +115,7 @@ CONTRACT_EXPIRATION_DATES = {
     },
     'NQ': {
         # PLACEHOLDER - VERIFY WITH CME GROUP OFFICIAL CALENDAR
-        '202509': datetime(2025, 9, 19),  # September 19, 2025 (same as ES/YM)
+        '202509': datetime(2025, 9, 25),  # September 25, 2025 (same as ES/YM)
         '202512': None,  # Must verify December expiration
         '202603': None,  # Must verify March 2026 expiration
         '202606': None,  # Must verify June 2026 expiration
@@ -126,7 +126,7 @@ CONTRACT_EXPIRATION_DATES = {
 contract_specs = {
     'ES': {'multiplier': 5, 'contract_month': '202509', 'exchange': 'CME'},      # MES multiplier
     'YM': {'multiplier': 0.50, 'contract_month': '202509', 'exchange': 'CBOT'},   # MYM multiplier  
-    'GC': {'multiplier': 10, 'contract_month': '202510', 'exchange': 'COMEX'},     # MGC multiplier - moved to October to avoid delivery window
+    'GC': {'multiplier': 10, 'contract_month': '202510', 'exchange': 'COMEX'},     # MGC multiplier
     'NQ': {'multiplier': 2, 'contract_month': '202509', 'exchange': 'CME'}      # MNQ multiplier
 }
 
