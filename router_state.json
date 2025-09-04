@@ -8,8 +8,8 @@
     "Williams_YM": 0
   },
   "GC": {
-    "IBS_GC": 1,
-    "Williams_GC": 1
+    "IBS_GC": 0,
+    "Williams_GC": 0
   },
   "NQ": {
     "IBS_NQ": 0,
