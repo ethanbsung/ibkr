@@ -7,9 +7,9 @@
 ![Account Value](https://img.shields.io/badge/Account-%2431%2C267-blue)
 ![P&L](https://img.shields.io/badge/P&L-%241%2C097-brightgreen)
 ![Return](https://img.shields.io/badge/Return-%2B3.6%25-brightgreen)
-![Max DD](https://img.shields.io/badge/Max_DD-7.2%25-red)
+![Max DD](https://img.shields.io/badge/Max_DD-17.8%25-red)
 ![Status](https://img.shields.io/badge/Trading-PAPER-brightgreen)
-![Last Updated](https://img.shields.io/badge/Last_Updated-2025-09-03-lightgrey)
+![Last Updated](https://img.shields.io/badge/Last_Updated-2025-09-04-lightgrey)
 
 A comprehensive algorithmic trading system implementing systematic trading strategies with paper trading execution, extensive backtesting, and Monte Carlo simulation capabilities. This project demonstrates enterprise-level quantitative finance software engineering practices using Interactive Brokers' paper trading environment.
 
@@ -36,7 +36,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Paper Trading Performance
 
-> **Last Updated:** 2025-09-03 23:13 UTC | **Trading Days:** 41
+> **Last Updated:** 2025-09-04 23:13 UTC | **Trading Days:** 38
 
 ### Current Paper Account Status
 | Metric | Value |
@@ -46,7 +46,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 | **Unrealized P&L** | $0.00 |
 | **Realized P&L** | $1,097.13 |
 | **Total Return** | +3.64% |
-| **Max Drawdown** | 7.2%* |
+| **Max Drawdown** | 17.8%* |
 
 ### Current Positions
 *No positions currently open - waiting for entry signals*
@@ -54,7 +54,7 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 ### Recent Performance
 | Period | Return |
 |--------|--------|
-| **1 Week** | +0.00% |
+| **1 Week** | +16.13% |
 | **1 Month** | +1.74% |
 
 *📝 Metrics automatically updated via GitHub Actions from paper trading IBKR account*
