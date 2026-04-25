@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from ib_insync import IB, Future, util
 import time as tm
+import calendar
 
 # -------------------------------
 # Logging Configuration
@@ -76,12 +77,62 @@ logger.info("  Williams Strategies (50% total):")
 for strategy, pct in sorted(williams_strategies.items()):
     logger.info(f"    • {strategy}: {pct*100:.1f}%")
 
+# -------------------------------
+# Dynamic Contract Month Helpers
+# -------------------------------
+def _get_third_friday(year, month):
+    """Return the 3rd Friday of the given month."""
+    first_day = datetime(year, month, 1)
+    days_until_friday = (4 - first_day.weekday()) % 7
+    return first_day + timedelta(days=days_until_friday + 14)
+
+def _get_third_to_last_business_day(year, month):
+    """Return the 3rd-to-last business day of the given month (gold expiry)."""
+    last_day = datetime(year, month, calendar.monthrange(year, month)[1])
+    count = 0
+    d = last_day
+    while True:
+        if d.weekday() < 5:
+            count += 1
+            if count == 3:
+                return d
+        d -= timedelta(days=1)
+
+def get_quarterly_contract_month(today=None, roll_days=7):
+    """Return YYYYMM for the active quarterly futures contract (Mar/Jun/Sep/Dec)."""
+    if today is None:
+        today = datetime.now()
+    cutoff = today + timedelta(days=roll_days)
+    for year in range(today.year, today.year + 2):
+        for month in (3, 6, 9, 12):
+            if _get_third_friday(year, month) >= cutoff:
+                return f"{year}{month:02d}"
+    raise RuntimeError("Could not determine quarterly contract month")
+
+def get_gold_contract_month(today=None, roll_days=5):
+    """Return YYYYMM for the active Micro Gold front-month contract.
+    MGC on COMEX only has contracts in Feb/Apr/Jun/Aug/Oct/Dec."""
+    if today is None:
+        today = datetime.now()
+    cutoff = today + timedelta(days=roll_days)
+    gold_months = (2, 4, 6, 8, 10, 12)
+    for year in range(today.year, today.year + 2):
+        for month in gold_months:
+            if _get_third_to_last_business_day(year, month) >= cutoff:
+                return f"{year}{month:02d}"
+    raise RuntimeError("Could not determine gold contract month")
+
 # Contract Specifications and Multipliers
+_quarterly_month = get_quarterly_contract_month()
+_gold_month = get_gold_contract_month()
+logger.info(f"Active quarterly contract month: {_quarterly_month}")
+logger.info(f"Active gold contract month:      {_gold_month}")
+
 contract_specs = {
-    'ES': {'multiplier': 5, 'contract_month': '202509'},      # MES multiplier
-    'YM': {'multiplier': 0.50, 'contract_month': '202509'},   # MYM multiplier  
-    'GC': {'multiplier': 10, 'contract_month': '202510'},     # MGC multiplier
-    'NQ': {'multiplier': 2, 'contract_month': '202509'}      # MNQ multiplier
+    'ES': {'multiplier': 5,    'contract_month': _quarterly_month},  # MES
+    'YM': {'multiplier': 0.50, 'contract_month': _quarterly_month},  # MYM
+    'GC': {'multiplier': 10,   'contract_month': _gold_month},       # MGC
+    'NQ': {'multiplier': 2,    'contract_month': _quarterly_month},  # MNQ
 }
 
 # Extract individual multipliers for backward compatibility
@@ -163,8 +214,12 @@ def fetch_daily_data(ib, contract, start_date_str, end_date_str):
         start_dt = pd.to_datetime(start_date_str)
         end_dt = pd.to_datetime(end_date_str)
         duration_days = (end_dt - start_dt).days + 1
-        duration_str = f"{duration_days} D"
-        
+        if duration_days > 365:
+            duration_years = -(-duration_days // 365)  # ceiling division
+            duration_str = f"{duration_years} Y"
+        else:
+            duration_str = f"{duration_days} D"
+
         # Format end date for IBKR API
         end_datetime_str = end_dt.strftime("%Y%m%d 23:59:59")
         
@@ -1134,6 +1189,9 @@ props_transition = dict(boxstyle='round', facecolor='lightcyan', alpha=0.8)
 plt.text(0.02, 0.38, transition_textstr, transform=plt.gca().transAxes, fontsize=9,
          verticalalignment='top', bbox=props_transition)
 
+plot_path = "portfolio/aggregate_port_equity_curve.png"
+plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+logger.info(f"Equity curve saved to {plot_path}")
 plt.show()
 
 logger.info("Backtest completed successfully!") 

@@ -15,26 +15,20 @@ slippage = 0.625
 business_days_per_year = 256
 
 #####   INSTRUMENT DATA LOADING   #####
+_CHAPTER1_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 def load_instrument_data(instruments_file='Data/instruments.csv'):
     """
     Load instrument data including multipliers and SR costs.
-    
+
     Parameters:
         instruments_file (str): Path to the instruments CSV file.
-    
+
     Returns:
         pd.DataFrame: DataFrame with instrument specifications.
     """
-    # Try multiple paths to handle different working directories
-    if not os.path.exists(instruments_file):
-        # Try parent directory (when running from rob_port/)
-        alt_path = os.path.join('..', instruments_file)
-        if os.path.exists(alt_path):
-            instruments_file = alt_path
-        # Try current directory version
-        elif os.path.exists(os.path.basename(instruments_file)):
-            instruments_file = os.path.basename(instruments_file)
-    
+    if not os.path.isabs(instruments_file):
+        instruments_file = os.path.join(_CHAPTER1_REPO_ROOT, instruments_file)
     return pd.read_csv(instruments_file)
 
 def get_instrument_specs(symbol, instruments_df=None):

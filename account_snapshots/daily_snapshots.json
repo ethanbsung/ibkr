@@ -318,5 +318,41 @@
     "cumulative_realized_pnl": 375.9599999999971,
     "total_cash": 31267.49,
     "gross_position_value": 0.0
+  },
+  {
+    "date": "2025-09-04",
+    "net_liquidation": 31278.27,
+    "unrealized_pnl": 0.0,
+    "realized_pnl": 0.0,
+    "cumulative_realized_pnl": 386.7399999999959,
+    "total_cash": 31267.49,
+    "gross_position_value": 0.0
+  },
+  {
+    "date": "2025-09-05",
+    "net_liquidation": 31278.27,
+    "unrealized_pnl": 0.0,
+    "realized_pnl": 0.0,
+    "cumulative_realized_pnl": 386.7399999999959,
+    "total_cash": 31278.27,
+    "gross_position_value": 0.0
+  },
+  {
+    "date": "2025-09-08",
+    "net_liquidation": 31278.27,
+    "unrealized_pnl": 0.0,
+    "realized_pnl": 0.0,
+    "cumulative_realized_pnl": 386.7399999999959,
+    "total_cash": 31278.27,
+    "gross_position_value": 0.0
+  },
+  {
+    "date": "2025-09-10",
+    "net_liquidation": 31278.27,
+    "unrealized_pnl": 0.0,
+    "realized_pnl": 0.0,
+    "cumulative_realized_pnl": 386.7399999999959,
+    "total_cash": 31278.27,
+    "gross_position_value": 0.0
   }
 ]

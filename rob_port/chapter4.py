@@ -1,6 +1,6 @@
-from .chapter3 import *
-from .chapter2 import *
-from .chapter1 import *
+from chapter3 import *
+from chapter2 import *
+from chapter1 import *
 import numpy as np
 import pandas as pd
 import os
@@ -12,27 +12,36 @@ warnings.filterwarnings('ignore')
 
 #####   FX RATE HANDLING   #####
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def _resolve_data_dir(data_dir):
+    """Resolve data_dir to an absolute path, anchoring relative paths to repo root."""
+    if not os.path.isabs(data_dir):
+        return os.path.join(_REPO_ROOT, data_dir)
+    return data_dir
+
 def load_fx_data(data_dir='Data'):
     """
     Load FX rate data for non-USD currencies.
-    
+
     Parameters:
         data_dir (str): Directory containing FX data files.
-    
+
     Returns:
         dict: Dictionary with currency code as key and DataFrame as value.
     """
+    data_dir = _resolve_data_dir(data_dir)
     fx_data = {}
-    
+
     # Define FX files and their properties
     fx_files = {
         'EUR': {'file': 'eur_daily_data.csv', 'invert': False},  # EUR/USD
-        'JPY': {'file': 'jpy_daily_data.csv', 'invert': False},  # JPY/USD  
+        'JPY': {'file': 'jpy_daily_data.csv', 'invert': False},  # JPY/USD
         'GBP': {'file': 'gbp_daily_data.csv', 'invert': False},  # GBP/USD
         'CNH': {'file': 'uc_daily_data.csv', 'invert': True},    # USD/CNH -> CNH/USD
         'SGD': {'file': 'snd_daily_data.csv', 'invert': True}    # USD/SGD -> SGD/USD
     }
-    
+
     for currency, config in fx_files.items():
         filepath = os.path.join(data_dir, config['file'])
         
@@ -155,19 +164,20 @@ def get_fx_rate_for_date_and_currency(date, currency, fx_data):
 def load_all_instrument_data(data_dir='Data'):
     """
     Load all available instrument data from CSV files.
-    
+
     Parameters:
         data_dir (str): Directory containing the data files.
-    
+
     Returns:
         dict: Dictionary with symbol as key and DataFrame as value.
     """
+    data_dir = _resolve_data_dir(data_dir)
     # Load instrument specs
     instruments_df = load_instrument_data()
-    
+
     instrument_data = {}
     failed_loads = []
-    
+
     for _, row in instruments_df.iterrows():
         symbol = row['Symbol']
         filename = f"{symbol.lower()}_daily_data.csv"

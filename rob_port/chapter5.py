@@ -1,7 +1,7 @@
-from rob_port.chapter4 import *
-from rob_port.chapter3 import *
-from rob_port.chapter2 import *
-from rob_port.chapter1 import *
+from chapter4 import *
+from chapter3 import *
+from chapter2 import *
+from chapter1 import *
 import numpy as np
 import pandas as pd
 import os
