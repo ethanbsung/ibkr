@@ -4,12 +4,12 @@
 [![Interactive Brokers](https://img.shields.io/badge/Broker-Interactive%20Brokers-green.svg)](https://www.interactivebrokers.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-![Account Value](https://img.shields.io/badge/Account-%2431%2C267-blue)
-![P&L](https://img.shields.io/badge/P&L-%241%2C097-brightgreen)
-![Return](https://img.shields.io/badge/Return-%2B3.6%25-brightgreen)
+![Account Value](https://img.shields.io/badge/Account-%2431%2C278-blue)
+![P&L](https://img.shields.io/badge/P&L-%241%2C108-brightgreen)
+![Return](https://img.shields.io/badge/Return-%2B3.7%25-brightgreen)
 ![Max DD](https://img.shields.io/badge/Max_DD-17.8%25-red)
 ![Status](https://img.shields.io/badge/Trading-PAPER-brightgreen)
-![Last Updated](https://img.shields.io/badge/Last_Updated-2026-04-24-lightgrey)
+![Last Updated](https://img.shields.io/badge/Last_Updated-2026-04-27-lightgrey)
 
 A comprehensive algorithmic trading system implementing systematic trading strategies with paper trading execution, extensive backtesting, and Monte Carlo simulation capabilities. This project demonstrates enterprise-level quantitative finance software engineering practices using Interactive Brokers' paper trading environment.
 
@@ -36,16 +36,16 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 
 ## 📊 Paper Trading Performance
 
-> **Last Updated:** 2026-04-24 23:36 UTC | **Trading Days:** 38
+> **Last Updated:** 2026-04-27 23:50 UTC | **Trading Days:** 42
 
 ### Current Paper Account Status
 | Metric | Value |
 |--------|-------|
-| **Account Value** | $31,267.49 |
-| **Total P&L** | 📈 $1,097.13 |
+| **Account Value** | $31,278.27 |
+| **Total P&L** | 📈 $1,107.91 |
 | **Unrealized P&L** | $0.00 |
-| **Realized P&L** | $1,097.13 |
-| **Total Return** | +3.64% |
+| **Realized P&L** | $1,107.91 |
+| **Total Return** | +3.67% |
 | **Max Drawdown** | 17.8%* |
 
 ### Current Positions
@@ -54,8 +54,9 @@ A comprehensive algorithmic trading system implementing systematic trading strat
 ### Recent Performance
 | Period | Return |
 |--------|--------|
-| **1 Week** | +16.13% |
-| **1 Month** | +1.74% |
+| **1 Week** | +0.00% |
+| **1 Month** | +0.03% |
+| **3 Months** | -3.92% |
 
 *📝 Metrics automatically updated via GitHub Actions from paper trading IBKR account*
 
