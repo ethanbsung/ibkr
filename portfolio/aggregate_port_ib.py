@@ -1,1197 +1,483 @@
+#!/usr/bin/env python3
+"""
+IBS Portfolio — In-Sample + Out-of-Sample Backtest
+Part 1: local CSV data (2000-01-01 to 2025-03-12)    — in-sample
+Part 2: IBKR live data (2025-03-13 to today)          — out-of-sample
+
+Backtest engine is identical to aggregate_port.py (date-based iteration,
+same position sizing, same commission). Results split at the transition date
+so the two periods can be compared directly.
+"""
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import logging
 from datetime import datetime, timedelta
-from ib_insync import IB, Future, util
-import time as tm
 import calendar
+from io import StringIO
+from ib_insync import IB, ContFuture, util
 
-# -------------------------------
-# Logging Configuration
-# -------------------------------
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# -------------------------------
-# IBKR Connection Parameters
-# -------------------------------
-IB_HOST = '127.0.0.1'
-IB_PORT = 4002  # Paper trading port (use 7496 for live)
-CLIENT_ID = 3   # Unique client ID
+# ── Parameters (must match aggregate_port.py) ─────────────────────────────────
+INITIAL_CAPITAL = 50_000.0
+COMMISSION_RT   = 4.0
+IBS_ENTRY       = 0.10
+IBS_EXIT        = 0.90
 
-# -------------------------------
-# Parameters & User Settings
-# -------------------------------
-initial_capital = 30000.0         # total capital ($30,000)
-commission_per_order = 1.24       # commission per order (per contract)
+LOCAL_START = '2000-01-01'
+LOCAL_END   = '2025-03-12'   # last date of local CSV data (inclusive)
+OOS_START   = '2025-03-13'   # first date fetched from IBKR
+OOS_END     = datetime.now().strftime('%Y-%m-%d')
 
-# Risk multiplier for larger position sizes
-risk_multiplier = 3.0              # 3x larger positions for higher risk/reward
+IB_HOST   = '127.0.0.1'
+IB_PORT   = 4001
+CLIENT_ID = 3
 
-# Date ranges for combined backtest
-# Original backtest period (local data)
-original_start_date = '2024-03-01'
-original_end_date = '2025-03-14'
-
-# IBKR data period (continuation)
-ibkr_start_date = '2025-03-14'  # Start from June 13, 2025
-ibkr_end_date = datetime.now().strftime('%Y-%m-%d')  # To present
-
-# -------------------------------
-# Dynamic Percentage-Based Allocation Settings
-# -------------------------------
-# Target percentage allocations (must sum to 100%)
-allocation_percentages = {
-    'IBS_ES': 0.125,      # 12.5% to ES IBS strategy
-    'IBS_YM': 0.125,      # 12.5% to YM IBS strategy  
-    'IBS_GC': 0.125,      # 12.5% to GC IBS strategy
-    'IBS_NQ': 0.125,      # 12.5% to NQ IBS strategy
-    'Williams_ES': 0.125, # 12.5% to ES Williams strategy
-    'Williams_YM': 0.125, # 12.5% to YM Williams strategy
-    'Williams_GC': 0.125, # 12.5% to GC Williams strategy
-    'Williams_NQ': 0.125  # 12.5% to NQ Williams strategy
+# ── Contract specifications ────────────────────────────────────────────────────
+CONTRACT_SPECS = {
+    'ES': {'multiplier': 5,  'file': 'Data/mes_daily_data.csv', 'ibkr_symbol': 'MES', 'exchange': 'CME'},
+    'NQ': {'multiplier': 2,  'file': 'Data/mnq_daily_data.csv', 'ibkr_symbol': 'MNQ', 'exchange': 'CME'},
+    'GC': {'multiplier': 10, 'file': 'Data/mgc_daily_data.csv', 'ibkr_symbol': 'MGC', 'exchange': 'COMEX'},
 }
 
-# Rebalancing parameters
-rebalance_threshold = 0.05  # Rebalance when allocation drifts >5% from target
-rebalance_frequency_days = 30  # Also rebalance monthly regardless
-
-# Validate allocations sum to 100%
-total_allocation = sum(allocation_percentages.values())
-if abs(total_allocation - 1.0) > 0.001:
-    raise ValueError(f"Allocations must sum to 100%, current sum: {total_allocation*100:.1f}%")
-
-logger.info("50/50 IBS/Williams Split with Equal Instrument Weighting:")
-
-# Group by strategy type for cleaner display
-ibs_strategies = {k: v for k, v in allocation_percentages.items() if k.startswith('IBS_')}
-williams_strategies = {k: v for k, v in allocation_percentages.items() if k.startswith('Williams_')}
-
-logger.info("  IBS Strategies (50% total):")
-for strategy, pct in sorted(ibs_strategies.items()):
-    logger.info(f"    • {strategy}: {pct*100:.1f}%")
-
-logger.info("  Williams Strategies (50% total):")
-for strategy, pct in sorted(williams_strategies.items()):
-    logger.info(f"    • {strategy}: {pct*100:.1f}%")
-
-# -------------------------------
-# Dynamic Contract Month Helpers
-# -------------------------------
-def _get_third_friday(year, month):
-    """Return the 3rd Friday of the given month."""
-    first_day = datetime(year, month, 1)
-    days_until_friday = (4 - first_day.weekday()) % 7
-    return first_day + timedelta(days=days_until_friday + 14)
-
-def _get_third_to_last_business_day(year, month):
-    """Return the 3rd-to-last business day of the given month (gold expiry)."""
-    last_day = datetime(year, month, calendar.monthrange(year, month)[1])
-    count = 0
-    d = last_day
-    while True:
-        if d.weekday() < 5:
-            count += 1
-            if count == 3:
-                return d
-        d -= timedelta(days=1)
-
-def get_quarterly_contract_month(today=None, roll_days=7):
-    """Return YYYYMM for the active quarterly futures contract (Mar/Jun/Sep/Dec)."""
-    if today is None:
-        today = datetime.now()
-    cutoff = today + timedelta(days=roll_days)
-    for year in range(today.year, today.year + 2):
-        for month in (3, 6, 9, 12):
-            if _get_third_friday(year, month) >= cutoff:
-                return f"{year}{month:02d}"
-    raise RuntimeError("Could not determine quarterly contract month")
-
-def get_gold_contract_month(today=None, roll_days=5):
-    """Return YYYYMM for the active Micro Gold front-month contract.
-    MGC on COMEX only has contracts in Feb/Apr/Jun/Aug/Oct/Dec."""
-    if today is None:
-        today = datetime.now()
-    cutoff = today + timedelta(days=roll_days)
-    gold_months = (2, 4, 6, 8, 10, 12)
-    for year in range(today.year, today.year + 2):
-        for month in gold_months:
-            if _get_third_to_last_business_day(year, month) >= cutoff:
-                return f"{year}{month:02d}"
-    raise RuntimeError("Could not determine gold contract month")
-
-# Contract Specifications and Multipliers
-_quarterly_month = get_quarterly_contract_month()
-_gold_month = get_gold_contract_month()
-logger.info(f"Active quarterly contract month: {_quarterly_month}")
-logger.info(f"Active gold contract month:      {_gold_month}")
-
-contract_specs = {
-    'ES': {'multiplier': 5,    'contract_month': _quarterly_month},  # MES
-    'YM': {'multiplier': 0.50, 'contract_month': _quarterly_month},  # MYM
-    'GC': {'multiplier': 10,   'contract_month': _gold_month},       # MGC
-    'NQ': {'multiplier': 2,    'contract_month': _quarterly_month},  # MNQ
-}
-
-# Extract individual multipliers for backward compatibility
-multiplier_es = contract_specs['ES']['multiplier']
-multiplier_ym = contract_specs['YM']['multiplier'] 
-multiplier_gc = contract_specs['GC']['multiplier']
-multiplier_nq = contract_specs['NQ']['multiplier']
-
-# IBS entry/exit thresholds (common for all IBS instruments)
-ibs_entry_threshold = 0.1       # Enter when IBS < 0.1
-ibs_exit_threshold  = 0.9       # Exit when IBS > 0.9
-
-# Williams %R strategy parameters (applied to all instruments)
-williams_period = 2             # 2-day lookback
-wr_buy_threshold  = -90
-wr_sell_threshold = -30
-
-# -------------------------------
-# Dynamic Position Sizing Functions
-# -------------------------------
-def calculate_position_size(current_equity, target_allocation_pct, price, multiplier, min_contracts=1):
-    """
-    Calculate number of contracts based on current equity and target allocation.
-    
-    Args:
-        current_equity: Current account equity
-        target_allocation_pct: Target percentage allocation (0.0 to 1.0)
-        price: Current price of the instrument
-        multiplier: Contract multiplier
-        min_contracts: Minimum number of contracts (default 1)
-    
-    Returns:
-        Number of contracts to trade
-    """
-    target_dollar_amount = current_equity * target_allocation_pct * risk_multiplier
-    contract_value = price * multiplier
-    
-    if contract_value <= 0:
-        return min_contracts
-    
-    calculated_contracts = target_dollar_amount / contract_value
-    
-    # Round to nearest integer, minimum specified contracts
-    contracts = max(min_contracts, round(calculated_contracts))
-    
-    return int(contracts)
-
-def check_rebalancing_needed(current_allocations, target_allocations, threshold=0.05):
-    """
-    Check if rebalancing is needed based on allocation drift.
-    
-    Args:
-        current_allocations: Dict of current allocations by strategy
-        target_allocations: Dict of target allocations by strategy  
-        threshold: Drift threshold (default 5%)
-    
-    Returns:
-        Boolean indicating if rebalancing is needed
-    """
-    for strategy in target_allocations:
-        current_pct = current_allocations.get(strategy, 0)
-        target_pct = target_allocations[strategy]
-        drift = abs(current_pct - target_pct)
-        
-        if drift > threshold:
-            return True
-    
-    return False
-
-# -------------------------------
-# IBKR Data Fetching Functions
-# -------------------------------
-def fetch_daily_data(ib, contract, start_date_str, end_date_str):
-    """
-    Fetch daily OHLC data from IBKR for a given contract and date range.
-    """
-    try:
-        # Calculate duration
-        start_dt = pd.to_datetime(start_date_str)
-        end_dt = pd.to_datetime(end_date_str)
-        duration_days = (end_dt - start_dt).days + 1
-        if duration_days > 365:
-            duration_years = -(-duration_days // 365)  # ceiling division
-            duration_str = f"{duration_years} Y"
-        else:
-            duration_str = f"{duration_days} D"
-
-        # Format end date for IBKR API
-        end_datetime_str = end_dt.strftime("%Y%m%d 23:59:59")
-        
-        logger.info(f"Fetching daily data for {contract.localSymbol} from {start_date_str} to {end_date_str}")
-        
-        bars = ib.reqHistoricalData(
-            contract,
-            endDateTime=end_datetime_str,
-            durationStr=duration_str,
-            barSizeSetting='1 day',
-            whatToShow='TRADES',
-            useRTH=True,  # Regular trading hours only
-            formatDate=1
-        )
-        
-        if not bars:
-            logger.warning(f"No data returned for {contract.localSymbol}")
-            return pd.DataFrame()
-        
-        # Convert to DataFrame
-        df = util.df(bars)
-        
-        # Rename columns to match expected format
-        df = df.rename(columns={
-            'date': 'Time',
-            'open': 'Open', 
-            'high': 'High',
-            'low': 'Low',
-            'close': 'Last'
-        })
-        
-        # Ensure Time column is datetime
-        df['Time'] = pd.to_datetime(df['Time'])
-        
-        # Filter to exact date range
-        df = df[(df['Time'] >= start_date_str) & (df['Time'] <= end_date_str)].reset_index(drop=True)
-        
-        logger.info(f"Retrieved {len(df)} daily bars for {contract.localSymbol}")
-        tm.sleep(1)  # Rate limiting
-        
-        return df
-        
-    except Exception as e:
-        logger.error(f"Error fetching data for {contract.localSymbol}: {e}")
-        return pd.DataFrame()
-
-# -------------------------------
-# PART 1: Original Backtest with Local Data
-# -------------------------------
-logger.info("="*60)
-logger.info("PART 1: Running original backtest with local data...")
-logger.info("="*60)
-
-# Load original local data files
-def load_local_data(file_path, start_date, end_date):
-    """Load and filter local CSV data"""
-    try:
-        data = pd.read_csv(file_path, parse_dates=['Time'])
-        data.sort_values('Time', inplace=True)
-        data = data[(data['Time'] >= start_date) & (data['Time'] <= end_date)].reset_index(drop=True)
-        return data
-    except Exception as e:
-        logger.error(f"Error loading {file_path}: {e}")
-        return pd.DataFrame()
-
-# Local data file paths
-local_files = {
-    'ES': "Data/mes_daily_data.csv",
-    'YM': "Data/mym_daily_data.csv", 
-    'GC': "Data/mgc_daily_data.csv",
-    'NQ': "Data/mnq_daily_data.csv"
-}
-
-# Load all local datasets
-logger.info("Loading local data files...")
-local_data = {}
-for symbol, file_path in local_files.items():
-    local_data[symbol] = load_local_data(file_path, original_start_date, original_end_date)
-    if not local_data[symbol].empty:
-        logger.info(f"Loaded {len(local_data[symbol])} bars for {symbol}")
-    else:
-        logger.warning(f"No data loaded for {symbol}")
-
-# Check if we have ES data (required)
-if local_data['ES'].empty:
-    logger.error("No local ES data - cannot proceed")
-    exit(1)
-
-# Run original backtest for each strategy with dynamic allocation
-def run_original_backtest():
-    """Run the original backtest with local data using dynamic allocation"""
-    
-    # Track total portfolio equity and individual strategy allocations
-    total_equity = initial_capital
-    strategy_values = {}
-    last_rebalance_day = 0
-    
-    # Initialize strategy capital allocations
-    for strategy in allocation_percentages:
-        strategy_values[strategy] = {
-            'capital': total_equity * allocation_percentages[strategy],
-            'in_position': False,
-            'position': None,
-            'equity_curve': []
-        }
-    
-    # Get longest data series for iteration
-    max_rows = max(len(local_data[symbol]) for symbol in ['ES', 'YM', 'GC', 'NQ'] if not local_data[symbol].empty)
-    
-    # Main backtest loop
-    for day_idx in range(max_rows):
-        current_date = None
-        daily_total_equity = 0
-        
-        # Process each IBS strategy
-        for symbol in ['ES', 'YM', 'GC', 'NQ']:
-            strategy_key = f'IBS_{symbol}'
-            
-            if local_data[symbol].empty or day_idx >= len(local_data[symbol]):
-                # No data available - just track capital
-                strategy_values[strategy_key]['equity_curve'].append((current_date, strategy_values[strategy_key]['capital']))
-                daily_total_equity += strategy_values[strategy_key]['capital']
-                continue
-            
-            row = local_data[symbol].iloc[day_idx]
-            current_date = row['Time']
-            current_price = row['Last']
-            
-            # Calculate IBS with safety check for zero range
-            range_val = row['High'] - row['Low']
-            if range_val == 0:
-                ibs = 0.5  # Neutral IBS when no range
-            else:
-                ibs = (row['Last'] - row['Low']) / range_val
-            
-            multiplier = contract_specs[symbol]['multiplier']
-            strategy_data = strategy_values[strategy_key]
-            
-            # Calculate current position size based on allocation
-            current_contracts = calculate_position_size(
-                total_equity, 
-                allocation_percentages[strategy_key], 
-                current_price, 
-                multiplier
-            )
-            
-            # Execute trading logic
-            if strategy_data['in_position']:
-                if ibs > ibs_exit_threshold:
-                    # Exit position
-                    exit_price = current_price
-                    profit = (exit_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
-                    strategy_data['capital'] += profit
-                    strategy_data['in_position'] = False
-                    strategy_data['position'] = None
-            else:
-                if ibs < ibs_entry_threshold:
-                    # Enter position
-                    entry_price = current_price
-                    strategy_data['in_position'] = True
-                    strategy_data['capital'] -= commission_per_order * current_contracts
-                    strategy_data['position'] = {
-                        'entry_price': entry_price, 
-                        'entry_time': current_date,
-                        'contracts': current_contracts
-                    }
-            
-            # Calculate current equity (including unrealized P&L)
-            if strategy_data['in_position']:
-                unrealized = (current_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts']
-                equity = strategy_data['capital'] + unrealized
-            else:
-                equity = strategy_data['capital']
-                
-            strategy_data['equity_curve'].append((current_date, equity))
-            daily_total_equity += equity
-        
-        # Process Williams strategies for all instruments
-        for symbol in ['ES', 'YM', 'GC', 'NQ']:
-            strategy_key = f'Williams_{symbol}'
-            
-            if not local_data[symbol].empty and day_idx >= 1 and day_idx < len(local_data[symbol]):
-                # Need at least 2 days for Williams %R calculation
-                symbol_data = local_data[symbol].iloc[max(0, day_idx-williams_period+1):day_idx+1]
-                
-                if len(symbol_data) >= williams_period:
-                    current_row = symbol_data.iloc[-1]
-                    current_date = current_row['Time']
-                    current_price = current_row['Last']
-                    
-                    # Calculate Williams %R
-                    highest_high = symbol_data['High'].max()
-                    lowest_low = symbol_data['Low'].min()
-                    range_val = highest_high - lowest_low
-                    if range_val == 0:
-                        williams_r = -50  # Neutral Williams %R when no range
-                    else:
-                        williams_r = -100 * (highest_high - current_price) / range_val
-                    
-                    strategy_data = strategy_values[strategy_key]
-                    multiplier = contract_specs[symbol]['multiplier']
-                    
-                    # Calculate current position size
-                    current_contracts = calculate_position_size(
-                        total_equity, 
-                        allocation_percentages[strategy_key], 
-                        current_price, 
-                        multiplier
-                    )
-                    
-                    # Execute Williams trading logic
-                    if strategy_data['in_position']:
-                        if day_idx > 0:
-                            yesterdays_high = local_data[symbol].iloc[day_idx-1]['High']
-                            if (current_price > yesterdays_high) or (williams_r > wr_sell_threshold):
-                                # Exit position
-                                exit_price = current_price
-                                profit = (exit_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
-                                strategy_data['capital'] += profit
-                                strategy_data['in_position'] = False
-                                strategy_data['position'] = None
-                    else:
-                        if williams_r < wr_buy_threshold:
-                            # Enter position
-                            entry_price = current_price
-                            strategy_data['in_position'] = True
-                            strategy_data['capital'] -= commission_per_order * current_contracts
-                            strategy_data['position'] = {
-                                'entry_price': entry_price, 
-                                'entry_time': current_date,
-                                'contracts': current_contracts
-                            }
-                    
-                    # Calculate current equity
-                    if strategy_data['in_position']:
-                        unrealized = (current_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts']
-                        equity = strategy_data['capital'] + unrealized
-                    else:
-                        equity = strategy_data['capital']
-                        
-                    strategy_data['equity_curve'].append((current_date, equity))
-                    daily_total_equity += equity
-        
-        # Update total equity for next day's position sizing
-        if current_date is not None:
-            total_equity = daily_total_equity
-            
-            # Check for rebalancing (every 30 days)
-            if day_idx - last_rebalance_day >= rebalance_frequency_days:
-                logger.info(f"Rebalancing on {current_date} (Day {day_idx})")
-                last_rebalance_day = day_idx
-    
-    # Close any remaining positions and prepare results
-    results = {}
-    for strategy_key in allocation_percentages:
-        strategy_data = strategy_values[strategy_key]
-        
-        # Close final positions if they exist
-        if strategy_data['in_position'] and strategy_data['equity_curve']:
-            if strategy_key.startswith('IBS_'):
-                symbol = strategy_key.split('_')[1]
-                if not local_data[symbol].empty:
-                    final_row = local_data[symbol].iloc[-1]
-                    final_price = final_row['Last']
-                    multiplier = contract_specs[symbol]['multiplier']
-                    
-                    profit = (final_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
-                    strategy_data['capital'] += profit
-                    strategy_data['equity_curve'][-1] = (final_row['Time'], strategy_data['capital'])
-            
-            elif strategy_key.startswith('Williams_'):
-                symbol = strategy_key.split('_')[1]
-                if not local_data[symbol].empty:
-                    final_row = local_data[symbol].iloc[-1]
-                    final_price = final_row['Last']
-                    multiplier = contract_specs[symbol]['multiplier']
-                    
-                    profit = (final_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
-                    strategy_data['capital'] += profit
-                    strategy_data['equity_curve'][-1] = (final_row['Time'], strategy_data['capital'])
-        
-        results[strategy_key] = {
-            'equity_curve': strategy_data['equity_curve'],
-            'final_capital': strategy_data['capital']
-        }
-    
-    return results
-    
+STRATEGIES = [('IBS_ES', 'ES'), ('IBS_NQ', 'NQ'), ('IBS_GC', 'GC')]
+N_STRATS   = len(STRATEGIES)
+ALLOC      = 1.0 / N_STRATS
 
 
-# Run original backtest
-original_results = run_original_backtest()
+# ── Data loading ───────────────────────────────────────────────────────────────
 
-# Extract final capital values for each strategy
-final_capitals = {}
-for strategy in ['IBS_ES', 'IBS_YM', 'IBS_GC', 'IBS_NQ', 'Williams_ES', 'Williams_YM', 'Williams_GC', 'Williams_NQ']:
-    final_capitals[strategy] = original_results[strategy]['final_capital']
-
-logger.info("Original backtest completed!")
-logger.info("Final capital values:")
-for strategy, capital in final_capitals.items():
-    logger.info(f"  {strategy}: ${capital:,.2f}")
-
-# -------------------------------
-# PART 2: Continue with IBKR Data
-# -------------------------------
-logger.info("="*60)
-logger.info("PART 2: Continuing with IBKR data...")
-logger.info("="*60)
-
-# Connect to IBKR
-logger.info("Connecting to IBKR...")
-ib = IB()
-try:
-    ib.connect(IB_HOST, IB_PORT, clientId=CLIENT_ID)
-    logger.info("Connected to IBKR successfully")
-except Exception as e:
-    logger.error(f"Failed to connect to IBKR: {e}")
-    exit(1)
-
-# -------------------------------
-# Define IBKR Contracts
-# -------------------------------
-try:
-    # Define futures contracts for each instrument
-    es_contract = Future(symbol='MES', lastTradeDateOrContractMonth=contract_specs['ES']['contract_month'], exchange='CME', currency='USD')
-    ym_contract = Future(symbol='MYM', lastTradeDateOrContractMonth=contract_specs['YM']['contract_month'], exchange='CBOT', currency='USD') 
-    gc_contract = Future(symbol='MGC', lastTradeDateOrContractMonth=contract_specs['GC']['contract_month'], exchange='COMEX', currency='USD')
-    nq_contract = Future(symbol='MNQ', lastTradeDateOrContractMonth=contract_specs['NQ']['contract_month'], exchange='CME', currency='USD')
-    
-    # Qualify all contracts
-    contracts_to_qualify = [es_contract, ym_contract, gc_contract, nq_contract]
-    qualified_contracts = ib.qualifyContracts(*contracts_to_qualify)
-    
-    if len(qualified_contracts) != 4:
-        logger.error(f"Only {len(qualified_contracts)} out of 4 contracts qualified")
-        ib.disconnect()
-        exit(1)
-    
-    es_contract, ym_contract, gc_contract, nq_contract = qualified_contracts
-    logger.info("All contracts qualified successfully")
-    
-except Exception as e:
-    logger.error(f"Error defining/qualifying contracts: {e}")
-    ib.disconnect()
-    exit(1)
-
-# -------------------------------
-# Fetch Historical Data
-# -------------------------------
-logger.info("Fetching historical data for all instruments...")
-
-# Fetch data for ES (used for benchmark, IBS ES, and Williams strategies)
-data_es = fetch_daily_data(ib, es_contract, ibkr_start_date, ibkr_end_date)
-if data_es.empty:
-    logger.error("No IBKR data for ES - cannot proceed")
-    ib.disconnect()
-    exit(1)
-
-# Calculate benchmark performance (for IBKR period only)
-benchmark_initial_close = data_es['Last'].iloc[0]
-benchmark_final_close = data_es['Last'].iloc[-1]
-benchmark_return = ((benchmark_final_close / benchmark_initial_close) - 1) * 100
-
-benchmark_years = (data_es['Time'].iloc[-1] - data_es['Time'].iloc[0]).days / 365.25
-benchmark_annualized_return = ((benchmark_final_close / benchmark_initial_close) ** (1 / benchmark_years) - 1) * 100
-
-# Fetch data for other IBS instruments
-data_ym = fetch_daily_data(ib, ym_contract, ibkr_start_date, ibkr_end_date)
-data_gc = fetch_daily_data(ib, gc_contract, ibkr_start_date, ibkr_end_date)
-data_nq = fetch_daily_data(ib, nq_contract, ibkr_start_date, ibkr_end_date)
-
-# Check if we have data for all instruments
-datasets = [
-    (data_es, "ES"), (data_ym, "YM"), (data_gc, "GC"), 
-    (data_nq, "NQ")
-]
-
-for data, name in datasets:
-    if data.empty:
-        logger.warning(f"No data available for {name}")
-
-# Disconnect from IBKR as we have all the data we need
-ib.disconnect()
-logger.info("Disconnected from IBKR")
-
-# -------------------------------
-# Prepare IBS Data for Each Instrument
-# -------------------------------
-logger.info("Calculating IBS for all instruments...")
-
-# IBS for ES
-data_ibs_es = data_es.copy()
-data_ibs_es['IBS'] = (data_ibs_es['Last'] - data_ibs_es['Low']) / (data_ibs_es['High'] - data_ibs_es['Low'])
-
-# IBS for YM
-data_ibs_ym = data_ym.copy()
-if not data_ibs_ym.empty:
-    data_ibs_ym['IBS'] = (data_ibs_ym['Last'] - data_ibs_ym['Low']) / (data_ibs_ym['High'] - data_ibs_ym['Low'])
-
-# IBS for GC
-data_ibs_gc = data_gc.copy()
-if not data_ibs_gc.empty:
-    data_ibs_gc['IBS'] = (data_ibs_gc['Last'] - data_ibs_gc['Low']) / (data_ibs_gc['High'] - data_ibs_gc['Low'])
-
-# IBS for NQ
-data_ibs_nq = data_nq.copy()
-if not data_ibs_nq.empty:
-    data_ibs_nq['IBS'] = (data_ibs_nq['Last'] - data_ibs_nq['Low']) / (data_ibs_nq['High'] - data_ibs_nq['Low'])
-
-# -------------------------------
-# Prepare Williams Data (ES only)
-# -------------------------------
-data_williams = data_es.copy()
-data_williams['HighestHigh'] = data_williams['High'].rolling(window=williams_period).max()
-data_williams['LowestLow'] = data_williams['Low'].rolling(window=williams_period).min()
-data_williams.dropna(subset=['HighestHigh', 'LowestLow'], inplace=True)
-data_williams.reset_index(drop=True, inplace=True)
-data_williams['WilliamsR'] = -100 * (data_williams['HighestHigh'] - data_williams['Last']) / (data_williams['HighestHigh'] - data_williams['LowestLow'])
-
-# -------------------------------
-# IBKR Backtest with Dynamic Allocation
-# -------------------------------
-logger.info("Running IBKR backtest with dynamic allocation...")
-
-# Initialize IBKR strategy tracking
-ibkr_data_map = {
-    'IBS_ES': data_es,
-    'IBS_YM': data_ym, 
-    'IBS_GC': data_gc,
-    'IBS_NQ': data_nq
-}
-
-symbol_map = {
-    'IBS_ES': 'ES',
-    'IBS_YM': 'YM', 
-    'IBS_GC': 'GC',
-    'IBS_NQ': 'NQ'
-}
-
-# Start with ending capitals from original backtest
-ibkr_strategy_values = {}
-for strategy in allocation_percentages:
-    ibkr_strategy_values[strategy] = {
-        'capital': final_capitals[strategy],
-        'in_position': False,
-        'position': None,
-        'equity_curve': []
-    }
-
-# Calculate total starting equity for IBKR period
-total_ibkr_equity = sum(final_capitals.values())
-
-# Get maximum rows for IBKR data
-max_ibkr_rows = len(data_es) if not data_es.empty else 0
-
-# Main IBKR backtest loop
-for day_idx in range(max_ibkr_rows):
-    current_date = None
-    daily_total_equity = 0
-    
-    # Process IBS strategies
-    for strategy_key in ['IBS_ES', 'IBS_YM', 'IBS_GC', 'IBS_NQ']:
-        symbol = symbol_map[strategy_key]
-        data = ibkr_data_map[strategy_key]
-        
-        if data.empty or day_idx >= len(data):
-            # No data - just track capital
-            ibkr_strategy_values[strategy_key]['equity_curve'].append((current_date, ibkr_strategy_values[strategy_key]['capital']))
-            daily_total_equity += ibkr_strategy_values[strategy_key]['capital']
+def load_local_data():
+    data = {}
+    for symbol, spec in CONTRACT_SPECS.items():
+        lines = []
+        with open(spec['file'], 'r') as fh:
+            for line in fh:
+                s = line.strip()
+                if not s or s.startswith('"'):
+                    continue
+                lines.append(s)
+        if len(lines) < 2:
+            logger.warning(f"No data in {spec['file']}")
             continue
-        
-        row = data.iloc[day_idx]
-        current_date = row['Time']
-        current_price = row['Last']
-        
-        # Calculate IBS with safety check for zero range
-        range_val = row['High'] - row['Low']
-        if range_val == 0:
-            ibs = 0.5  # Neutral IBS when no range
-        else:
-            ibs = (row['Last'] - row['Low']) / range_val
-        
-        multiplier = contract_specs[symbol]['multiplier']
-        strategy_data = ibkr_strategy_values[strategy_key]
-        
-        # Calculate current position size based on total equity
-        current_contracts = calculate_position_size(
-            total_ibkr_equity, 
-            allocation_percentages[strategy_key], 
-            current_price, 
-            multiplier
-        )
-        
-        # Execute IBS trading logic
-        if strategy_data['in_position']:
-            if ibs > ibs_exit_threshold:
-                # Exit position
-                exit_price = current_price
-                profit = (exit_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
-                strategy_data['capital'] += profit
-                strategy_data['in_position'] = False
-                strategy_data['position'] = None
-        else:
-            if ibs < ibs_entry_threshold:
-                # Enter position
-                entry_price = current_price
-                strategy_data['in_position'] = True
-                strategy_data['capital'] -= commission_per_order * current_contracts
-                strategy_data['position'] = {
-                    'entry_price': entry_price, 
-                    'entry_time': current_date,
-                    'contracts': current_contracts
-                }
-        
-        # Calculate current equity
-        if strategy_data['in_position']:
-            unrealized = (current_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts']
-            equity = strategy_data['capital'] + unrealized
-        else:
-            equity = strategy_data['capital']
-            
-        strategy_data['equity_curve'].append((current_date, equity))
-        daily_total_equity += equity
-    
-    # Process Williams strategies for all instruments
-    ibkr_williams_data = {
-        'Williams_ES': data_es,
-        'Williams_YM': data_ym,
-        'Williams_GC': data_gc,
-        'Williams_NQ': data_nq
+        df = pd.read_csv(StringIO('\n'.join(lines)), parse_dates=['Time'])
+        df.sort_values('Time', inplace=True)
+        df = df[(df['Time'] >= LOCAL_START) & (df['Time'] <= LOCAL_END)]
+        df = df.dropna(subset=['High', 'Low', 'Last']).reset_index(drop=True)
+        if not df.empty:
+            data[symbol] = df.set_index('Time')
+            logger.info(f"Loaded {len(data[symbol])} local bars for {symbol}")
+    return data
+
+
+def fetch_ibkr_data(ib):
+    """Fetch OOS data via IBKR continuous futures (ADJUSTED_LAST)."""
+    oos_data = {}
+    end_dt_str = datetime.strptime(OOS_END, '%Y-%m-%d').strftime('%Y%m%d 23:59:59')
+    start_dt      = datetime.strptime(OOS_START, '%Y-%m-%d')
+    duration_days = (datetime.strptime(OOS_END, '%Y-%m-%d') - start_dt).days + 5
+    # IBKR requires year format for requests > 365 days
+    if duration_days > 365:
+        duration_years = -(-duration_days // 365)  # ceiling division
+        duration_str = f"{duration_years} Y"
+    else:
+        duration_str = f"{duration_days} D"
+
+    for symbol, spec in CONTRACT_SPECS.items():
+        try:
+            contract = ContFuture(
+                symbol=spec['ibkr_symbol'],
+                exchange=spec['exchange'],
+                currency='USD',
+            )
+            qualified = ib.qualifyContracts(contract)
+            if not qualified:
+                logger.warning(f"Could not qualify continuous contract for {symbol}")
+                continue
+            contract = qualified[0]
+
+            bars = ib.reqHistoricalData(
+                contract,
+                endDateTime='',          # empty = up to now (required for ContFuture)
+                durationStr=duration_str,
+                barSizeSetting='1 day',
+                whatToShow='ADJUSTED_LAST',
+                useRTH=True,
+                formatDate=1,
+                keepUpToDate=False,
+            )
+            if not bars:
+                logger.warning(f"No IBKR bars returned for {symbol}")
+                continue
+
+            df = util.df(bars).rename(columns={
+                'date': 'Time', 'open': 'Open',
+                'high': 'High', 'low': 'Low', 'close': 'Last',
+            })
+            df['Time'] = pd.to_datetime(df['Time'])
+            df = df[(df['Time'] >= OOS_START) & (df['Time'] <= OOS_END)]
+            df = df.dropna(subset=['High', 'Low', 'Last']).reset_index(drop=True)
+            if not df.empty:
+                oos_data[symbol] = df.set_index('Time')
+                logger.info(f"Fetched {len(oos_data[symbol])} IBKR bars for {symbol}")
+        except Exception as e:
+            logger.error(f"Error fetching IBKR data for {symbol}: {e}")
+
+    return oos_data
+
+
+# ── Indicator & sizing ─────────────────────────────────────────────────────────
+
+def precompute_ibs(instrument_data):
+    indicators = {}
+    for symbol, df in instrument_data.items():
+        ind = df[['High', 'Low', 'Last']].copy()
+        bar_range = ind['High'] - ind['Low']
+        ind['IBS'] = np.where(bar_range > 0,
+                              (ind['Last'] - ind['Low']) / bar_range,
+                              0.5)
+        indicators[symbol] = ind
+    return indicators
+
+
+def position_size(total_equity, price, multiplier):
+    contract_value = price * multiplier
+    if contract_value <= 0:
+        return 1
+    return max(1, round(total_equity * ALLOC / contract_value))
+
+
+# ── Backtest engine ────────────────────────────────────────────────────────────
+
+def run_backtest(instrument_data, indicators):
+    """Date-aligned IBS backtest — identical logic to aggregate_port.py."""
+    all_dates = sorted(set().union(*[set(df.index) for df in instrument_data.values()]))
+
+    state = {
+        name: {
+            'capital':      INITIAL_CAPITAL * ALLOC,
+            'in_position':  False,
+            'position':     None,
+            'equity_curve': [],
+        }
+        for name, _ in STRATEGIES
     }
-    
-    for strategy_key in ['Williams_ES', 'Williams_YM', 'Williams_GC', 'Williams_NQ']:
-        symbol = strategy_key.split('_')[1]
-        data = ibkr_williams_data[strategy_key]
-        
-        if not data.empty and day_idx >= 1:
-            # Need at least 2 days for Williams %R calculation
-            window = data.iloc[max(0, day_idx-williams_period+1):day_idx+1]
-            
-            if len(window) >= williams_period:
-                current_row = window.iloc[-1]
-                current_date = current_row['Time']
-                current_price = current_row['Last']
-                
-                # Calculate Williams %R with safety check
-                highest_high = window['High'].max()
-                lowest_low = window['Low'].min()
-                range_val = highest_high - lowest_low
-                if range_val == 0:
-                    williams_r = -50  # Neutral Williams %R when no range
-                else:
-                    williams_r = -100 * (highest_high - current_price) / range_val
-                
-                strategy_data = ibkr_strategy_values[strategy_key]
-                multiplier = contract_specs[symbol]['multiplier']
-                
-                # Calculate current position size
-                current_contracts = calculate_position_size(
-                    total_ibkr_equity, 
-                    allocation_percentages[strategy_key], 
-                    current_price, 
-                    multiplier
-                )
-                
-                # Execute Williams trading logic
-                if strategy_data['in_position']:
-                    if day_idx > 0:
-                        yesterdays_high = data.iloc[day_idx-1]['High']
-                        if (current_price > yesterdays_high) or (williams_r > wr_sell_threshold):
-                            # Exit position
-                            exit_price = current_price
-                            profit = (exit_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
-                            strategy_data['capital'] += profit
-                            strategy_data['in_position'] = False
-                            strategy_data['position'] = None
-                else:
-                    if williams_r < wr_buy_threshold:
-                        # Enter position
-                        entry_price = current_price
-                        strategy_data['in_position'] = True
-                        strategy_data['capital'] -= commission_per_order * current_contracts
-                        strategy_data['position'] = {
-                            'entry_price': entry_price, 
-                            'entry_time': current_date,
-                            'contracts': current_contracts
-                        }
-                
-                # Calculate current equity
-                if strategy_data['in_position']:
-                    unrealized = (current_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts']
-                    equity = strategy_data['capital'] + unrealized
-                else:
-                    equity = strategy_data['capital']
-                    
-                strategy_data['equity_curve'].append((current_date, equity))
-                daily_total_equity += equity
-    
-    # Update total equity for next day
-    if current_date is not None:
-        total_ibkr_equity = daily_total_equity
+    total_equity = INITIAL_CAPITAL
 
-# Close any remaining positions
-for strategy_key in allocation_percentages:
-    strategy_data = ibkr_strategy_values[strategy_key]
-    
-    if strategy_data['in_position'] and strategy_data['equity_curve']:
-        if strategy_key.startswith('IBS_'):
-            symbol = symbol_map[strategy_key]
-            data = ibkr_data_map[strategy_key]
-            if not data.empty:
-                final_row = data.iloc[-1]
-                final_price = final_row['Last']
-                multiplier = contract_specs[symbol]['multiplier']
-                
-                profit = (final_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
-                strategy_data['capital'] += profit
-                strategy_data['equity_curve'][-1] = (final_row['Time'], strategy_data['capital'])
-        
-        elif strategy_key.startswith('Williams_'):
-            symbol = strategy_key.split('_')[1]
-            # Get the appropriate data based on symbol
-            data_map = {
-                'ES': data_es,
-                'YM': data_ym,
-                'GC': data_gc,
-                'NQ': data_nq
-            }
-            data = data_map[symbol]
-            if not data.empty:
-                final_row = data.iloc[-1]
-                final_price = final_row['Last']
-                multiplier = contract_specs[symbol]['multiplier']
-                
-                profit = (final_price - strategy_data['position']['entry_price']) * multiplier * strategy_data['position']['contracts'] - commission_per_order * strategy_data['position']['contracts']
-                strategy_data['capital'] += profit
-                strategy_data['equity_curve'][-1] = (final_row['Time'], strategy_data['capital'])
+    for date in all_dates:
+        daily_eq = 0.0
+        for name, symbol in STRATEGIES:
+            s   = state[name]
+            mul = CONTRACT_SPECS[symbol]['multiplier']
+            ind = indicators.get(symbol)
 
-# Convert to DataFrames for compatibility with existing code
-equity_df_es = pd.DataFrame(ibkr_strategy_values['IBS_ES']['equity_curve'], columns=['Time', 'Equity'])
-equity_df_es.set_index('Time', inplace=True)
+            if ind is None or date not in ind.index:
+                last = s['equity_curve'][-1][1] if s['equity_curve'] else s['capital']
+                s['equity_curve'].append((date, last))
+                daily_eq += last
+                continue
 
-equity_df_ym = pd.DataFrame(ibkr_strategy_values['IBS_YM']['equity_curve'], columns=['Time', 'Equity'])
-equity_df_ym.set_index('Time', inplace=True)
+            row   = ind.loc[date]
+            price = row['Last']
+            ibs   = row['IBS']
 
-equity_df_gc = pd.DataFrame(ibkr_strategy_values['IBS_GC']['equity_curve'], columns=['Time', 'Equity'])
-equity_df_gc.set_index('Time', inplace=True)
+            if s['in_position']:
+                if ibs > IBS_EXIT:
+                    pos = s['position']
+                    pnl = ((price - pos['entry_price']) * mul * pos['contracts']
+                           - COMMISSION_RT * pos['contracts'])
+                    s['capital']    += pnl
+                    s['in_position'] = False
+                    s['position']    = None
+            else:
+                if ibs < IBS_ENTRY:
+                    contracts = position_size(total_equity, price, mul)
+                    s['capital']    -= (COMMISSION_RT / 2) * contracts
+                    s['in_position'] = True
+                    s['position']    = {'entry_price': price, 'entry_date': date,
+                                        'contracts': contracts}
 
-equity_df_nq = pd.DataFrame(ibkr_strategy_values['IBS_NQ']['equity_curve'], columns=['Time', 'Equity'])
-equity_df_nq.set_index('Time', inplace=True)
+            if s['in_position']:
+                pos    = s['position']
+                equity = s['capital'] + (price - pos['entry_price']) * mul * pos['contracts']
+            else:
+                equity = s['capital']
 
-# Williams strategy DataFrames
-equity_df_w_es = pd.DataFrame(ibkr_strategy_values['Williams_ES']['equity_curve'], columns=['Time', 'Equity'])
-equity_df_w_es.set_index('Time', inplace=True)
+            s['equity_curve'].append((date, equity))
+            daily_eq += equity
 
-equity_df_w_ym = pd.DataFrame(ibkr_strategy_values['Williams_YM']['equity_curve'], columns=['Time', 'Equity'])
-equity_df_w_ym.set_index('Time', inplace=True)
+        total_equity = daily_eq
 
-equity_df_w_gc = pd.DataFrame(ibkr_strategy_values['Williams_GC']['equity_curve'], columns=['Time', 'Equity'])
-equity_df_w_gc.set_index('Time', inplace=True)
+    # Force-close open positions
+    for name, symbol in STRATEGIES:
+        s  = state[name]
+        df = instrument_data.get(symbol)
+        if s['in_position'] and df is not None and not df.empty:
+            last_price = df.iloc[-1]['Last']
+            mul        = CONTRACT_SPECS[symbol]['multiplier']
+            pos        = s['position']
+            pnl        = ((last_price - pos['entry_price']) * mul * pos['contracts']
+                          - (COMMISSION_RT / 2) * pos['contracts'])
+            s['capital'] += pnl
+            if s['equity_curve']:
+                s['equity_curve'][-1] = (s['equity_curve'][-1][0], s['capital'])
+            s['in_position'] = False
 
-equity_df_w_nq = pd.DataFrame(ibkr_strategy_values['Williams_NQ']['equity_curve'], columns=['Time', 'Equity'])
-equity_df_w_nq.set_index('Time', inplace=True)
+    return state
 
-# -------------------------------
-# Combine Original and IBKR Equity Curves
-# -------------------------------
-logger.info("Combining original and IBKR equity curves...")
 
-# Convert original results to DataFrames
-original_equity_dfs = {}
-for strategy in ['IBS_ES', 'IBS_YM', 'IBS_GC', 'IBS_NQ', 'Williams_ES', 'Williams_YM', 'Williams_GC', 'Williams_NQ']:
-    equity_curve = original_results[strategy]['equity_curve']
-    df = pd.DataFrame(equity_curve, columns=['Time', 'Equity'])
-    df.set_index('Time', inplace=True)
-    original_equity_dfs[strategy] = df
+def build_equity_curve(state, start, end):
+    dates = pd.date_range(start=start, end=end, freq='D')
+    series = []
+    for name, _ in STRATEGIES:
+        curve = state[name]['equity_curve']
+        df    = pd.DataFrame(curve, columns=['Time', 'Equity']).set_index('Time')
+        df    = df[~df.index.duplicated(keep='last')].sort_index()
+        df    = df.reindex(dates, method='ffill')
+        series.append(df['Equity'])
+    combined = pd.DataFrame({'Equity': sum(series)}, index=dates)
+    return combined.dropna()
 
-# IBKR equity DataFrames (already created above)
-ibkr_equity_dfs = {
-    'IBS_ES': equity_df_es,
-    'IBS_YM': equity_df_ym, 
-    'IBS_GC': equity_df_gc,
-    'IBS_NQ': equity_df_nq,
-    'Williams_ES': equity_df_w_es,
-    'Williams_YM': equity_df_w_ym,
-    'Williams_GC': equity_df_w_gc,
-    'Williams_NQ': equity_df_w_nq
-}
 
-# Combine original and IBKR periods for each strategy
-combined_equity_dfs = {}
-for strategy in ['IBS_ES', 'IBS_YM', 'IBS_GC', 'IBS_NQ', 'Williams_ES', 'Williams_YM', 'Williams_GC', 'Williams_NQ']:
-    original_df = original_equity_dfs[strategy]
-    ibkr_df = ibkr_equity_dfs[strategy]
-    
-    # Combine the two periods
-    combined_df = pd.concat([original_df, ibkr_df])
-    combined_df = combined_df[~combined_df.index.duplicated(keep='last')]  # Remove duplicate dates
-    combined_df.sort_index(inplace=True)
-    
-    combined_equity_dfs[strategy] = combined_df
+# ── Metrics ────────────────────────────────────────────────────────────────────
 
-# Create overall date range
-full_start_date = original_start_date
-full_end_date = ibkr_end_date
-common_dates = pd.date_range(start=full_start_date, end=full_end_date, freq='D')
+def compute_metrics(equity_df, start_capital):
+    eq   = equity_df['Equity']
+    rets = eq.pct_change().dropna()
+    if rets.empty:
+        return None
 
-# Reindex all combined DataFrames to common date range
-for strategy in combined_equity_dfs:
-    combined_equity_dfs[strategy] = combined_equity_dfs[strategy].reindex(common_dates, method='ffill')
+    final  = eq.iloc[-1]
+    years  = (eq.index[-1] - eq.index[0]).days / 365.25
+    ann_r  = ((final / start_capital) ** (1 / years) - 1) * 100 if years > 0 else np.nan
+    std    = rets.std()
+    sharpe = rets.mean() / std * np.sqrt(252) if std > 0 else np.nan
+    d_std  = rets[rets < 0].std()
+    sortino = rets.mean() / d_std * np.sqrt(252) if d_std > 0 else np.nan
+    peak   = eq.cummax()
+    dd     = (eq - peak) / peak
+    max_dd = dd.min() * 100
+    calmar = ann_r / abs(max_dd) if max_dd != 0 else np.nan
 
-# Calculate combined portfolio equity
-combined_IBS = (combined_equity_dfs['IBS_ES']['Equity'] + 
-                combined_equity_dfs['IBS_YM']['Equity'] +
-                combined_equity_dfs['IBS_GC']['Equity'] + 
-                combined_equity_dfs['IBS_NQ']['Equity'])
-
-combined_Williams = (combined_equity_dfs['Williams_ES']['Equity'] +
-                    combined_equity_dfs['Williams_YM']['Equity'] +
-                    combined_equity_dfs['Williams_GC']['Equity'] +
-                    combined_equity_dfs['Williams_NQ']['Equity'])
-
-combined_equity = combined_IBS + combined_Williams
-combined_equity_df = pd.DataFrame({'Equity': combined_equity}, index=common_dates)
-
-# -------------------------------
-# Calculate Performance Metrics for Each Period
-# -------------------------------
-
-def calculate_performance_metrics(equity_df, start_date_str, end_date_str, initial_capital):
-    """Calculate performance metrics for a given equity curve and period"""
-    if equity_df.empty:
-        return {}
-    
-    start_balance = equity_df['Equity'].iloc[0]
-    final_balance = equity_df['Equity'].iloc[-1]
-    
-    # Use the actual start balance of the period for return calculation
-    # instead of the initial_capital parameter which may be from a different period
-    total_return_pct = ((final_balance / start_balance) - 1) * 100
-    
-    start_dt = pd.to_datetime(start_date_str)
-    end_dt = pd.to_datetime(end_date_str)
-    years = (end_dt - start_dt).days / 365.25
-    annualized_return_pct = ((final_balance / start_balance) ** (1 / years) - 1) * 100 if years > 0 else np.nan
-    
-    returns = equity_df['Equity'].pct_change().dropna()
-    volatility_annual_pct = returns.std() * np.sqrt(252) * 100 if len(returns) > 1 else np.nan
-    
-    peak = equity_df['Equity'].cummax()
-    drawdown = (equity_df['Equity'] - peak) / peak
-    max_drawdown_pct = drawdown.min() * 100
-    max_drawdown_dollar = (peak - equity_df['Equity']).max()
-    
-    sharpe = (returns.mean() / returns.std() * np.sqrt(252)) if returns.std() != 0 else np.nan
-    downside_returns = returns[returns < 0]
-    sortino = (returns.mean() / downside_returns.std() * np.sqrt(252)) if len(downside_returns) > 0 and downside_returns.std() != 0 else np.nan
-    calmar = (annualized_return_pct / abs(max_drawdown_pct)) if max_drawdown_pct != 0 else np.nan
-    
     return {
-        'start_balance': start_balance,
-        'final_balance': final_balance,
-        'total_return_pct': total_return_pct,
-        'annualized_return_pct': annualized_return_pct,
-        'volatility_annual_pct': volatility_annual_pct,
-        'sharpe': sharpe,
-        'sortino': sortino,
-        'calmar': calmar,
-        'max_drawdown_pct': max_drawdown_pct,
-        'max_drawdown_dollar': max_drawdown_dollar,
-        'years': years
+        'Final Balance':     final,
+        'Total Return %':    (final / start_capital - 1) * 100,
+        'Ann. Return %':     ann_r,
+        'Ann. Volatility %': std * np.sqrt(252) * 100,
+        'Sharpe':            sharpe,
+        'Sortino':           sortino,
+        'Calmar':            calmar,
+        'Max Drawdown %':    max_dd,
     }
 
-# Calculate metrics for original period
-logger.info("Calculating performance metrics for original period...")
-original_end_dt = pd.to_datetime(original_end_date)
-original_period_equity = combined_equity_df[combined_equity_df.index <= original_end_dt].copy()
-# Drop NaN values and ensure we have valid data
-original_period_equity = original_period_equity.dropna()
-original_metrics = calculate_performance_metrics(original_period_equity, original_start_date, original_end_date, initial_capital)
 
-# Calculate metrics for IBKR period
-logger.info("Calculating performance metrics for IBKR period...")
-ibkr_start_dt = pd.to_datetime(ibkr_start_date)
-ibkr_period_equity = combined_equity_df[combined_equity_df.index >= ibkr_start_dt].copy()
-# Drop NaN values and ensure we have valid data
-ibkr_period_equity = ibkr_period_equity.dropna()
-# Use the ending capital from original period as the "initial" capital for IBKR period calculation
-ibkr_initial_capital = original_metrics['final_balance']
-ibkr_metrics = calculate_performance_metrics(ibkr_period_equity, ibkr_start_date, ibkr_end_date, ibkr_initial_capital)
+def print_metrics(metrics, label):
+    print(f"\n  {label}")
+    print(f"  {'-'*40}")
+    for k, v in metrics.items():
+        if k == 'Final Balance':
+            print(f"  {k:<26} ${v:>12,.2f}")
+        elif not np.isnan(v):
+            print(f"  {k:<26} {v:>12.2f}")
+        else:
+            print(f"  {k:<26} {'NaN':>12}")
 
-# Calculate metrics for combined period
-logger.info("Calculating performance metrics for combined period...")
-# Drop NaN values and ensure we have valid data
-combined_equity_clean = combined_equity_df.dropna()
-combined_metrics = calculate_performance_metrics(combined_equity_clean, full_start_date, full_end_date, initial_capital)
 
-# -------------------------------
-# Results Output
-# -------------------------------
-def format_metrics(metrics, period_name):
-    """Format metrics into a results dictionary"""
-    return {
-        "Period": period_name,
-        "Start Balance": f"${metrics['start_balance']:,.2f}",
-        "Final Balance": f"${metrics['final_balance']:,.2f}",
-        "Total Return": f"{metrics['total_return_pct']:.2f}%",
-        "Annualized Return": f"{metrics['annualized_return_pct']:.2f}%" if not np.isnan(metrics['annualized_return_pct']) else "NaN",
-        "Volatility (Annual)": f"{metrics['volatility_annual_pct']:.2f}%" if not np.isnan(metrics['volatility_annual_pct']) else "NaN",
-        "Sharpe Ratio": f"{metrics['sharpe']:.2f}" if not np.isnan(metrics['sharpe']) else "NaN",
-        "Sortino Ratio": f"{metrics['sortino']:.2f}" if not np.isnan(metrics['sortino']) else "NaN",
-        "Calmar Ratio": f"{metrics['calmar']:.2f}" if not np.isnan(metrics['calmar']) else "NaN",
-        "Max Drawdown (%)": f"{metrics['max_drawdown_pct']:.2f}%",
-        "Max Drawdown ($)": f"${metrics['max_drawdown_dollar']:.2f}",
-        "Duration (Years)": f"{metrics['years']:.2f}"
-    }
+# ── Main ───────────────────────────────────────────────────────────────────────
 
-# Format results for each period
-original_results = format_metrics(original_metrics, f"{original_start_date} to {original_end_date}")
-ibkr_results = format_metrics(ibkr_metrics, f"{ibkr_start_date} to {ibkr_end_date}")
-combined_results = format_metrics(combined_metrics, f"{full_start_date} to {full_end_date}")
+def main():
+    # ── Part 1: in-sample backtest on local CSV data ───────────────────────────
+    logger.info("Loading local CSV data...")
+    local_data = load_local_data()
+    if not local_data:
+        logger.error("No local data loaded.")
+        return
 
-print("\n" + "="*80)
-print("DYNAMIC ALLOCATION AGGREGATE PORTFOLIO PERFORMANCE")
-print("="*80)
+    logger.info("Running in-sample backtest...")
+    is_indicators = precompute_ibs(local_data)
+    is_state      = run_backtest(local_data, is_indicators)
+    is_equity     = build_equity_curve(is_state, LOCAL_START, LOCAL_END)
 
-print(f"\n📊 ALLOCATION STRATEGY OVERVIEW")
-print("-" * 60)
-print("50/50 IBS/Williams Split with Equal Instrument Weighting:")
+    is_end_capital = sum(is_state[name]['capital'] for name, _ in STRATEGIES)
+    logger.info(f"In-sample final capital: ${is_end_capital:,.2f}")
 
-# Group by strategy type for cleaner display
-ibs_strategies = {k: v for k, v in allocation_percentages.items() if k.startswith('IBS_')}
-williams_strategies = {k: v for k, v in allocation_percentages.items() if k.startswith('Williams_')}
+    # ── Part 2: out-of-sample data from IBKR ──────────────────────────────────
+    logger.info("Connecting to IBKR for out-of-sample data...")
+    ib = IB()
+    try:
+        ib.connect(IB_HOST, IB_PORT, clientId=CLIENT_ID)
+        logger.info("Connected to IBKR.")
+    except Exception as e:
+        logger.error(f"IBKR connection failed: {e}")
+        logger.info("Plotting in-sample results only.")
+        _plot_and_print(is_equity, None, is_end_capital)
+        return
 
-print("  IBS Strategies (50% total):")
-for strategy, pct in sorted(ibs_strategies.items()):
-    print(f"    • {strategy}: {pct*100:.1f}%")
+    oos_data = fetch_ibkr_data(ib)
+    ib.disconnect()
+    logger.info("Disconnected from IBKR.")
 
-print("  Williams Strategies (50% total):")
-for strategy, pct in sorted(williams_strategies.items()):
-    print(f"    • {strategy}: {pct*100:.1f}%")
+    if not oos_data:
+        logger.warning("No OOS data fetched. Plotting in-sample only.")
+        _plot_and_print(is_equity, None, is_end_capital)
+        return
 
-print(f"  • Risk Multiplier: {risk_multiplier}x (LARGER POSITION SIZES)")
-print(f"  • Rebalancing Threshold: {rebalance_threshold*100:.0f}% drift")
-print(f"  • Rebalancing Frequency: Every {rebalance_frequency_days} days")
-print("\nKey Benefits:")
-print("  • Position sizes scale with account equity")
-print("  • Enhanced risk/reward with larger position sizes")
-print("  • 50/50 split between IBS and Williams strategies")
-print("  • Equal weighting across all 4 instruments")
-print("  • No fixed dollar amounts - pure percentage allocation")
-print("  • Enables compound growth across all strategies")
+    # ── Continue backtest on OOS data, starting from in-sample end state ──────
+    logger.info("Running out-of-sample backtest continuation...")
 
-# Print Original Period Performance
-print(f"\n🔵 ORIGINAL PERIOD PERFORMANCE (Historical Data)")
-print("-" * 60)
-for key, value in original_results.items():
-    print(f"{key:25}: {value:>15}")
+    # Carry forward capital and open positions from in-sample state
+    oos_state = {}
+    for name, symbol in STRATEGIES:
+        s = is_state[name]
+        oos_state[name] = {
+            'capital':      s['capital'],
+            'in_position':  s['in_position'],
+            'position':     s['position'].copy() if s['position'] else None,
+            'equity_curve': [],
+        }
 
-# Print IBKR Period Performance
-print(f"\n🔴 IBKR PERIOD PERFORMANCE (Live Data)")
-print("-" * 60)
-for key, value in ibkr_results.items():
-    print(f"{key:25}: {value:>15}")
+    oos_indicators = precompute_ibs(oos_data)
 
-# Print Combined Period Performance
-print(f"\n📊 COMBINED PERIOD PERFORMANCE")
-print("-" * 60)
-for key, value in combined_results.items():
-    print(f"{key:25}: {value:>15}")
+    all_dates    = sorted(set().union(*[set(df.index) for df in oos_data.values()]))
+    total_equity = is_end_capital
 
-print(f"\n" + "="*80)
-print("DATA QUALITY REPORT")
-print("="*80)
-print(f"Original Period ({original_start_date} to {original_end_date}):")
-for symbol in ['ES', 'YM', 'GC', 'NQ']:
-    bars_count = len(local_data[symbol]) if not local_data[symbol].empty else 0
-    print(f"  {symbol} bars: {bars_count}")
+    for date in all_dates:
+        daily_eq = 0.0
+        for name, symbol in STRATEGIES:
+            s   = oos_state[name]
+            mul = CONTRACT_SPECS[symbol]['multiplier']
+            ind = oos_indicators.get(symbol)
 
-print(f"\nIBKR Period ({ibkr_start_date} to {ibkr_end_date}):")
-print(f"  ES bars retrieved: {len(data_es)}")
-print(f"  YM bars retrieved: {len(data_ym) if not data_ym.empty else 0}")
-print(f"  GC bars retrieved: {len(data_gc) if not data_gc.empty else 0}")
-print(f"  NQ bars retrieved: {len(data_nq) if not data_nq.empty else 0}")
+            if ind is None or date not in ind.index:
+                last = s['equity_curve'][-1][1] if s['equity_curve'] else s['capital']
+                s['equity_curve'].append((date, last))
+                daily_eq += last
+                continue
 
-# Performance Comparison
-print(f"\n" + "="*80)
-print("PERFORMANCE COMPARISON")
-print("="*80)
-print(f"{'Metric':<25} {'Original':<15} {'IBKR':<15} {'Combined':<15}")
-print("-" * 75)
+            row   = ind.loc[date]
+            price = row['Last']
+            ibs   = row['IBS']
 
-comparison_metrics = [
-    ('Total Return', 'Total Return'),
-    ('Annualized Return', 'Annualized Return'), 
-    ('Volatility (Annual)', 'Volatility (Annual)'),
-    ('Sharpe Ratio', 'Sharpe Ratio'),
-    ('Max Drawdown (%)', 'Max Drawdown (%)')
-]
+            if s['in_position']:
+                if ibs > IBS_EXIT:
+                    pos = s['position']
+                    pnl = ((price - pos['entry_price']) * mul * pos['contracts']
+                           - COMMISSION_RT * pos['contracts'])
+                    s['capital']    += pnl
+                    s['in_position'] = False
+                    s['position']    = None
+            else:
+                if ibs < IBS_ENTRY:
+                    contracts = position_size(total_equity, price, mul)
+                    s['capital']    -= (COMMISSION_RT / 2) * contracts
+                    s['in_position'] = True
+                    s['position']    = {'entry_price': price, 'entry_date': date,
+                                        'contracts': contracts}
 
-for display_name, key in comparison_metrics:
-    original_val = original_results[key].replace('%', '').replace('$', '').replace(',', '')
-    ibkr_val = ibkr_results[key].replace('%', '').replace('$', '').replace(',', '')
-    combined_val = combined_results[key].replace('%', '').replace('$', '').replace(',', '')
-    print(f"{display_name:<25} {original_results[key]:<15} {ibkr_results[key]:<15} {combined_results[key]:<15}")
+            if s['in_position']:
+                pos    = s['position']
+                equity = s['capital'] + (price - pos['entry_price']) * mul * pos['contracts']
+            else:
+                equity = s['capital']
 
-# -------------------------------
-# Plot the Combined Equity Curve with Different Colors
-# -------------------------------
-plt.figure(figsize=(16, 8))
+            s['equity_curve'].append((date, equity))
+            daily_eq += equity
 
-# Split data into original and IBKR periods for different colors
-original_end = pd.to_datetime(original_end_date)
-ibkr_start = pd.to_datetime(ibkr_start_date)
+        total_equity = daily_eq
 
-# Original period data
-original_mask = combined_equity_df.index <= original_end
-original_equity = combined_equity_df[original_mask]
+    # Force-close OOS open positions
+    for name, symbol in STRATEGIES:
+        s  = oos_state[name]
+        df = oos_data.get(symbol)
+        if s['in_position'] and df is not None and not df.empty:
+            last_price = df.iloc[-1]['Last']
+            mul        = CONTRACT_SPECS[symbol]['multiplier']
+            pos        = s['position']
+            pnl        = ((last_price - pos['entry_price']) * mul * pos['contracts']
+                          - (COMMISSION_RT / 2) * pos['contracts'])
+            s['capital'] += pnl
+            if s['equity_curve']:
+                s['equity_curve'][-1] = (s['equity_curve'][-1][0], s['capital'])
+            s['in_position'] = False
 
-# IBKR period data  
-ibkr_mask = combined_equity_df.index >= ibkr_start
-ibkr_equity = combined_equity_df[ibkr_mask]
+    oos_equity = build_equity_curve(oos_state, OOS_START, OOS_END)
 
-# Plot original period in blue
-plt.plot(original_equity.index, original_equity['Equity'], 
-         label='Historical Data (Local CSV)', linewidth=2, color='steelblue')
+    _plot_and_print(is_equity, oos_equity, is_end_capital)
 
-# Plot IBKR period in red
-plt.plot(ibkr_equity.index, ibkr_equity['Equity'], 
-         label='Live Data (Interactive Brokers)', linewidth=2, color='red')
 
-# Add vertical line at transition
-plt.axvline(x=original_end, color='gray', linestyle='--', alpha=0.7, 
-           label=f'Data Transition ({original_end_date})')
+def _plot_and_print(is_equity, oos_equity, is_end_capital):
+    is_metrics  = compute_metrics(is_equity, INITIAL_CAPITAL)
+    oos_metrics = compute_metrics(oos_equity, is_end_capital) if oos_equity is not None else None
 
-plt.title(f'Enhanced Risk Dynamic Allocation Portfolio ({risk_multiplier}x Risk Multiplier) ({full_start_date} to {full_end_date})\n50/50 IBS/Williams Split: 12.5% Each (ES, YM, GC, NQ for both strategies)')
-plt.xlabel('Date')
-plt.ylabel('Account Balance ($)')
-plt.legend()
-plt.grid(True, alpha=0.3)
-plt.tight_layout()
+    print("\n" + "=" * 60)
+    print(f"IBS PORTFOLIO  |  {N_STRATS} instruments  |  ${INITIAL_CAPITAL:,.0f} capital")
+    print(f"IBS entry < {IBS_ENTRY}  |  IBS exit > {IBS_EXIT}  |  Equal weight")
+    print("=" * 60)
 
-# Add text box with combined metrics
-combined_textstr = f'COMBINED:\nTotal Return: {combined_metrics["total_return_pct"]:.1f}%\nAnnualized: {combined_metrics["annualized_return_pct"]:.1f}%\nSharpe: {combined_metrics["sharpe"]:.2f}\nMax DD: {combined_metrics["max_drawdown_pct"]:.1f}%'
-props_combined = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-plt.text(0.02, 0.98, combined_textstr, transform=plt.gca().transAxes, fontsize=9,
-         verticalalignment='top', bbox=props_combined)
+    if is_metrics:
+        print_metrics(is_metrics, f"IN-SAMPLE  ({LOCAL_START} to {LOCAL_END})")
 
-# Add text box for original period metrics
-original_textstr = f'HISTORICAL:\nReturn: {original_metrics["total_return_pct"]:.1f}%\nAnnualized: {original_metrics["annualized_return_pct"]:.1f}%\nSharpe: {original_metrics["sharpe"]:.2f}'
-props_original = dict(boxstyle='round', facecolor='lightblue', alpha=0.8)
-plt.text(0.02, 0.78, original_textstr, transform=plt.gca().transAxes, fontsize=9,
-         verticalalignment='top', bbox=props_original)
+    if oos_metrics:
+        print_metrics(oos_metrics, f"OUT-OF-SAMPLE  ({OOS_START} to {OOS_END})")
 
-# Add text box for IBKR period metrics
-if not np.isnan(ibkr_metrics["total_return_pct"]):
-    ibkr_textstr = f'LIVE DATA:\nReturn: {ibkr_metrics["total_return_pct"]:.1f}%\nAnnualized: {ibkr_metrics["annualized_return_pct"]:.1f}%\nSharpe: {ibkr_metrics["sharpe"]:.2f}'
-    props_ibkr = dict(boxstyle='round', facecolor='lightcoral', alpha=0.8)
-    plt.text(0.02, 0.58, ibkr_textstr, transform=plt.gca().transAxes, fontsize=9,
-             verticalalignment='top', bbox=props_ibkr)
+        # Combined
+        combined = pd.concat([is_equity, oos_equity])
+        combined = combined[~combined.index.duplicated(keep='last')].sort_index()
+        comb_metrics = compute_metrics(pd.DataFrame({'Equity': combined['Equity']}), INITIAL_CAPITAL)
+        if comb_metrics:
+            print_metrics(comb_metrics, "COMBINED")
 
-# Add separate text box showing transition point capital
-transition_capital = combined_equity_df.loc[original_end, 'Equity']
-transition_textstr = f'Capital at Transition:\n${transition_capital:,.0f}'
-props_transition = dict(boxstyle='round', facecolor='lightcyan', alpha=0.8)
-plt.text(0.02, 0.38, transition_textstr, transform=plt.gca().transAxes, fontsize=9,
-         verticalalignment='top', bbox=props_transition)
+    # ── Plot ───────────────────────────────────────────────────────────────────
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9),
+                                   gridspec_kw={'height_ratios': [3, 1]})
 
-plot_path = "portfolio/aggregate_port_equity_curve.png"
-plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-logger.info(f"Equity curve saved to {plot_path}")
-plt.show()
+    ax1.plot(is_equity.index, is_equity['Equity'],
+             color='steelblue', linewidth=1.5, label='In-sample (local CSV)')
 
-logger.info("Backtest completed successfully!") 
+    if oos_equity is not None and not oos_equity.empty:
+        # Bridge the gap between in-sample end and OOS start
+        bridge = pd.concat([is_equity.iloc[[-1]], oos_equity.iloc[[0]]])
+        ax1.plot(bridge.index, bridge['Equity'], color='crimson', linewidth=1.5)
+        ax1.plot(oos_equity.index, oos_equity['Equity'],
+                 color='crimson', linewidth=1.5, label=f'Out-of-sample (IBKR {OOS_START}→)')
+        ax1.axvline(pd.Timestamp(OOS_START), color='gray', linestyle='--',
+                    linewidth=0.8, label='OOS start')
+
+    ax1.axhline(INITIAL_CAPITAL, color='gray', linestyle=':', linewidth=0.8)
+    ax1.set_ylabel('Portfolio Equity ($)')
+    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))
+    sharpe_str = f"{is_metrics['Sharpe']:.2f}" if is_metrics else 'N/A'
+    ax1.set_title(
+        f'IBS Portfolio  |  {N_STRATS} instruments  |  In-sample Sharpe {sharpe_str}',
+        fontsize=11
+    )
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # Drawdown — combined or just in-sample
+    if oos_equity is not None and not oos_equity.empty:
+        full_eq = pd.concat([is_equity, oos_equity])
+        full_eq = full_eq[~full_eq.index.duplicated(keep='last')].sort_index()
+    else:
+        full_eq = is_equity
+
+    peak = full_eq['Equity'].cummax()
+    dd   = (full_eq['Equity'] - peak) / peak * 100
+    ax2.fill_between(full_eq.index, dd, 0, color='crimson', alpha=0.4)
+    if oos_equity is not None:
+        ax2.axvline(pd.Timestamp(OOS_START), color='gray', linestyle='--', linewidth=0.8)
+    ax2.set_ylabel('Drawdown (%)')
+    ax2.set_xlabel('Date')
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig('portfolio/aggregate_port_ib_equity_curve.png', dpi=150)
+    plt.show()
+    logger.info("Chart saved to portfolio/aggregate_port_ib_equity_curve.png")
+
+
+if __name__ == '__main__':
+    main()
