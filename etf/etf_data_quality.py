@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import glob
+import json
 import os
 
 import numpy as np
@@ -269,6 +270,20 @@ def main():
 
     print(f"\n  PASSED tickers (usable for backtesting):")
     print(f"  {', '.join(passed)}")
+
+    # Save passing ticker list for other scripts to consume
+    universe_path = "Data/etf/etf_universe.json"
+    universe = {
+        "passed": passed,
+        "failed": failed,
+        "min_years": args.min_years,
+        "min_adv_m": args.min_adv,
+        "n_passed": len(passed),
+        "n_failed": len(failed),
+    }
+    with open(universe_path, "w") as f:
+        json.dump(universe, f, indent=2)
+    print(f"\n  Universe saved to {universe_path}")
 
     plot(results, args.out)
 
