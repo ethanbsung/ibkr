@@ -15,13 +15,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ── Parameters ─────────────────────────────────────────────────────────────────
-INITIAL_CAPITAL = 50_000.0
+INITIAL_CAPITAL = 250_000.0
 COMMISSION_RT   = 5.0        # round-trip commission per contract ($)
-START_DATE      = '2000-01-01'
+START_DATE      = '2017-01-01'
 END_DATE        = '2026-01-01'
 
-IBS_ENTRY = 0.10
-IBS_EXIT  = 0.90
+IBS_ENTRY  = 0.10
+IBS_EXIT   = 0.90
+VOL_SCALAR = 2.0   # multiply all position sizes; 1.0 ≈ 5.4% ann vol, 2.0 ≈ 10.8% ann vol
 
 # ── Contract specifications ────────────────────────────────────────────────────
 CONTRACT_SPECS = {
@@ -94,15 +95,13 @@ def precompute_ibs(instrument_data):
 
 def position_size(total_equity, price, multiplier):
     """
-    Contracts = (portfolio_equity × per-strategy allocation) / contract_value.
-    Always at least 1. Scales up naturally as equity grows.
-    At $50k starting capital this returns 1 for all instruments.
-    MES reaches 2 contracts around $495k total equity.
+    Contracts = (portfolio_equity × allocation × VOL_SCALAR) / contract_value.
+    Returns 0 if below one-contract threshold — caller should skip the trade.
     """
     contract_value = price * multiplier
     if contract_value <= 0:
-        return 1
-    return max(1, round(total_equity * ALLOC / contract_value))
+        return 0
+    return round(total_equity * ALLOC * VOL_SCALAR / contract_value)
 
 
 # ── Backtest engine ────────────────────────────────────────────────────────────
@@ -155,13 +154,14 @@ def run_backtest(instrument_data, indicators):
             else:
                 if ibs < IBS_ENTRY:
                     contracts = position_size(total_equity, price, mul)
-                    s['capital']    -= (COMMISSION_RT / 2) * contracts
-                    s['in_position'] = True
-                    s['position']    = {
-                        'entry_price': price,
-                        'entry_date':  date,
-                        'contracts':   contracts,
-                    }
+                    if contracts > 0:
+                        s['capital']    -= (COMMISSION_RT / 2) * contracts
+                        s['in_position'] = True
+                        s['position']    = {
+                            'entry_price': price,
+                            'entry_date':  date,
+                            'contracts':   contracts,
+                        }
 
             if s['in_position']:
                 pos       = s['position']
@@ -321,9 +321,9 @@ def main():
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('portfolio/aggregate_port_equity_curve.png', dpi=150)
+    plt.savefig('results/aggregate_port_equity_curve.png', dpi=150)
     plt.show()
-    logger.info("Chart saved to portfolio/aggregate_port_equity_curve.png")
+    logger.info("Chart saved to results/aggregate_port_equity_curve.png")
 
 
 if __name__ == '__main__':

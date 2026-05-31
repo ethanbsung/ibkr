@@ -1,0 +1,6 @@
+ERROR:ib_insync.client:API connection failed: TimeoutError()
+ERROR: Could not connect to IBKR — 
+Make sure TWS or IB Gateway is running.
+ERROR:ib_insync.client:API connection failed: TimeoutError()
+ERROR: Could not connect to IBKR — 
+Make sure TWS or IB Gateway is running.

@@ -2,13 +2,13 @@
 """
 Combined IBS + EWMAC Portfolio Backtest
 3 instruments (MES/MNQ/MGC), equal-weight within each strategy.
-$50,000 starting capital, split 50/50 between strategies.
+$50,000 starting capital, 75% IBS / 25% EWMAC.
 
 IBS:   Mean-reversion. Enter long on IBS < 0.10, exit on IBS > 0.90.
 EWMAC: Trend-following. Long/short on EMA(64) vs EMA(256) crossover.
        Position sized by vol target at each crossover.
 
-Capital allocation: $25,000 to IBS sub-portfolio, $25,000 to EWMAC sub-portfolio.
+Capital allocation: $37,500 to IBS sub-portfolio, $12,500 to EWMAC sub-portfolio.
 Each sub-strategy gets 1/3 of its sub-portfolio capital.
 """
 
@@ -22,23 +22,27 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ── Parameters ─────────────────────────────────────────────────────────────────
-INITIAL_CAPITAL  = 50_000.0
+INITIAL_CAPITAL  = 250_000.0
 IBS_ALLOC        = 0.75    # 75% of capital to IBS
 EWMAC_ALLOC      = 0.25    # 25% of capital to EWMAC
 COMMISSION_RT    = 5.0
 START_DATE       = '2000-01-01'
 END_DATE         = '2026-01-01'
+DIV_YIELD        = 0.018   # approx S&P 500 annual dividend yield for total-return benchmark
 
 # IBS parameters
 IBS_ENTRY = 0.10
 IBS_EXIT  = 0.90
 
 # EWMAC parameters
-RISK_TARGET = 0.20
-FAST_SPAN   = 64
-SLOW_SPAN   = 256
-VOL_SPAN    = 32
-VOL_FLOOR   = 0.05
+RISK_TARGET     = 0.20
+FAST_SPAN       = 64
+SLOW_SPAN       = 256
+VOL_SPAN        = 32
+VOL_FLOOR       = 0.05
+FORECAST_SCALAR = 1.91    # EWMAC(64,256) scalar: mean |forecast| ≈ 10 (Carver)
+FORECAST_TARGET = 10.0
+FORECAST_CAP    = 20.0
 
 # ── Contract specifications ────────────────────────────────────────────────────
 CONTRACT_SPECS = {
@@ -96,18 +100,20 @@ def precompute_indicators(instrument_data):
         bar_range = ind['High'] - ind['Low']
         ind['IBS'] = np.where(bar_range > 0, (ind['Last'] - ind['Low']) / bar_range, 0.5)
 
-        # EWMAC direction
-        prices   = df['Last']
-        fast_ema = prices.ewm(span=FAST_SPAN, min_periods=FAST_SPAN).mean()
-        slow_ema = prices.ewm(span=SLOW_SPAN, min_periods=SLOW_SPAN).mean()
-        direction = pd.Series(np.where(fast_ema > slow_ema, 1.0, -1.0), index=prices.index)
-        direction[fast_ema.isna() | slow_ema.isna()] = np.nan
-        ind['EWMAC_dir'] = direction
+        # EWMAC continuous forecast (Carver method)
+        prices        = df['Last']
+        fast_ema      = prices.ewm(span=FAST_SPAN, min_periods=FAST_SPAN).mean()
+        slow_ema      = prices.ewm(span=SLOW_SPAN, min_periods=SLOW_SPAN).mean()
+        pct_ret       = prices.pct_change()
+        daily_vol_pct = pct_ret.ewm(span=VOL_SPAN, min_periods=VOL_SPAN).std()
+        daily_vol_pct = daily_vol_pct.clip(lower=VOL_FLOOR / np.sqrt(256))
+        raw_norm      = (fast_ema - slow_ema) / (prices * daily_vol_pct)
+        forecast      = (raw_norm * FORECAST_SCALAR).clip(-FORECAST_CAP, FORECAST_CAP)
+        forecast[fast_ema.isna() | slow_ema.isna() | daily_vol_pct.isna()] = np.nan
+        ind['EWMAC_fc'] = forecast
 
-        # Annualised vol for EWMAC sizing
-        pct_ret = prices.pct_change()
-        ann_vol = pct_ret.ewm(span=VOL_SPAN, min_periods=VOL_SPAN).std() * np.sqrt(256)
-        ind['ann_vol'] = ann_vol.clip(lower=VOL_FLOOR)
+        ann_vol = (daily_vol_pct * np.sqrt(256)).clip(lower=VOL_FLOOR)
+        ind['ann_vol'] = ann_vol
 
         indicators[symbol] = ind
     return indicators
@@ -203,7 +209,6 @@ def run_ewmac_backtest(instrument_data, indicators):
             'capital':      ewmac_cap_per_strat,
             'position':     0,
             'prev_price':   None,
-            'prev_dir':     np.nan,
             'total_gross':  0.0,
             'total_comm':   0.0,
             'equity_curve': [],
@@ -224,32 +229,26 @@ def run_ewmac_backtest(instrument_data, indicators):
                 continue
 
             price   = float(df.loc[date, 'Last'])
-            new_dir = float(ind.loc[date, 'EWMAC_dir']) if date in ind.index and not pd.isna(ind.loc[date, 'EWMAC_dir']) else np.nan
-            ann_vol = float(ind.loc[date, 'ann_vol'])   if date in ind.index else np.nan
+            forecast = float(ind.loc[date, 'EWMAC_fc']) if date in ind.index and not pd.isna(ind.loc[date, 'EWMAC_fc']) else np.nan
+            ann_vol  = float(ind.loc[date, 'ann_vol'])  if date in ind.index else np.nan
 
             # Daily mark-to-market
             if s['prev_price'] is not None and s['position'] != 0:
-                daily_pnl = (price - s['prev_price']) * mul * s['position']
+                daily_pnl        = (price - s['prev_price']) * mul * s['position']
                 s['capital']    += daily_pnl
                 s['total_gross'] += daily_pnl
 
-            # Trade only on crossover
-            signal_changed = (not pd.isna(new_dir)) and (new_dir != s['prev_dir'])
+            # Continuous forecast: recompute target position every day
+            if not (pd.isna(forecast) or pd.isna(ann_vol) or ann_vol <= 0):
+                target_pos = (forecast / FORECAST_TARGET) * (s['capital'] * RISK_TARGET) / (price * mul * ann_vol)
+                new_pos    = int(round(target_pos))
 
-            if signal_changed and not (pd.isna(ann_vol) or ann_vol <= 0):
-                avg_pos = (s['capital'] * RISK_TARGET) / (price * mul * ann_vol)
-                new_pos = max(1, int(round(avg_pos))) * int(new_dir)
-
-                trade = abs(new_pos - s['position'])
-                if trade > 0:
-                    comm = (COMMISSION_RT / 2) * trade
+                if new_pos != s['position']:
+                    trade = abs(new_pos - s['position'])
+                    comm              = (COMMISSION_RT / 2) * trade
                     s['capital']    -= comm
                     s['total_comm'] += comm
-
-                s['position'] = new_pos
-                s['prev_dir'] = new_dir
-            elif not pd.isna(new_dir) and pd.isna(s['prev_dir']):
-                s['prev_dir'] = new_dir
+                    s['position']    = new_pos
 
             s['prev_price'] = price
             s['equity_curve'].append((date, s['capital']))
@@ -359,10 +358,9 @@ def main():
 
     combined_eq = pd.DataFrame({'Equity': ibs_eq['Equity'] + ewmac_eq['Equity']}, index=valid)
 
-    # Normalise standalone strategy curves to full $50k for apples-to-apples comparison
-    # (each was run with only half the capital)
-    ibs_scaled   = pd.DataFrame({'Equity': ibs_eq['Equity']   * 2}, index=valid)
-    ewmac_scaled = pd.DataFrame({'Equity': ewmac_eq['Equity'] * 2}, index=valid)
+    # Scale standalone curves to full $50k so all three start at the same base
+    ibs_scaled   = pd.DataFrame({'Equity': ibs_eq['Equity']   * (1.0 / IBS_ALLOC)},   index=valid)
+    ewmac_scaled = pd.DataFrame({'Equity': ewmac_eq['Equity'] * (1.0 / EWMAC_ALLOC)}, index=valid)
 
     ibs_m    = compute_metrics(ibs_scaled,   'IBS (standalone, 50k equiv)')
     ewmac_m  = compute_metrics(ewmac_scaled, 'EWMAC (standalone, 50k equiv)')
@@ -375,10 +373,23 @@ def main():
     aligned.columns = ['IBS', 'EWMAC']
     corr = aligned.corr().iloc[0, 1]
 
+    # ── MES B&H benchmark ─────────────────────────────────────────────────────
+    es_prices = instrument_data['ES']['Last'].reindex(valid, method='ffill').dropna() \
+                if 'ES' in instrument_data else None
+    bnh_eq = None
+    if es_prices is not None and not es_prices.empty:
+        years = (es_prices.index - es_prices.index[0]).days / 365.25
+        bnh_eq = pd.DataFrame(
+            {'Equity': INITIAL_CAPITAL
+                       * (es_prices / float(es_prices.iloc[0]))
+                       * (1 + DIV_YIELD) ** years},
+            index=es_prices.index,
+        )
+
     # ── Print ──────────────────────────────────────────────────────────────────
     print("\n" + "=" * 64)
     print(f"COMBINED BACKTEST  |  IBS + EWMAC({FAST_SPAN},{SLOW_SPAN})  |  ${INITIAL_CAPITAL:,.0f} capital")
-    print(f"50% IBS  |  50% EWMAC  |  3 instruments each")
+    print(f"{IBS_ALLOC:.0%} IBS  |  {EWMAC_ALLOC:.0%} EWMAC  |  3 instruments each")
     print("=" * 64)
 
     print(f"\n  Strategy return correlation (IBS vs EWMAC): {corr:+.3f}")
@@ -393,10 +404,20 @@ def main():
     print(f"\n── Combined IBS + EWMAC (${INITIAL_CAPITAL:,.0f}) ───────────────────────────────")
     print_metrics(combo_m)
 
-    print(f"\n  Sharpe improvement: {combo_m['Sharpe'] - max(ibs_m['Sharpe'], ewmac_m['Sharpe']):+.3f}"
-          f"  vs best standalone ({max(ibs_m['Sharpe'], ewmac_m['Sharpe']):.3f})")
-    print(f"  Max DD improvement: {combo_m['Max Drawdown %'] - max(ibs_m['Max Drawdown %'], ewmac_m['Max Drawdown %']):+.1f}%"
-          f"  vs best standalone ({max(ibs_m['Max Drawdown %'], ewmac_m['Max Drawdown %']):.1f}%)")
+    best_sharpe  = max(ibs_m['Sharpe'], ewmac_m['Sharpe'])
+    best_max_dd  = max(ibs_m['Max Drawdown %'], ewmac_m['Max Drawdown %'])  # least negative = smallest DD
+    sharpe_delta = combo_m['Sharpe'] - best_sharpe
+    dd_delta     = combo_m['Max Drawdown %'] - best_max_dd
+    print(f"\n  vs best standalone  Sharpe: {best_sharpe:.3f}  →  {combo_m['Sharpe']:.3f}"
+          f"  ({sharpe_delta:+.3f})")
+    print(f"  vs best standalone  Max DD: {best_max_dd:.1f}%  →  {combo_m['Max Drawdown %']:.1f}%"
+          f"  ({dd_delta:+.1f}%)")
+
+    if bnh_eq is not None:
+        bnh_m = compute_metrics(bnh_eq, 'VOO equiv.')
+        if bnh_m:
+            print(f"\n── VOO equiv. benchmark (price + ~1.8% div reinvested, ${INITIAL_CAPITAL:,.0f}) ──")
+            print_metrics(bnh_m)
 
     # ── Plot ───────────────────────────────────────────────────────────────────
     fig, axes = plt.subplots(3, 1, figsize=(14, 12),
@@ -409,6 +430,9 @@ def main():
              color='steelblue', linewidth=1.0, alpha=0.7, linestyle='--', label='IBS only (scaled)')
     ax1.plot(ewmac_scaled.index, ewmac_scaled['Equity'],
              color='darkorange', linewidth=1.0, alpha=0.7, linestyle='--', label=f'EWMAC({FAST_SPAN},{SLOW_SPAN}) only (scaled)')
+    if bnh_eq is not None and not bnh_eq.empty:
+        ax1.plot(bnh_eq.index, bnh_eq['Equity'],
+                 color='goldenrod', linewidth=1.0, alpha=0.7, linestyle=':', label='VOO equiv. (price + div, est.)')
     ax1.axhline(INITIAL_CAPITAL, color='gray', linestyle=':', linewidth=0.8, label='Starting capital')
     ax1.set_ylabel('Portfolio Equity ($)')
     ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'${x:,.0f}'))

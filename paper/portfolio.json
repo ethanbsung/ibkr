@@ -1,0 +1,8 @@
+{
+  "total_capital": 5000,
+  "allocations": {
+    "crypto_trend": 0.7,
+    "crypto_carry": 0.3
+  },
+  "_note": "Capital split across strategies. Edit allocations to reallocate (weights sum <=1; remainder is cash). Strategy ledgers in ledgers/<name>/ are return/NAV-based and are NOT affected by changing this file. Add a strategy: add it to STRATEGIES in run_paper.py and a weight here."
+}

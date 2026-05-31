@@ -368,15 +368,15 @@ def minimum_capital_okay_for_instrument(instrument_code: str,
 
     return minimum_capital<=capital
 
-def minimum_capital_for_sub_strategy(fx: float, 
-                                   idm: float, 
+def minimum_capital_for_sub_strategy(fx: float,
+                                   idm: float,
                                    weight: float,
-                                   instrument_risk_ann_perc: float, 
+                                   instrument_risk_ann_perc: float,
                                    price: float,
-                                   multiplier: float, 
+                                   multiplier: float,
                                    risk_target: float,
-                                   min_contracts: int = 4) -> float:
-    """Calculate minimum capital using Strategy 4 formula from book"""
+                                   min_contracts: int = 1) -> float:
+    """Calculate minimum capital — min_contracts=1 reflects a 1-contract floor strategy"""
     # From book: (4 × Multiplier × Price × FX rate × σ%) ÷ (IDM × Weight × τ)
     numerator = min_contracts * multiplier * price * fx * instrument_risk_ann_perc
     denominator = idm * weight * risk_target
@@ -716,47 +716,159 @@ def create_correlation_matrix_from_data(selected_instruments: list) -> correlati
     
     return correlationEstimate(correlation_df)
 
+_price_vol_cache = {}
+
+def _load_price_vol(symbol: str):
+    """
+    Read the instrument's CSV and return (latest_price, ann_vol_3y).
+    Results are cached.  Returns None if no data file exists.
+    """
+    if symbol in _price_vol_cache:
+        return _price_vol_cache[symbol]
+
+    path = f"Data/{symbol.lower()}_daily_data.csv"
+    if not os.path.exists(path):
+        _price_vol_cache[symbol] = None
+        return None
+
+    try:
+        lines = []
+        with open(path) as fh:
+            for line in fh:
+                s = line.strip()
+                if not s or s.startswith('"'):
+                    continue
+                lines.append(s)
+        if len(lines) < 2:
+            _price_vol_cache[symbol] = None
+            return None
+
+        from io import StringIO as _SIO
+        df = pd.read_csv(_SIO('\n'.join(lines)), parse_dates=['Time'])
+        df = df.sort_values('Time').dropna(subset=['Last'])
+        if df.empty:
+            _price_vol_cache[symbol] = None
+            return None
+
+        latest_price = float(df['Last'].iloc[-1])
+
+        # 3-year window for vol estimate (756 trading days); fall back to all data
+        window = df['Last'].iloc[-756:] if len(df) >= 756 else df['Last']
+        ann_vol = float(window.pct_change().dropna().std() * np.sqrt(252))
+        ann_vol = max(0.02, ann_vol)   # floor at 2% to avoid divide-by-zero
+
+        result = (latest_price, ann_vol)
+        _price_vol_cache[symbol] = result
+        return result
+    except Exception:
+        _price_vol_cache[symbol] = None
+        return None
+
+
+# Rolls-per-year fallback by asset class (only used when no CSV data)
+_ROLLS_BY_CLASS = {
+    'bond':   4,
+    'fx':     4,
+    'metal':  6,
+    'energy': 12,
+    'grain':  6,
+    'equity': 4,
+    'vol':    12,
+    'other':  4,
+}
+
+def _rolls_for_symbol(symbol: str) -> int:
+    if any(s in symbol for s in ['ZB','UB','ZN','ZF','ZT','Z3N','TN','GBL','FGBM','FGBS','BTP','OAT']):
+        return _ROLLS_BY_CLASS['bond']
+    if any(s in symbol for s in ['6E','6B','6J','6A','6C','6S','6N','JPY','EUR','GBP']):
+        return _ROLLS_BY_CLASS['fx']
+    if any(s in symbol for s in ['GC','MGC','SI','HG','PL','PA']):
+        return _ROLLS_BY_CLASS['metal']
+    if any(s in symbol for s in ['CL','QM','BZ','NG','RB','HO']):
+        return _ROLLS_BY_CLASS['energy']
+    if any(s in symbol for s in ['ZC','ZS','ZW','ZM','ZL','ZO','KE','LE','HE']):
+        return _ROLLS_BY_CLASS['grain']
+    if 'VIX' in symbol or 'V2TX' in symbol:
+        return _ROLLS_BY_CLASS['vol']
+    return _ROLLS_BY_CLASS['equity']
+
+
 def create_instrument_config_from_instruments_df(instruments_df: pd.DataFrame) -> pd.DataFrame:
-    """Convert existing instruments DataFrame to the format expected by Carver's code"""
-    
-    # Map the columns to what Carver expects
+    """
+    Build instrument config from actual CSV data where available.
+    price and ann_std are computed from the data file (3-year window).
+    Falls back to conservative asset-class estimates only when no data exists.
+    """
     config_data = []
-    
+    missing, loaded = [], []
+
     for _, row in instruments_df.iterrows():
         symbol = row['Symbol']
-        
-        # Get realistic estimates for price and volatility
-        if 'VIX' in symbol:
-            price, ann_std = 20, 0.80
-        elif 'BTC' in symbol or 'MBT' in symbol:
-            price, ann_std = 50000, 0.60
-        elif any(term in symbol for term in ['ZN', 'ZB', 'ZF', 'ZT', '3KTB', 'TN', 'GBL', 'BTP', 'OAT']):
-            price, ann_std = 110, 0.06
-        elif any(curr in symbol for curr in ['EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD', 'NOK', 'SEK']):
-            price, ann_std = 1.1, 0.10
-        elif any(metal in symbol for metal in ['GC', 'MGC', 'SI', 'HG', 'PL', 'PA']):
-            if 'GC' in symbol or 'MGC' in symbol:
-                price, ann_std = 2000, 0.18
-            elif 'SI' in symbol:
-                price, ann_std = 25, 0.25
-            else:
-                price, ann_std = 4, 0.22
-        elif any(energy in symbol for energy in ['CL', 'QM', 'RB', 'HO', 'NG', 'BZ']):
-            price, ann_std = 70, 0.30
-        elif any(ag in symbol for ag in ['ZC', 'ZS', 'ZW', 'ZM', 'ZL', 'ZO', 'ZR']):
-            price, ann_std = 500, 0.25
+        pv = _load_price_vol(symbol)
+
+        if pv is not None:
+            price, ann_std = pv
+            loaded.append(symbol)
         else:
-            price, ann_std = 4000, 0.18  # Equity indices
-        
+            # Conservative fallback — only reached when there is no CSV file
+            if any(s in symbol for s in ['ZB','UB']):
+                price, ann_std = 115, 0.10
+            elif any(s in symbol for s in ['ZN','TN','GBL']):
+                price, ann_std = 109, 0.07
+            elif any(s in symbol for s in ['ZF','FGBM']):
+                price, ann_std = 106, 0.05
+            elif any(s in symbol for s in ['ZT','Z3N','FGBS']):
+                price, ann_std = 102, 0.03
+            elif any(s in symbol for s in ['6E','EUR']):
+                price, ann_std = 1.08, 0.08
+            elif any(s in symbol for s in ['6B','GBP']):
+                price, ann_std = 1.27, 0.09
+            elif any(s in symbol for s in ['6J','JPY']):
+                price, ann_std = 0.0067, 0.10
+            elif any(s in symbol for s in ['6A','AUD']):
+                price, ann_std = 0.65, 0.10
+            elif any(s in symbol for s in ['6C','CAD']):
+                price, ann_std = 0.74, 0.07
+            elif any(s in symbol for s in ['6S','CHF']):
+                price, ann_std = 1.12, 0.09
+            elif 'GC' in symbol or 'MGC' in symbol:
+                price, ann_std = 3_300, 0.18
+            elif 'SI' in symbol:
+                price, ann_std = 33, 0.28
+            elif 'HG' in symbol:
+                price, ann_std = 4.8, 0.22
+            elif 'CL' in symbol or 'QM' in symbol:
+                price, ann_std = 78, 0.32
+            elif 'NG' in symbol:
+                price, ann_std = 3.5, 0.50
+            elif any(s in symbol for s in ['ES','MES']):
+                price, ann_std = 5_900, 0.18
+            elif any(s in symbol for s in ['NQ','MNQ']):
+                price, ann_std = 21_000, 0.22
+            elif 'VIX' in symbol:
+                price, ann_std = 20, 0.80
+            else:
+                price, ann_std = 4_000, 0.18
+            missing.append(symbol)
+
         config_data.append({
-            'instrument': symbol,
-            'fx_rate': 1.0,  # Assuming USD base
-            'multiplier': row['Multiplier'],
-            'price': price,
-            'ann_std': ann_std,
-            'SR_cost': row.get('SR_cost', 0.01),  # Default if not available
-            'rolls_per_year': 4  # Quarterly rolls assumption
+            'instrument':   symbol,
+            'fx_rate':      1.0,
+            'multiplier':   row['Multiplier'],
+            'price':        price,
+            'ann_std':      ann_std,
+            'SR_cost':      row.get('SR_cost', 0.01),
+            'rolls_per_year': _rolls_for_symbol(symbol),
         })
+
+    print(f"  Data-driven  ({len(loaded)} instruments): price + vol from CSV")
+    print(f"  Fallback     ({len(missing)} instruments): hardcoded estimates")
+    if missing:
+        print(f"    Missing data: {missing[:10]}{'...' if len(missing)>10 else ''}")
+
+    config_df = pd.DataFrame(config_data)
+    config_df.set_index('instrument', inplace=True)
+    return config_df
     
     config_df = pd.DataFrame(config_data)
     config_df.set_index('instrument', inplace=True)
@@ -908,19 +1020,32 @@ def implement_carver_static_instrument_selection(instruments_df: pd.DataFrame,
     }
 
 if __name__ == "__main__":
-    # Test the implementation
+    # Instruments excluded from selection:
+    #   VIX / V2TX  — long vol futures have catastrophic roll decay in contango
+    #   SND         — USD/SGD SGX contract, effectively illiquid (5x10 market)
+    EXCLUDED_SYMBOLS = {
+        'VIX', 'V2TX',          # long vol — catastrophic roll decay in contango
+        'SND',                  # USD/SGD SGX — effectively illiquid
+        'YE', 'GE',             # Eurodollar — LIBOR discontinued 2023, dead contracts
+        'ALI',                  # LME Aluminium — illiquid on IBKR
+        'RP',                   # EUR/GBP CME — no order button, requires subscription
+        'XINA50', 'SSG',        # SGX contracts — require SGX data subscription
+    }
+
     try:
         import sys
         sys.path.append('rob_port')
         from chapter1 import load_instrument_data
         instruments_df = load_instrument_data()
+        instruments_df = instruments_df[~instruments_df['Symbol'].isin(EXCLUDED_SYMBOLS)]
+        print(f"Universe after exclusions: {len(instruments_df)} instruments "
+              f"(removed {sorted(EXCLUDED_SYMBOLS)})")
         
-        # Test with different capital levels
-        for capital in [10000000, 50000000]:  # Start with smaller test
+        for capital in [250_000]:
             print(f"\n{'='*80}")
             print(f"TESTING WITH ${capital:,.0f} CAPITAL")
             print(f"{'='*80}")
-            
+
             results = implement_carver_static_instrument_selection(
                 instruments_df=instruments_df,
                 capital=capital,
