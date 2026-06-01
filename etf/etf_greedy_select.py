@@ -54,8 +54,16 @@ CORR_FILL     = 0.30   # assumed correlation when no overlapping history
 DATA_DIR       = "Data/etf"
 UNIVERSE_FILE  = "Data/etf/etf_universe_curated.json"
 EXPENSE_FILE   = "Data/etf/expense_ratios.json"
+SPREADS_FILE   = "Data/etf/etf_spreads.json"
 OUTPUT_FILE    = "Data/etf/etf_universe_greedy.json"
 RESULTS_DIR    = "results"
+
+# Assumed EWMAC position-level turnover (round trips/yr) used for spread cost SR.
+# Based on backtest median across 88 instruments.  Conservative — slightly
+# overestimates costs for liquid large-cap ETFs, slightly underestimates for
+# illiquid small positions.
+ASSUMED_TURNOVER   = 30.0
+SPREAD_DEFAULT_BPS = 2.0   # fallback if instrument not in spreads file
 
 # Individual stocks that ended up in the ETF universe — excluded from selection
 INDIVIDUAL_STOCKS = {"AMT", "O", "PLD"}
@@ -228,25 +236,63 @@ def main():
         er_data = json.load(f)
     er_pct: dict = er_data["expense_ratios_pct"]  # values in percent, e.g. 0.0945
 
+    # ── Load bid-ask spreads ───────────────────────────────────────────────────
+    if os.path.exists(SPREADS_FILE):
+        with open(SPREADS_FILE) as f:
+            spread_data = json.load(f)
+        half_spreads = spread_data.get("half_spread_bps", {})
+        spread_captured = spread_data.get("meta", {}).get("captured", "unknown")
+        print(f"\nLoaded bid-ask spreads from {SPREADS_FILE}  (captured {spread_captured})")
+    else:
+        half_spreads = {}
+        print(f"\nWARNING: {SPREADS_FILE} not found — using {SPREAD_DEFAULT_BPS}bp default for all")
+
     # ── Compute SR_net ────────────────────────────────────────────────────────
-    # SR_net_i = notional_SR - SR_cost_i - size_penalty_i
-    # For ETFs with fractional shares: size_penalty = 0
-    # SR_cost_i = (ER_pct / 100) / vol_target
-    sr_cost: dict[str, float] = {}
-    sr_net:  dict[str, float] = {}
+    # SR_net_i = notional_SR - SR_cost_er_i - SR_cost_spread_i
+    #
+    # SR_cost_er_i     = (expense_ratio_pct / 100) / vol_target
+    # SR_cost_spread_i = 2 × half_spread_fraction × assumed_turnover / vol_target
+    #
+    # Hard-filter: if spread cost SR alone ≥ notional_SR, the instrument can
+    # never be expected-profitable and is excluded before the greedy loop.
+    sr_cost_er:     dict[str, float] = {}
+    sr_cost_spread: dict[str, float] = {}
+    sr_cost:        dict[str, float] = {}
+    sr_net:         dict[str, float] = {}
+
+    hard_excluded: list[str] = []
+
     for tk in tickers:
-        er = er_pct.get(tk)
-        if er is None:
-            er = 0.50          # conservative default for missing ER
-        sr_cost[tk] = (er / 100.0) / args.vol_target
-        sr_net[tk]  = args.notional_sr - sr_cost[tk]
+        er = er_pct.get(tk, 0.50)   # 0.50% default if missing
+        spread_bps = half_spreads.get(tk, SPREAD_DEFAULT_BPS)
+
+        sr_cost_er[tk]     = (er / 100.0) / args.vol_target
+        sr_cost_spread[tk] = 2 * (spread_bps / 10_000) * ASSUMED_TURNOVER / args.vol_target
+        sr_cost[tk]        = sr_cost_er[tk] + sr_cost_spread[tk]
+        sr_net[tk]         = args.notional_sr - sr_cost[tk]
+
+        if sr_cost_spread[tk] >= args.notional_sr:
+            hard_excluded.append(tk)
+
+    if hard_excluded:
+        print(f"\nHard-excluded (spread cost SR ≥ notional SR {args.notional_sr}):")
+        for tk in sorted(hard_excluded):
+            g = asset_classes.get(tk, "?")
+            print(f"  {tk:<6}  [{g}]  spread={half_spreads.get(tk,SPREAD_DEFAULT_BPS):.2f}bp"
+                  f"  cost_SR_spread={sr_cost_spread[tk]:.4f}")
+        tickers = [tk for tk in tickers if tk not in hard_excluded]
 
     print(f"\nNotional pre-cost SR : {args.notional_sr}")
     print(f"Vol target           : {args.vol_target*100:.0f}%")
-    print(f"\nTop 10 most expensive (highest SR_cost):")
+    print(f"Assumed EWMAC turnover: {ASSUMED_TURNOVER:.0f}× (position-level round trips/yr)")
+    print(f"\nTop 10 most expensive by total SR_cost (ER + spread):")
     for tk, sc in sorted(sr_cost.items(), key=lambda x: -x[1])[:10]:
-        print(f"  {tk:<6}  ER={er_pct.get(tk,0):.4f}%"
-              f"  SR_cost={sc:.4f}  SR_net={sr_net[tk]:.4f}")
+        if tk not in tickers:
+            continue
+        print(f"  {tk:<6}  ER={er_pct.get(tk,0):.3f}%  spread={half_spreads.get(tk,SPREAD_DEFAULT_BPS):.2f}bp"
+              f"  SR_cost_er={sr_cost_er[tk]:.4f}"
+              f"  SR_cost_spr={sr_cost_spread[tk]:.4f}"
+              f"  SR_net={sr_net[tk]:.4f}")
 
     # ── Correlations ──────────────────────────────────────────────────────────
     print(f"\nLoading daily returns from {CORR_START}…")
@@ -262,10 +308,23 @@ def main():
 
     sr_net_ok = {tk: sr_net[tk] for tk in ok}
 
+    # Hard-filter: SR_net must be non-negative — instruments with negative
+    # expected net return are excluded regardless of correlation benefit,
+    # since their weight is too small for diversification to compensate.
+    sr_neg = [tk for tk in ok if sr_net_ok[tk] < 0]
+    if sr_neg:
+        print(f"\nExcluded (SR_net < 0):")
+        for tk in sorted(sr_neg):
+            g = asset_classes.get(tk, "?")
+            print(f"  {tk:<6}  [{g}]  SR_net={sr_net_ok[tk]:.4f}"
+                  f"  spread={half_spreads.get(tk, SPREAD_DEFAULT_BPS):.2f}bp"
+                  f"  ER={er_pct.get(tk, 0):.3f}%")
+    candidates = [tk for tk in ok if sr_net_ok[tk] >= 0]
+
     # ── Greedy selection ──────────────────────────────────────────────────────
     print(f"\nRunning greedy selection  (stop ratio={args.stop_ratio})…")
     portfolio, sr_history = greedy_select(
-        ok, asset_classes, corr, sr_net_ok)
+        candidates, asset_classes, corr, sr_net_ok)
 
     final_sr = sr_history[-1] if sr_history else 0.0
 
@@ -298,23 +357,29 @@ def main():
         "n_selected": len(portfolio),
         "final_portfolio_sr": round(final_sr, 4),
         "algorithm": {
-            "method":          "greedy_static_optimisation",
-            "reference":       "Carver, Advanced Futures Trading Strategies (2023)",
-            "notional_sr":     args.notional_sr,
-            "vol_target":      args.vol_target,
-            "stop_ratio":      args.stop_ratio,
-            "corr_start":      CORR_START,
-            "min_overlap_bars":MIN_OVERLAP,
-            "corr_fill":       CORR_FILL,
-            "idm_cap":         IDM_CAP,
-            "size_penalty":    "zero (fractional ETF shares)",
+            "method":            "greedy_static_optimisation",
+            "reference":         "Carver, Advanced Futures Trading Strategies (2023)",
+            "notional_sr":       args.notional_sr,
+            "vol_target":        args.vol_target,
+            "stop_ratio":        args.stop_ratio,
+            "corr_start":        CORR_START,
+            "min_overlap_bars":  MIN_OVERLAP,
+            "corr_fill":         CORR_FILL,
+            "idm_cap":           IDM_CAP,
+            "assumed_turnover":  ASSUMED_TURNOVER,
+            "spread_default_bps":SPREAD_DEFAULT_BPS,
+            "size_penalty":      "zero (fractional ETF shares)",
         },
+        "hard_excluded": sorted(hard_excluded),
         "per_instrument": {
             tk: {
-                "sr_net":           round(sr_net_ok[tk], 5),
-                "sr_cost":          round(sr_cost[tk],   5),
-                "expense_ratio_pct":er_pct.get(tk),
-                "asset_class":      asset_classes.get(tk, "OTHER"),
+                "sr_net":            round(sr_net_ok[tk],         5),
+                "sr_cost_total":     round(sr_cost[tk],           5),
+                "sr_cost_er":        round(sr_cost_er[tk],        5),
+                "sr_cost_spread":    round(sr_cost_spread[tk],    5),
+                "expense_ratio_pct": er_pct.get(tk),
+                "half_spread_bps":   half_spreads.get(tk, SPREAD_DEFAULT_BPS),
+                "asset_class":       asset_classes.get(tk, "OTHER"),
             }
             for tk in portfolio
         },

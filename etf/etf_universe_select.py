@@ -51,19 +51,19 @@ FORCE_INCLUDE = [
 ASSET_CLASS = {
     # US Broad Equity
     "SPY":"US_EQUITY","QQQ":"US_EQUITY","IVV":"US_EQUITY","VTI":"US_EQUITY",
-    "MDY":"US_EQUITY","IWM":"US_EQUITY","VTV":"US_EQUITY","VUG":"US_EQUITY",
-    "IUSG":"US_EQUITY","IUSV":"US_EQUITY",
-    # US Factors
+    "MDY":"US_EQUITY","IWM":"US_EQUITY",
+    # US Factors (style + quality + dividend + low-vol)
+    "VTV":"US_FACTOR","VUG":"US_FACTOR","IUSG":"US_FACTOR","IUSV":"US_FACTOR",
     "MTUM":"US_FACTOR","QUAL":"US_FACTOR","VLUE":"US_FACTOR",
     "USMV":"US_FACTOR","DGRO":"US_FACTOR","VIG":"US_FACTOR",
     "HDV":"US_FACTOR","NOBL":"US_FACTOR","COWZ":"US_FACTOR","CALF":"US_FACTOR",
-    # US Sectors
+    # US Sectors (sector ETFs + energy infrastructure equity)
     "XLK":"US_SECTOR","XLF":"US_SECTOR","XLV":"US_SECTOR","XLE":"US_SECTOR",
     "XLI":"US_SECTOR","XLU":"US_SECTOR","XLP":"US_SECTOR","XLY":"US_SECTOR",
     "XLB":"US_SECTOR","XLRE":"US_SECTOR","XLC":"US_SECTOR","XBI":"US_SECTOR",
     "SMH":"US_SECTOR","XHB":"US_SECTOR","XRT":"US_SECTOR","KRE":"US_SECTOR",
     "KBE":"US_SECTOR","IBB":"US_SECTOR","IYT":"US_SECTOR","ITA":"US_SECTOR",
-    "OIH":"US_SECTOR","XOP":"US_SECTOR",
+    "OIH":"US_SECTOR","XOP":"US_SECTOR","AMLP":"US_SECTOR",
     # International Broad
     "EFA":"INTL_EQUITY","VEA":"INTL_EQUITY","IEFA":"INTL_EQUITY",
     "EEM":"EM_EQUITY","VWO":"EM_EQUITY","IEMG":"EM_EQUITY",
@@ -94,9 +94,9 @@ ASSET_CLASS = {
     # Metals
     "GLD":"GOLD","IAU":"GOLD","GLDM":"GOLD","SLV":"SILVER",
     "PPLT":"METALS","PALL":"METALS","DBP":"METALS","DBB":"METALS",
-    "COPX":"METALS","SILJ":"SILVER","GDX":"GOLD_MINERS","GDXJ":"GOLD_MINERS",
-    # Energy
-    "USO":"ENERGY","UNG":"NAT_GAS","DBE":"ENERGY","AMLP":"ENERGY",
+    "GDX":"GOLD_MINERS","GDXJ":"GOLD_MINERS","COPX":"GOLD_MINERS","SILJ":"GOLD_MINERS",
+    # Energy (commodity futures only; AMLP is equity → US_SECTOR)
+    "USO":"ENERGY","UNG":"NAT_GAS","DBE":"ENERGY",
     # Agriculture
     "CORN":"AGRI","WEAT":"AGRI","SOYB":"AGRI","DBA":"AGRI",
     "CANE":"AGRI","JO":"AGRI","NIB":"AGRI","BAL":"AGRI","RJA":"AGRI",
@@ -124,7 +124,7 @@ FACTOR_LABEL = {
     "HY_BOND":"High Yield","AGG_BOND":"Agg Bond","INTL_BOND":"Intl Bond",
     "EM_BOND":"EM Bond","MUNI":"Muni",
     "GOLD":"Gold","SILVER":"Silver","METALS":"Metals",
-    "GOLD_MINERS":"Gold Miners","ENERGY":"Energy","NAT_GAS":"Nat Gas",
+    "GOLD_MINERS":"Mining Equity","ENERGY":"Energy","NAT_GAS":"Nat Gas",
     "AGRI":"Agriculture","COMMODITY":"Commodity",
     "REIT":"REIT","INTL_REIT":"Intl REIT",
     "FX":"FX","VOLATILITY":"Volatility",

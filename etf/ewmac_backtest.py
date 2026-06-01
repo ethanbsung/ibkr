@@ -56,10 +56,23 @@ BDAYS            = 256
 WARMUP_BARS      = 270
 IDM_CAP          = 2.5
 GROSS_LEVERAGE_CAP = 1.9   # Reg-T 2x limit with small safety buffer; set None to disable
+FDM              = 1.26    # Carver, Systematic Trading Table 29: 6 equal-weighted EWMAC rules
 
 DATA_DIR       = "Data/etf"
 UNIVERSE_FILE  = "Data/etf/etf_universe_greedy.json"
+SPREADS_FILE   = "Data/etf/etf_spreads.json"
 RESULTS_DIR    = "results"
+SPREAD_DEFAULT_BPS = 2.0   # fallback for instruments not in the spreads file
+
+
+# ── Spread loader ─────────────────────────────────────────────────────────────
+def load_spreads() -> dict[str, float]:
+    """Per-instrument half-spreads (bps) from live NBBO snapshot."""
+    if not os.path.exists(SPREADS_FILE):
+        return {}
+    with open(SPREADS_FILE) as f:
+        data = json.load(f)
+    return data.get("half_spread_bps", {})
 
 
 # ── IDM lookup (Carver Table 4-4, used only for reporting) ────────────────────
@@ -96,23 +109,12 @@ def estimate_scalar(raw_series: pd.Series) -> float:
     return FORECAST_TARGET / avg_abs if avg_abs > 0 else 1.0
 
 
-def compute_fdm(forecast_df: pd.DataFrame) -> float:
-    clean = forecast_df.dropna(how="all")
-    if clean.shape[1] < 2 or len(clean) < 100:
-        return 1.0
-    C = clean.corr()
-    n = len(C)
-    w = np.ones(n) / n
-    port_var = float(w @ C.values @ w)
-    return min(1.0 / np.sqrt(max(port_var, 1e-6)), FORECAST_CAP / FORECAST_TARGET)
-
-
 def build_forecasts(prices: pd.DataFrame, vols: pd.DataFrame,
                     scalars: dict) -> tuple[dict, pd.DataFrame]:
     """
     Returns:
       per_speed_fc: {(fast,slow): DataFrame of shape (dates, tickers)}
-      combined_fc:  DataFrame of shape (dates, tickers) — FDM-weighted combination
+      combined_fc:  DataFrame of shape (dates, tickers) — FDM-scaled combination
     """
     per_speed_fc = {}
     for fast, slow in EWMAC_VARIANTS:
@@ -123,12 +125,10 @@ def build_forecasts(prices: pd.DataFrame, vols: pd.DataFrame,
             speed_df[tk] = (norm * scalar).clip(-FORECAST_CAP, FORECAST_CAP)
         per_speed_fc[(fast, slow)] = speed_df
 
-    # Combine across speeds with FDM per instrument
     combined_fc = pd.DataFrame(index=prices.index, columns=prices.columns, dtype=float)
     for tk in prices.columns:
-        fc_for_fdm = pd.DataFrame({fs: per_speed_fc[fs][tk] for fs in EWMAC_VARIANTS})
-        fdm = compute_fdm(fc_for_fdm)
-        combined_fc[tk] = (fc_for_fdm.mean(axis=1) * fdm).clip(-FORECAST_CAP, FORECAST_CAP)
+        avg = pd.concat([per_speed_fc[fs][tk] for fs in EWMAC_VARIANTS], axis=1).mean(axis=1)
+        combined_fc[tk] = (avg * FDM).clip(-FORECAST_CAP, FORECAST_CAP)
         combined_fc[tk].iloc[:WARMUP_BARS] = np.nan
 
     return per_speed_fc, combined_fc
@@ -343,24 +343,49 @@ def run_backtest(tickers: list[str], capital: float, vol_target: float,
     for tk in tickers:
         buffered_pos[tk] = apply_buffer(raw_pos[tk])
 
-    # ── P&L ───────────────────────────────────────────────────────────────────
+    # ── Spread / cost map ─────────────────────────────────────────────────────
+    live_spreads = load_spreads()
+    spread_map   = {tk: live_spreads.get(tk, SPREAD_DEFAULT_BPS) for tk in tickers}
+    n_live = sum(1 for tk in tickers if tk in live_spreads)
+    print(f"  Spread data: {n_live}/{len(tickers)} from live NBBO, "
+          f"{len(tickers)-n_live} using {SPREAD_DEFAULT_BPS}bp default")
+
+    # ── P&L and transaction costs ─────────────────────────────────────────────
     pos_shifted   = buffered_pos.shift(1)
     pnl_matrix    = pos_shifted * returns
-    portfolio_pnl = pnl_matrix.sum(axis=1)
-    portfolio_ret = portfolio_pnl / capital
-    equity        = (1 + portfolio_ret).cumprod() * capital
+
+    delta_pos    = buffered_pos.diff().abs().fillna(0)
+    cost_matrix  = pd.DataFrame(0.0, index=prices.index, columns=tickers)
+    for tk in tickers:
+        cost_matrix[tk] = delta_pos[tk] * (spread_map[tk] / 10_000)
+
+    total_costs   = cost_matrix.sum(axis=1)
+    gross_pnl     = pnl_matrix.sum(axis=1)
+    net_pnl       = gross_pnl - total_costs
+
+    equity_gross  = (1 + gross_pnl / capital).cumprod() * capital
+    equity_net    = (1 + net_pnl   / capital).cumprod() * capital
+
+    years         = len(prices) / BDAYS
+    annual_cost   = total_costs.sum() / capital / years
+    annual_turn   = delta_pos.sum(axis=1).sum() / capital / years
 
     # ── Per-instrument attribution ─────────────────────────────────────────────
     inst_metrics: dict[str, dict] = {}
-    total_pnl_sum = portfolio_pnl.sum()
+    total_pnl_sum = net_pnl.sum()
     for tk in tickers:
-        inst_pnl    = pos_shifted[tk] * returns[tk]
+        inst_pnl    = pos_shifted[tk] * returns[tk] - cost_matrix[tk]
         inst_equity = (1 + (inst_pnl / capital).fillna(0)).cumprod() * capital
         m = performance_metrics(inst_equity.dropna())
-        m["weight"]     = weights.get(tk, 0.0)
+        m["weight"]           = weights.get(tk, 0.0)
         m["contribution_pct"] = (inst_pnl.sum() / total_pnl_sum * 100
                                   if total_pnl_sum != 0 else 0)
-        m["asset_class"] = asset_classes.get(tk, "OTHER")
+        m["asset_class"]      = asset_classes.get(tk, "OTHER")
+        m["spread_half_bps"]  = spread_map[tk]
+        # Gross (no-cost) Sharpe for comparison
+        inst_pnl_gross = pos_shifted[tk] * returns[tk]
+        inst_eq_gross  = (1 + (inst_pnl_gross / capital).fillna(0)).cumprod() * capital
+        m["sharpe_gross"] = performance_metrics(inst_eq_gross.dropna())["sharpe"]
         inst_metrics[tk] = m
 
     # ── Per-speed attribution ─────────────────────────────────────────────────
@@ -379,35 +404,53 @@ def run_backtest(tickers: list[str], capital: float, vol_target: float,
         speed_metrics[(fast, slow)] = performance_metrics(speed_eq)
 
     return dict(
-        equity=equity, portfolio_ret=portfolio_ret, pnl_matrix=pnl_matrix,
+        equity=equity_net,          # net is the primary equity curve
+        equity_gross=equity_gross,
+        equity_net=equity_net,
+        portfolio_ret=net_pnl / capital,
+        pnl_matrix=pnl_matrix,
+        cost_matrix=cost_matrix,
         inst_metrics=inst_metrics, speed_metrics=speed_metrics,
         weights=weights, idm=idm, scalars=scalars,
         prices=prices, vols=vols, combined_fc=combined_fc,
         group_totals=group_totals,
+        spread_map=spread_map,
+        annual_cost=annual_cost,
+        annual_turn=annual_turn,
     )
 
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
 def print_report(res: dict, vol_target: float, capital: float) -> None:
-    eq = res["equity"]
-    m  = performance_metrics(eq)
-    yr = yearly_returns(eq)
+    eq_g = res["equity_gross"]
+    eq_n = res["equity_net"]
+    m_g  = performance_metrics(eq_g)
+    m_n  = performance_metrics(eq_n)
+    yr   = yearly_returns(eq_n)
 
     print("\n" + "=" * 72)
-    print("  ETF EWMAC TREND — Handcraft equal weight (87 instruments)")
+    print("  ETF EWMAC TREND — Handcraft equal weight (88 instruments)")
     print("=" * 72)
-    print(f"  Capital:       ${capital:,.0f}")
-    print(f"  Vol target:    {vol_target*100:.0f}%   IDM: {res['idm']:.3f}")
-    print(f"  Period:        {eq.index[0].date()} → {eq.index[-1].date()}"
-          f"  ({m['years']:.1f}y)")
-    print(f"  CAGR:          {m['cagr']*100:.2f}%")
-    print(f"  Annual vol:    {m['ann_vol']*100:.2f}%")
-    print(f"  Sharpe:        {m['sharpe']:.3f}")
-    print(f"  Max drawdown:  {m['max_dd']*100:.2f}%")
-    print(f"  Calmar:        {m['calmar']:.3f}")
-    print(f"  % months +ve:  {m['pct_pos_months']:.1f}%")
+    print(f"  Capital:    ${capital:,.0f}")
+    print(f"  Vol target: {vol_target*100:.0f}%   IDM: {res['idm']:.3f}   FDM: {FDM}")
+    print(f"  Period:     {eq_n.index[0].date()} → {eq_n.index[-1].date()}"
+          f"  ({m_n['years']:.1f}y)")
 
-    print("\n  Year-by-year returns:")
+    print(f"\n  ── Performance ─────────────────────────────────────────────────")
+    print(f"               {'Gross':>8}  {'Net':>8}")
+    print(f"  CAGR         {m_g['cagr']*100:>7.2f}%  {m_n['cagr']*100:>7.2f}%")
+    print(f"  Ann vol      {m_g['ann_vol']*100:>7.2f}%  {m_n['ann_vol']*100:>7.2f}%")
+    print(f"  Sharpe       {m_g['sharpe']:>8.3f}  {m_n['sharpe']:>8.3f}")
+    print(f"  Max drawdown {m_g['max_dd']*100:>7.2f}%  {m_n['max_dd']*100:>7.2f}%")
+    print(f"  Calmar       {m_g['calmar']:>8.3f}  {m_n['calmar']:>8.3f}")
+    print(f"  % months +ve {m_g['pct_pos_months']:>7.1f}%  {m_n['pct_pos_months']:>7.1f}%")
+
+    print(f"\n  ── Transaction costs ────────────────────────────────────────────")
+    print(f"  Annual turnover (× capital):  {res['annual_turn']:.2f}×")
+    print(f"  Annual cost drag:             {res['annual_cost']*100:.3f}%")
+    print(f"  Sharpe haircut:               {m_g['sharpe'] - m_n['sharpe']:.3f}")
+
+    print("\n  Year-by-year returns (net):")
     for yr_i, r in yr.items():
         bar  = "█" * int(abs(r) * 200)
         sign = "+" if r >= 0 else "-"
@@ -418,13 +461,13 @@ def print_report(res: dict, vol_target: float, capital: float) -> None:
         bar = "█" * int(total * 200)
         print(f"    {g:<20} {total*100:5.1f}%  {bar}")
 
-    print("\n  EWMAC speed Sharpe (standalone):")
+    print("\n  EWMAC speed Sharpe (standalone, gross):")
     for (f, s), sm in res["speed_metrics"].items():
         bar = "█" * max(0, int(sm["sharpe"] * 20))
         print(f"    EWMAC({f:3},{s:4})  Sharpe {sm['sharpe']:+.3f}"
               f"  CAGR {sm['cagr']*100:+.1f}%  MaxDD {sm['max_dd']*100:.1f}%  {bar}")
 
-    print("\n  Asset class P&L contribution (% of total P&L):")
+    print("\n  Asset class P&L contribution (% of total net P&L):")
     ac_pnl: dict[str, float] = {}
     for tk, im in res["inst_metrics"].items():
         ac = im["asset_class"]
@@ -438,42 +481,69 @@ def print_report(res: dict, vol_target: float, capital: float) -> None:
     ranked_w = sorted(res["inst_metrics"].items(), key=lambda x: -x[1]["weight"])
     for tk, im in ranked_w[:15]:
         print(f"    {tk:<6}  w={im['weight']*100:4.2f}%"
-              f"  SR_port={im['sharpe']:+.2f}"
+              f"  SR_gross={im['sharpe_gross']:+.2f}"
+              f"  SR_net={im['sharpe']:+.2f}"
+              f"  spr={im['spread_half_bps']:.2f}bp"
               f"  contrib={im['contribution_pct']:+.1f}%"
               f"  [{im['asset_class']}]")
 
-    print("\n  Top 10 instruments by portfolio Sharpe:")
+    print("\n  Top 10 instruments by net Sharpe:")
     ranked_sr = sorted(res["inst_metrics"].items(), key=lambda x: -x[1]["sharpe"])
     for tk, im in ranked_sr[:10]:
-        print(f"    {tk:<6}  Sharpe {im['sharpe']:+.3f}  "
-              f"CAGR {im['cagr']*100:+.1f}%  w={im['weight']*100:.2f}%"
-              f"  [{im['asset_class']}]")
+        print(f"    {tk:<6}  SR_gross={im['sharpe_gross']:+.3f}  SR_net={im['sharpe']:+.3f}"
+              f"  spr={im['spread_half_bps']:.2f}bp"
+              f"  w={im['weight']*100:.2f}%  [{im['asset_class']}]")
 
-    print("\n  Bottom 10 instruments by portfolio Sharpe:")
+    print("\n  Bottom 10 instruments by net Sharpe:")
     for tk, im in ranked_sr[-10:]:
-        print(f"    {tk:<6}  Sharpe {im['sharpe']:+.3f}  "
-              f"CAGR {im['cagr']*100:+.1f}%  w={im['weight']*100:.2f}%"
-              f"  [{im['asset_class']}]")
+        print(f"    {tk:<6}  SR_gross={im['sharpe_gross']:+.3f}  SR_net={im['sharpe']:+.3f}"
+              f"  spr={im['spread_half_bps']:.2f}bp"
+              f"  w={im['weight']*100:.2f}%  [{im['asset_class']}]")
+
+    # ── Country ETF cost analysis ─────────────────────────────────────────────
+    country = {tk: im for tk, im in res["inst_metrics"].items()
+               if im["asset_class"] == "COUNTRY"}
+    if country:
+        print("\n  ── Country ETF cost analysis ─────────────────────────────────")
+        print(f"  {'Ticker':<6}  {'SR gross':>8}  {'SR net':>8}  "
+              f"{'Haircut':>8}  {'Spread':>8}  {'Contrib':>8}")
+        for tk, im in sorted(country.items(),
+                              key=lambda x: x[1]["sharpe_gross"] - x[1]["sharpe"],
+                              reverse=True):
+            haircut = im["sharpe_gross"] - im["sharpe"]
+            worth_it = "✓" if im["sharpe"] > 0 else "✗"
+            print(f"  {tk:<6}  {im['sharpe_gross']:>+8.3f}  {im['sharpe']:>+8.3f}"
+                  f"  {haircut:>8.3f}  {im['spread_half_bps']:>6.2f}bp"
+                  f"  {im['contribution_pct']:>+7.1f}%  {worth_it}")
 
 
 def plot_results(res: dict, vol_target: float) -> None:
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    eq = res["equity"]
-    m  = performance_metrics(eq)
-    yr = yearly_returns(eq)
+    eq_g = res["equity_gross"]
+    eq_n = res["equity_net"]
+    m_g  = performance_metrics(eq_g)
+    m_n  = performance_metrics(eq_n)
+    yr   = yearly_returns(eq_n)
 
     fig = plt.figure(figsize=(20, 16))
     gs  = gridspec.GridSpec(3, 3, figure=fig, hspace=0.42, wspace=0.35)
 
-    # 1. Equity curve
+    # 1. Equity curve — gross and net
     ax1 = fig.add_subplot(gs[0, :])
-    norm = eq / eq.iloc[0]
-    ax1.plot(eq.index, norm, color="steelblue", lw=1.2,
-             label=f"EWMAC  Sharpe {m['sharpe']:.2f}  CAGR {m['cagr']*100:.1f}%  MaxDD {m['max_dd']*100:.1f}%")
-    dd = (eq - eq.cummax()) / eq.cummax()
-    ax1.fill_between(eq.index, 1, 1 + dd * norm, alpha=0.18, color="crimson")
-    ax1.set_title("ETF EWMAC — Handcraft equal weight, 87 instruments  (normalised to 1.0)")
+    norm_g = eq_g / eq_g.iloc[0]
+    norm_n = eq_n / eq_n.iloc[0]
+    ax1.plot(eq_g.index, norm_g, color="steelblue", lw=1.0, alpha=0.5,
+             label=f"Gross  SR={m_g['sharpe']:.2f}  CAGR={m_g['cagr']*100:.1f}%")
+    ax1.plot(eq_n.index, norm_n, color="steelblue", lw=1.5,
+             label=f"Net    SR={m_n['sharpe']:.2f}  CAGR={m_n['cagr']*100:.1f}%"
+                   f"  MaxDD={m_n['max_dd']*100:.1f}%"
+                   f"  cost drag={res['annual_cost']*100:.2f}%/yr")
+    dd = (eq_n - eq_n.cummax()) / eq_n.cummax()
+    ax1.fill_between(eq_n.index, 1, 1 + dd * norm_n, alpha=0.18, color="crimson")
+    ax1.set_title("ETF EWMAC — Handcraft equal weight, 88 instruments  (normalised to 1.0)")
     ax1.legend(fontsize=9); ax1.grid(True, alpha=0.3); ax1.set_ylabel("Growth of $1")
+
+    eq = eq_n  # use net for all other panels
 
     # 2. Annual returns
     ax2 = fig.add_subplot(gs[1, 0])
