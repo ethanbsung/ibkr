@@ -203,13 +203,14 @@ class Ledger:
                       if mid and mid > 0 else None)
         side_sign  = 1 if fill["side"] == "buy" else -1
 
+        fp = fill.get("fill_price")   # None for canceled/rejected orders
         slippage_vs_signal = (
-            (fill["fill_price"] - fill["signal_price"]) / fill["signal_price"] * 10_000 * side_sign
-            if fill.get("signal_price") else None
+            (fp - fill["signal_price"]) / fill["signal_price"] * 10_000 * side_sign
+            if fp is not None and fill.get("signal_price") else None
         )
         slippage_vs_mid = (
-            (fill["fill_price"] - mid) / mid * 10_000 * side_sign
-            if mid and mid > 0 else None
+            (fp - mid) / mid * 10_000 * side_sign
+            if fp is not None and mid and mid > 0 else None
         )
 
         ts = datetime.utcnow().isoformat()

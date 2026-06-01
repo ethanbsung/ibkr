@@ -4,3 +4,46 @@ Make sure TWS or IB Gateway is running.
 ERROR:ib_insync.client:API connection failed: TimeoutError()
 ERROR: Could not connect to IBKR — 
 Make sure TWS or IB Gateway is running.
+
+============================================================================
+  IBS  [EXECUTE]  |  2026-06-01  |  checking: MGC
+  Equity: $251,587.01   per instrument: $83,862
+  Execution: MES/MNQ → MKT @ 3:58 PM ET   MGC → MKT @ 1:28 PM ET
+============================================================================
+
+  ────────────────────────────────────────────────────────────────────────
+  GC  Micro Gold  (MGC 202606)  |  position: +1
+  H 4543.00  L 4453.90  C 4471.30  |  IBS: 0.195  |  target: 4 contract(s)
+  HOLD long (1 contract(s))
+
+============================================================================
+  NO ORDERS PLACED — no signals triggered
+============================================================================
+
+
+============================================================================
+  IBS  [EXECUTE]  |  2026-06-01  |  checking: MES / MNQ
+  Equity: $251,666.33   per instrument: $83,889
+  Execution: MES/MNQ → MKT @ 3:58 PM ET   MGC → MKT @ 1:28 PM ET
+============================================================================
+
+  ────────────────────────────────────────────────────────────────────────
+  ES  Micro S&P 500  (MES 202606)  |  position: +1
+  H 7632.75  L 7576.00  C 7617.25  |  IBS: 0.727  |  target: 4 contract(s)
+  *** REBALANCE  1 → 4 contract(s)  (BUY 3)
+  ACTION: BUY 3 MES  — MKT @ 3:58 PM ET
+  ORDER PLACED → status: Filled  (orderId 7)
+
+  ────────────────────────────────────────────────────────────────────────
+  NQ  Micro Nasdaq  (MNQ 202606)  |  position: +1
+  H 30692.00  L 30291.00  C 30583.00  |  IBS: 0.728  |  target: 3 contract(s)
+  *** REBALANCE  1 → 3 contract(s)  (BUY 2)
+  ACTION: BUY 2 MNQ  — MKT @ 3:58 PM ET
+  ORDER PLACED → status: Filled  (orderId 8)
+
+============================================================================
+  ORDERS PLACED:
+    BUY  3 MES MKT                  status: Filled                id: 7
+    BUY  2 MNQ MKT                  status: Filled                id: 8
+============================================================================
+

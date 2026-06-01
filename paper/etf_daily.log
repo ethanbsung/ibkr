@@ -1,0 +1,165 @@
+
+====================================================================
+  ETF LIVE TRADING  2026-06-01  LIVE
+  Alpaca equity: $5,000.00
+  Strategies: ['ewmac']
+====================================================================
+
+── EWMAC  capital=$5,000 ──
+  Fetching live prices for 78 tickers…
+  Got prices for 78/78 tickers
+  Generating signals…
+  Signals: 77 non-zero  (59 long, 18 short)
+  Gross long  $   +7,739.46
+  Gross short $   -1,760.38
+  Gross total $    9,499.85  (1.90x equity)
+  ⚠ Leverage cap applied: positions scaled to 56.7% (cap 1.9x)
+
+  Executing orders …
+  FILL BIL    buy     1.3519 sh  @ $   91.40  ($123.56)
+  FILL BITO   sell  -36.0000 sh  @ $    9.73  (36 sh)
+  FILL BNDX   buy     6.7655 sh  @ $   48.11  ($325.49)
+  FILL BWX    sell   -3.0000 sh  @ $   22.01  (3 sh)
+  FILL CALF   buy     2.7045 sh  @ $   51.21  ($138.50)
+  FILL COWZ   buy     3.2197 sh  @ $   65.50  ($210.89)
+  FILL DBA    sell   -4.0000 sh  @ $   27.24  (4 sh)
+  FILL ECH    buy     0.1888 sh  @ $   41.15  ($7.77)
+  ERROR submit EIDO sell: {"code":42210000,"message":"asset \"EIDO\" cannot be sold short"}
+  FILL EWA    buy     0.4581 sh  @ $   29.12  ($13.34)
+  FILL EWC    buy     0.8762 sh  @ $   58.71  ($51.44)
+  FILL EWG    buy     0.4868 sh  @ $   43.51  ($21.18)
+  ERROR submit EWH sell: {"code":42210000,"message":"asset \"EWH\" cannot be sold short"}
+  FILL EWI    buy     0.4497 sh  @ $   59.26  ($26.65)
+  FILL EWJ    buy     0.4876 sh  @ $   92.93  ($45.31)
+  FILL EWL    buy     0.3358 sh  @ $   61.98  ($20.81)
+  FILL EWP    buy     0.3952 sh  @ $   57.46  ($22.71)
+  FILL EWQ    buy     0.2858 sh  @ $   45.80  ($13.09)
+  FILL EWT    buy     0.3169 sh  @ $  106.48  ($33.74)
+  FILL EWU    buy     0.2590 sh  @ $   46.69  ($12.09)
+  FILL EWW    buy     0.1719 sh  @ $   77.90  ($13.39)
+  FILL EWY    buy     0.0913 sh  @ $  216.42  ($19.76)
+  FILL FLOT   buy     5.1996 sh  @ $   50.91  ($264.71)
+  FILL FXI    sell   -1.0000 sh  @ $   35.34  (1 sh)
+  FILL FXY    sell   -7.0000 sh  @ $   57.50  (7 sh)
+  FILL GLD    sell   -1.0000 sh  @ $  411.24  (1 sh)
+  FILL HDV    buy     1.2492 sh  @ $   26.90  ($33.60)
+  FILL HYD    buy    16.1132 sh  @ $   51.22  ($825.32)
+  FILL IAGG   buy     8.8581 sh  @ $   50.23  ($444.94)
+  FILL IBB    buy     0.0456 sh  @ $  169.40  ($7.72)
+  FILL ITA    buy     0.0796 sh  @ $  230.19  ($18.33)
+  FILL IWM    buy     0.9656 sh  @ $  288.94  ($278.99)
+  FILL IYT    buy     0.4087 sh  @ $   84.84  ($34.67)
+  FILL KRE    buy     0.1033 sh  @ $   68.37  ($7.06)
+  FILL LQD    buy     1.7183 sh  @ $  108.90  ($187.12)
+  FILL MTUM   buy     0.3834 sh  @ $  316.95  ($121.52)
+  FILL MUB    buy     4.2811 sh  @ $  106.95  ($457.86)
+  FILL OIH    buy     0.0154 sh  @ $  420.71  ($6.46)
+  FILL PDBC   buy    13.0000 sh  @ $   17.88  ($296.92)  [partially_filled]
+  FILL QQQ    buy     0.5011 sh  @ $  742.55  ($372.10)
+  FILL SGOV   buy     1.2282 sh  @ $  100.40  ($123.31)
+  FILL SHY    buy     0.3878 sh  @ $   82.02  ($31.81)
+  FILL SMH    buy     0.0456 sh  @ $  608.00  ($27.73)
+  FILL SPY    buy     0.6986 sh  @ $  758.33  ($529.74)
+  FILL TIP    sell   -1.0000 sh  @ $  109.97  (1 sh)
+  FILL TLT    buy     0.0735 sh  @ $   85.47  ($6.28)
+  FILL UNG    buy     1.1249 sh  @ $   11.55  ($12.99)
+  FILL USMV   buy     1.8759 sh  @ $   96.93  ($181.83)
+  TIMEOUT USO: order 2dd85e0c-3343-4288-84f0-ea26fe7b9164 not confirmed in 30s (last status: accepted)
+  FILL USO    buy     0.0000 sh  @ $  135.69  ($107.56)  [unconfirmed]
+  TIMEOUT UUP: order 4b25306d-94d2-45fb-998e-8470e9005a02 not confirmed in 30s (last status: accepted)
+  FILL UUP    buy     0.0000 sh  @ $   27.73  ($505.14)  [unconfirmed]
+  TIMEOUT UVXY: order e351d9b1-249a-4a99-9064-faa7788b4621 not confirmed in 30s (last status: accepted)
+  FILL UVXY   sell   -0.0000 sh  @ $   29.85  (9 sh)  [unconfirmed]
+  TIMEOUT VCIT: order ba6b8097-08c9-4078-9d21-1667cec7e705 not confirmed in 30s (last status: accepted)
+  FILL VCIT   buy     0.0000 sh  @ $   82.42  ($152.78)  [unconfirmed]
+  TIMEOUT VCSH: order e6096ce8-41ee-4aaf-9a99-3cfe5a2ac058 not confirmed in 30s (last status: accepted)
+  FILL VCSH   buy     0.0000 sh  @ $   78.86  ($131.26)  [unconfirmed]
+  TIMEOUT VGSH: order e4a8f650-392e-4481-a682-446c85187dcf not confirmed in 30s (last status: accepted)
+  FILL VGSH   buy     0.0000 sh  @ $   58.14  ($36.08)  [unconfirmed]
+  TIMEOUT VLUE: order e237cde5-1b74-494e-992d-c37ebcffb8c8 not confirmed in 30s (last status: accepted)
+  FILL VLUE   buy     0.0000 sh  @ $  201.51  ($122.94)  [unconfirmed]
+  TIMEOUT VTEB: order b3140102-d3f9-45f3-a7e4-4dd615548eb0 not confirmed in 30s (last status: accepted)
+  FILL VTEB   buy     0.0000 sh  @ $   50.26  ($503.34)  [unconfirmed]
+  TIMEOUT VTIP: order ec593ed2-f273-4bbf-a43d-f872c6712083 not confirmed in 30s (last status: accepted)
+  FILL VTIP   buy     0.0000 sh  @ $   50.44  ($478.15)  [unconfirmed]
+  TIMEOUT VTV: order e1b5c936-de5f-4a8a-9b5d-f6e3b9fa5362 not confirmed in 30s (last status: accepted)
+  FILL VTV    buy     0.0000 sh  @ $  211.30  ($247.54)  [unconfirmed]
+  TIMEOUT XBI: order bf44b632-80af-4fbe-a481-25ca5f505f18 not confirmed in 30s (last status: accepted)
+  FILL XBI    buy     0.0000 sh  @ $  133.81  ($13.15)  [unconfirmed]
+  TIMEOUT XLB: order e1c64def-66af-43d8-91b8-1bd33369d490 not confirmed in 30s (last status: accepted)
+  FILL XLB    buy     0.0000 sh  @ $   50.90  ($12.58)  [unconfirmed]
+  TIMEOUT XLC: order 37dfe3e9-312e-4f49-8530-1eac31fba636 not confirmed in 30s (last status: accepted)
+  FILL XLC    buy     0.0000 sh  @ $  115.66  ($5.23)  [unconfirmed]
+  TIMEOUT XLI: order f62ec798-2648-47d9-a43f-828ec2ab49c4 not confirmed in 30s (last status: accepted)
+  FILL XLI    buy     0.0000 sh  @ $  172.38  ($17.32)  [unconfirmed]
+  TIMEOUT XLU: order 3ec7eaef-1ee9-416d-ba6e-8a9f79b7d2c3 not confirmed in 30s (last status: accepted)
+  FILL XLU    sell   -0.0000 sh  @ $   43.10  (1 sh)  [unconfirmed]
+  TIMEOUT XLV: order 43cdc8f8-f589-4934-ad68-4ac017f7f125 not confirmed in 30s (last status: accepted)
+  FILL XLV    buy     0.0000 sh  @ $  147.60  ($7.30)  [unconfirmed]
+  TIMEOUT XLY: order 9dc9b911-cd88-4fa5-af98-038accad363e not confirmed in 30s (last status: accepted)
+  FILL XLY    buy     0.0000 sh  @ $  118.56  ($11.63)  [unconfirmed]
+  TIMEOUT XRT: order b69f9f4d-0e79-448f-8c29-f86ebc3d20bf not confirmed in 30s (last status: accepted)
+  FILL XRT    buy     0.0000 sh  @ $   82.70  ($5.17)  [unconfirmed]
+  Placed 64 orders
+
+  ⚠ RECONCILE: 19 order(s) need attention:
+      PDBC   buy  status=partially_filled  filled=+13.0000 sh  id=e18fde1a-b3e9-419e-8091-77d74481f23b
+      USO    buy  status=unconfirmed  filled=+0.0000 sh  id=2dd85e0c-3343-4288-84f0-ea26fe7b9164
+      UUP    buy  status=unconfirmed  filled=+0.0000 sh  id=4b25306d-94d2-45fb-998e-8470e9005a02
+      UVXY   sell status=unconfirmed  filled=-0.0000 sh  id=e351d9b1-249a-4a99-9064-faa7788b4621
+      VCIT   buy  status=unconfirmed  filled=+0.0000 sh  id=ba6b8097-08c9-4078-9d21-1667cec7e705
+      VCSH   buy  status=unconfirmed  filled=+0.0000 sh  id=e6096ce8-41ee-4aaf-9a99-3cfe5a2ac058
+      VGSH   buy  status=unconfirmed  filled=+0.0000 sh  id=e4a8f650-392e-4481-a682-446c85187dcf
+      VLUE   buy  status=unconfirmed  filled=+0.0000 sh  id=e237cde5-1b74-494e-992d-c37ebcffb8c8
+      VTEB   buy  status=unconfirmed  filled=+0.0000 sh  id=b3140102-d3f9-45f3-a7e4-4dd615548eb0
+      VTIP   buy  status=unconfirmed  filled=+0.0000 sh  id=ec593ed2-f273-4bbf-a43d-f872c6712083
+      VTV    buy  status=unconfirmed  filled=+0.0000 sh  id=e1b5c936-de5f-4a8a-9b5d-f6e3b9fa5362
+      XBI    buy  status=unconfirmed  filled=+0.0000 sh  id=bf44b632-80af-4fbe-a481-25ca5f505f18
+      XLB    buy  status=unconfirmed  filled=+0.0000 sh  id=e1c64def-66af-43d8-91b8-1bd33369d490
+      XLC    buy  status=unconfirmed  filled=+0.0000 sh  id=37dfe3e9-312e-4f49-8530-1eac31fba636
+      XLI    buy  status=unconfirmed  filled=+0.0000 sh  id=f62ec798-2648-47d9-a43f-828ec2ab49c4
+      XLU    sell status=unconfirmed  filled=-0.0000 sh  id=3ec7eaef-1ee9-416d-ba6e-8a9f79b7d2c3
+      XLV    buy  status=unconfirmed  filled=+0.0000 sh  id=43cdc8f8-f589-4934-ad68-4ac017f7f125
+      XLY    buy  status=unconfirmed  filled=+0.0000 sh  id=9dc9b911-cd88-4fa5-af98-038accad363e
+      XRT    buy  status=unconfirmed  filled=+0.0000 sh  id=b69f9f4d-0e79-448f-8c29-f86ebc3d20bf
+  Paper book updated: paper/ledgers/etf_ewmac
+
+====================================================================
+  LIVE LEDGER  —  EWMAC  (last 30 days)
+====================================================================
+  P&L summary (last 2 days):
+    Equity P&L          $     +0.00  [authoritative]
+    MTM P&L (diag)      $     +0.00
+    Spread cost (diag)  $    149.52
+    Alpaca equity (NAV)  $5,000.00  [authoritative]
+
+  Current positions (top 15 by value):
+    HYD        16.1132 sh  @ $   51.21  = $    825.16  daily P&L $   +0.00
+    SPY         0.6986 sh  @ $  758.18  = $    529.64  daily P&L $   +0.00
+    MUB         4.2811 sh  @ $  106.93  = $    457.80  daily P&L $   +0.00
+    IAGG        8.8581 sh  @ $   50.22  = $    444.85  daily P&L $   +0.00
+    QQQ         0.5011 sh  @ $  742.41  = $    372.03  daily P&L $   +0.00
+    BNDX        6.7655 sh  @ $   48.10  = $    325.46  daily P&L $   +0.00
+    PDBC       16.6063 sh  @ $   17.88  = $    296.92  daily P&L $   +0.00
+    IWM         0.9656 sh  @ $  289.02  = $    279.07  daily P&L $   +0.00
+    FLOT        5.1996 sh  @ $   50.91  = $    264.71  daily P&L $   +0.00
+    COWZ        3.2197 sh  @ $   65.47  = $    210.79  daily P&L $   +0.00
+    LQD         1.7183 sh  @ $  108.90  = $    187.12  daily P&L $   +0.00
+    USMV        1.8759 sh  @ $   96.90  = $    181.79  daily P&L $   +0.00
+    CALF        2.7045 sh  @ $   51.20  = $    138.47  daily P&L $   +0.00
+    BIL         1.3519 sh  @ $   91.39  = $    123.56  daily P&L $   +0.00
+    SGOV        1.2282 sh  @ $  100.39  = $    123.31  daily P&L $   +0.00
+
+  Recent fills:
+    2026-06-01  XRT     buy      0.0000 sh @ $   82.70  slip -73.8 bps  spread 700.1 bps
+    2026-06-01  XLY     buy      0.0000 sh @ $  118.56  slip +26.6 bps  spread 630.9 bps
+    2026-06-01  XLV     buy      0.0000 sh @ $  147.60  slip +0.0 bps
+    2026-06-01  XLU     sell     0.0000 sh @ $   43.10  slip +0.0 bps
+    2026-06-01  XLI     buy      0.0000 sh @ $  172.38  slip -1.5 bps  spread 565.6 bps
+    2026-06-01  XLC     buy      0.0000 sh @ $  115.66  slip +0.0 bps
+    2026-06-01  XLB     buy      0.0000 sh @ $   50.90  slip +0.0 bps
+    2026-06-01  XBI     buy      0.0000 sh @ $  133.81  slip +11.6 bps  spread 26.2 bps
+    2026-06-01  VTV     buy      0.0000 sh @ $  211.30  slip +0.0 bps
+    2026-06-01  VTIP    buy      0.0000 sh @ $   50.44  slip +1.0 bps  spread 4.0 bps
+
+  Done. Ledger: Data/live/trading.db

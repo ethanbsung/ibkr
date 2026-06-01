@@ -312,6 +312,22 @@ def run_backtest(tickers: list[str], capital: float, vol_target: float,
                        * (combined_fc[tk] / FORECAST_TARGET)
                        / vols[tk].replace(0, np.nan))
 
+    # Force non-shortable symbols to long-only (matches Alpaca live constraints).
+    # Loads from Data/etf/etf_shortability.json produced by etf/check_shortability.py.
+    shortability_path = os.path.join("Data", "etf", "etf_shortability.json")
+    if os.path.exists(shortability_path):
+        with open(shortability_path) as _f:
+            _sdata = json.load(_f)
+        non_shortable = {tk for tk, d in _sdata.get("symbols", {}).items()
+                         if not d.get("shortable", True)}
+        forced_long_only = [tk for tk in tickers if tk in non_shortable]
+        if forced_long_only:
+            for tk in forced_long_only:
+                raw_pos[tk] = raw_pos[tk].clip(lower=0)
+            print(f"  Non-shortable (long-only): {forced_long_only}")
+    else:
+        print("  WARNING: etf_shortability.json not found — run etf/check_shortability.py")
+
     # Apply gross leverage cap (same constraint as live Reg-T Alpaca account).
     # If gross exposure > cap × capital on any day, scale all positions down
     # proportionally — preserving relative weights but cutting overall size.
@@ -390,6 +406,7 @@ def run_backtest(tickers: list[str], capital: float, vol_target: float,
 
     # ── Per-speed attribution ─────────────────────────────────────────────────
     speed_metrics: dict[tuple, dict] = {}
+    speed_returns: dict[tuple, pd.Series] = {}
     for fast, slow in EWMAC_VARIANTS:
         speed_pnl = pd.Series(0.0, index=prices.index)
         for tk in tickers:
@@ -400,6 +417,7 @@ def run_backtest(tickers: list[str], capital: float, vol_target: float,
                      * (fc_s / FORECAST_TARGET)
                      / vols[tk].replace(0, np.nan))
             speed_pnl += pos_s.shift(1).fillna(0) * returns[tk].fillna(0)
+        speed_returns[(fast, slow)] = speed_pnl / capital
         speed_eq = (1 + (speed_pnl / capital)).cumprod() * capital
         speed_metrics[(fast, slow)] = performance_metrics(speed_eq)
 
@@ -411,6 +429,7 @@ def run_backtest(tickers: list[str], capital: float, vol_target: float,
         pnl_matrix=pnl_matrix,
         cost_matrix=cost_matrix,
         inst_metrics=inst_metrics, speed_metrics=speed_metrics,
+        speed_returns=speed_returns,
         weights=weights, idm=idm, scalars=scalars,
         prices=prices, vols=vols, combined_fc=combined_fc,
         group_totals=group_totals,
@@ -466,6 +485,20 @@ def print_report(res: dict, vol_target: float, capital: float) -> None:
         bar = "█" * max(0, int(sm["sharpe"] * 20))
         print(f"    EWMAC({f:3},{s:4})  Sharpe {sm['sharpe']:+.3f}"
               f"  CAGR {sm['cagr']*100:+.1f}%  MaxDD {sm['max_dd']*100:.1f}%  {bar}")
+
+    labels = [f"({f},{s})" for f, s in EWMAC_VARIANTS]
+    speed_ret_df = pd.DataFrame(
+        {lbl: res["speed_returns"][fs] for lbl, fs in zip(labels, EWMAC_VARIANTS)}
+    ).dropna()
+    corr_matrix = speed_ret_df.corr()
+    print("\n  EWMAC speed return correlations:")
+    header = "              " + "".join(f"  {lbl:>8}" for lbl in labels)
+    print(header)
+    for row_lbl in labels:
+        row = f"  {row_lbl:>10}  "
+        for col_lbl in labels:
+            row += f"  {corr_matrix.at[row_lbl, col_lbl]:>8.3f}"
+        print(row)
 
     print("\n  Asset class P&L contribution (% of total net P&L):")
     ac_pnl: dict[str, float] = {}
@@ -552,13 +585,22 @@ def plot_results(res: dict, vol_target: float) -> None:
     ax2.axhline(0, color="black", lw=0.8)
     ax2.set_title("Annual Returns (%)"); ax2.grid(True, alpha=0.3)
 
-    # 3. EWMAC speed Sharpe
+    # 3. EWMAC speed return correlation heatmap
     ax3 = fig.add_subplot(gs[1, 1])
-    labels  = [f"({f},{s})" for f, s in EWMAC_VARIANTS]
-    sharpes = [res["speed_metrics"][(f, s)]["sharpe"] for f, s in EWMAC_VARIANTS]
-    ax3.bar(labels, sharpes, color=["seagreen" if s >= 0 else "crimson" for s in sharpes], alpha=0.8)
-    ax3.axhline(0, color="black", lw=0.8)
-    ax3.set_title("Sharpe by EWMAC Speed"); ax3.grid(True, alpha=0.3)
+    spd_labels = [f"({f},{s})" for f, s in EWMAC_VARIANTS]
+    speed_ret_df = pd.DataFrame(
+        {lbl: res["speed_returns"][fs] for lbl, fs in zip(spd_labels, EWMAC_VARIANTS)}
+    ).dropna()
+    corr_mat = speed_ret_df.corr().values
+    im = ax3.imshow(corr_mat, vmin=-1, vmax=1, cmap="RdYlGn", aspect="auto")
+    ax3.set_xticks(range(len(spd_labels))); ax3.set_xticklabels(spd_labels, rotation=45, ha="right", fontsize=7)
+    ax3.set_yticks(range(len(spd_labels))); ax3.set_yticklabels(spd_labels, fontsize=7)
+    for i in range(len(spd_labels)):
+        for j in range(len(spd_labels)):
+            ax3.text(j, i, f"{corr_mat[i, j]:.2f}", ha="center", va="center", fontsize=7,
+                     color="black" if abs(corr_mat[i, j]) < 0.7 else "white")
+    plt.colorbar(im, ax=ax3, fraction=0.046, pad=0.04)
+    ax3.set_title("EWMAC Speed Return Correlations")
 
     # 4. Group weights (bar)
     ax4 = fig.add_subplot(gs[1, 2])

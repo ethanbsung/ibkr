@@ -11,30 +11,61 @@ Order mechanics (Alpaca constraint-aware):
   • FLIP       — a target that crosses zero (long→short or short→long) is split
                  into two orders: close the existing leg, then open the new leg.
                  No single order ever crosses zero.
+  • NON-SHORTABLE — symbols flagged in Data/etf/etf_shortability.json as
+                 shortable=False are silently treated as long-only: any short
+                 target is skipped (position stays flat or long).
+
+Execution is two-phase to avoid sequential blocking and stay under API rate limits:
+  Phase 1 — submit all orders quickly (0.35s spacing), no blocking poll per order.
+             A local-clock post-market guard skips orders if it's already past 4 PM ET.
+  Phase 2 — batch-poll get_orders(status=open) every 3s until all submitted orders
+             settle or a 60s timeout expires. One API call per cycle vs N per cycle.
+
+Quotes are batch-fetched upfront (1 call for all tickers) for slippage diagnostics.
 
 Per instrument:
   1. delta vs current Alpaca position
   2. 10% position buffer + MIN_TRADE_USD floor (skip tiny adjustments)
   3. independent per-order notional ceiling (defense-in-depth vs a bad signal)
-  4. place order(s), poll for fill confirmation (errors logged, never swallowed)
+  4. place order(s) in phase 1, confirm fills in phase 2
   5. return fill record(s) for the ledger
-
-Dry-run mode simulates fills at the reference price without placing real orders.
 """
 
+import json
 import os
 import time
 from datetime import date, datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from etf.live._env import load_dotenv
 
-BUFFER_FRACTION   = 0.10     # skip trade if within 10% of target (matches backtest)
-MIN_TRADE_USD     = 5.00     # skip if |delta| < $5 (Alpaca fractional min ~$1, buffer)
-FILL_TIMEOUT      = 30       # seconds to wait for fill confirmation
-POLL_INTERVAL     = 2        # seconds between fill status polls
-TERMINAL_OK       = ("filled", "partially_filled")
-TERMINAL_BAD      = ("canceled", "expired", "rejected", "done_for_day")
+BUFFER_FRACTION    = 0.10    # skip trade if within 10% of target (matches backtest)
+MIN_TRADE_USD      = 5.00    # skip if |delta| < $5 (Alpaca fractional min ~$1, buffer)
+SUBMIT_SPACING     = 0.35    # seconds between order submissions (keeps us ~156 req/min)
+POLL_INTERVAL      = 3       # seconds between batch poll cycles
+POLL_TIMEOUT       = 60      # seconds to wait for all orders to settle
+TERMINAL_OK        = ("filled", "partially_filled")
+TERMINAL_BAD       = ("canceled", "expired", "rejected", "done_for_day")
+MARKET_CLOSE_ET    = (16, 0)  # (hour, minute) — skip submits at/after this local time
+ET                 = ZoneInfo("America/New_York")
+
+SHORTABILITY_FILE  = "Data/etf/etf_shortability.json"
+
+
+def _load_shortability() -> dict[str, bool]:
+    """Returns {ticker: shortable} from the pre-built shortability JSON. Defaults to True."""
+    if not os.path.exists(SHORTABILITY_FILE):
+        return {}
+    with open(SHORTABILITY_FILE) as f:
+        data = json.load(f)
+    return {sym: d.get("shortable", True) for sym, d in data.get("symbols", {}).items()}
+
+
+def _market_closed() -> bool:
+    """True if current ET wall-clock time is at or past 4:00 PM (no API call)."""
+    now = datetime.now(ET)
+    return (now.hour, now.minute) >= MARKET_CLOSE_ET
 
 
 class Executor:
@@ -55,21 +86,24 @@ class Executor:
         from alpaca.trading.client import TradingClient
         from alpaca.data.historical import StockHistoricalDataClient
 
-        self.trading = TradingClient(api_key, api_secret, paper=True)
-        self.data    = StockHistoricalDataClient(api_key, api_secret)
-        self.dry_run = dry_run
-        # Hard ceiling on any single order's notional.  None disables the check.
+        self.trading           = TradingClient(api_key, api_secret, paper=True)
+        self.data              = StockHistoricalDataClient(api_key, api_secret)
+        self.dry_run           = dry_run
         self.max_order_notional = max_order_notional
+        self._shortable        = _load_shortability()
+
+        n_ns = sum(1 for v in self._shortable.values() if not v)
+        if n_ns:
+            ns_list = sorted(k for k, v in self._shortable.items() if not v)
+            print(f"  Shortability: {n_ns} non-shortable symbols loaded: {ns_list}")
 
     # ── Account / market state ────────────────────────────────────────────────
 
     def get_account_equity(self) -> float:
-        """Returns Alpaca account equity in dollars."""
         acct = self.trading.get_account()
         return float(acct.equity)
 
     def is_market_open(self) -> bool:
-        """True if the market is open right now per Alpaca's clock."""
         try:
             return bool(self.trading.get_clock().is_open)
         except Exception as e:
@@ -77,25 +111,14 @@ class Executor:
             return False
 
     def get_current_positions(self) -> dict[str, float]:
-        """Returns {ticker: market_value_usd} for all open Alpaca positions."""
         positions = self.trading.get_all_positions()
         return {p.symbol: float(p.market_value) for p in positions}
 
     def get_current_shares(self) -> dict[str, float]:
-        """
-        Returns {ticker: shares} for all open Alpaca positions.
-        Shares are NEGATIVE for short positions.
-        """
         positions = self.trading.get_all_positions()
         return {p.symbol: float(p.qty) for p in positions}
 
     def get_positions_detail(self) -> dict[str, dict]:
-        """
-        Returns {ticker: {shares, avg_entry_price, market_value}} for all open
-        positions.  avg_entry_price is Alpaca's authoritative cost basis (handles
-        adds/partial closes correctly), used for unrealized-P&L accounting.
-        Shares/market_value are NEGATIVE for shorts.
-        """
         out = {}
         for p in self.trading.get_all_positions():
             out[p.symbol] = {
@@ -105,29 +128,35 @@ class Executor:
             }
         return out
 
-    # ── Quote fetching (execution-quality diagnostics) ─────────────────────────
+    # ── Quote fetching ────────────────────────────────────────────────────────
 
-    def get_quote(self, ticker: str) -> dict:
+    def get_quotes_batch(self, tickers: list[str]) -> dict[str, dict]:
         """
-        Returns {bid, ask, mid, spread_bps} from the latest NBBO quote.
-        Used only for slippage/spread diagnostics on traded names.
+        Fetch latest NBBO quotes for all tickers in a single API call.
+        Returns {ticker: {bid, ask, mid, spread_bps}}.
         """
         try:
             from alpaca.data.requests import StockLatestQuoteRequest
-            req  = StockLatestQuoteRequest(symbol_or_symbols=ticker)
+            req  = StockLatestQuoteRequest(symbol_or_symbols=tickers)
             resp = self.data.get_stock_latest_quote(req)
-            q    = resp[ticker]
-            bid  = float(q.bid_price) if q.bid_price and q.bid_price > 0 else None
-            ask  = float(q.ask_price) if q.ask_price and q.ask_price > 0 else None
-            mid  = (bid + ask) / 2 if bid and ask else None
-            spread_bps = ((ask - bid) / mid * 10_000
-                          if mid and mid > 0 else None)
-            return {"bid": bid, "ask": ask, "mid": mid, "spread_bps": spread_bps}
-        except Exception:
-            return {"bid": None, "ask": None, "mid": None, "spread_bps": None}
+            out  = {}
+            for tk in tickers:
+                q = resp.get(tk)
+                if q is None:
+                    out[tk] = {"bid": None, "ask": None, "mid": None, "spread_bps": None}
+                    continue
+                bid = float(q.bid_price) if q.bid_price and q.bid_price > 0 else None
+                ask = float(q.ask_price) if q.ask_price and q.ask_price > 0 else None
+                mid = (bid + ask) / 2 if bid and ask else None
+                spread_bps = ((ask - bid) / mid * 10_000 if mid and mid > 0 else None)
+                out[tk] = {"bid": bid, "ask": ask, "mid": mid, "spread_bps": spread_bps}
+            return out
+        except Exception as e:
+            print(f"  WARN batch quote fetch failed ({e}); diagnostics will be missing")
+            return {tk: {"bid": None, "ask": None, "mid": None, "spread_bps": None}
+                    for tk in tickers}
 
     def get_latest_price(self, ticker: str) -> Optional[float]:
-        """Returns latest Alpaca trade price for a single ticker (fallback ref)."""
         try:
             from alpaca.data.requests import StockLatestTradeRequest
             req  = StockLatestTradeRequest(symbol_or_symbols=ticker)
@@ -141,33 +170,38 @@ class Executor:
 
     def execute_targets(
         self,
-        target_positions: dict[str, float],    # {ticker: target_usd}
-        ref_prices: dict[str, float],           # {ticker: current price} for sizing
-        close_tickers: Optional[set[str]] = None,  # held names to fully unwind
+        target_positions: dict[str, float],
+        ref_prices: dict[str, float],
+        close_tickers: Optional[set[str]] = None,
         strategy: str = "ewmac",
     ) -> list[dict]:
         """
-        Rebalance every name in target_positions toward its target_usd, and fully
-        close any name in close_tickers (e.g. dropped from the universe).
-        Returns a list of fill dicts ready for Ledger.record_fill().
+        Two-phase execution:
+          Phase 1 — build the order list, then submit all quickly with SUBMIT_SPACING delay.
+                    Skip any submit if the local ET clock has passed market close.
+          Phase 2 — batch-poll open orders until settled or POLL_TIMEOUT expires.
 
-        Names absent from target_positions are NOT touched (a missing live price
-        upstream means "hold"), unless they appear in close_tickers.
+        Returns a list of fill dicts ready for Ledger.record_fill().
         """
         current_shares = self.get_current_shares()
-        fills: list[dict] = []
 
-        # 1) Rebalance current universe names that have a valid reference price.
+        # Batch-fetch all quotes upfront (1 API call for all tickers).
+        all_tickers = list(target_positions) + list(close_tickers or [])
+        quotes = self.get_quotes_batch(all_tickers) if not self.dry_run else {}
+
+        # ── Build order specs (no submission yet) ─────────────────────────────
+        order_specs: list[dict] = []
+
         for ticker, target_usd in target_positions.items():
             price = ref_prices.get(ticker)
             if not price or price <= 0:
-                # No price -> cannot size safely; hold the existing position.
                 print(f"  HOLD {ticker}: no reference price, leaving position unchanged")
                 continue
             cur = current_shares.get(ticker, 0.0)
-            fills += self._rebalance_one(ticker, cur, target_usd, price, strategy)
+            specs = self._build_order_specs(ticker, cur, target_usd, price, strategy,
+                                            quotes.get(ticker, {}))
+            order_specs.extend(specs)
 
-        # 2) Close names held on Alpaca but no longer in the universe.
         for ticker in (close_tickers or set()):
             cur = current_shares.get(ticker, 0.0)
             if cur == 0:
@@ -177,207 +211,269 @@ class Executor:
                 print(f"  WARN {ticker}: dropped from universe but no price to close; skipping")
                 continue
             print(f"  CLOSE {ticker}: removed from universe, unwinding {cur:+.4f} sh")
-            fills += self._close_one(ticker, cur, price, strategy)
+            specs = self._build_order_specs(ticker, cur, 0.0, price, strategy,
+                                            quotes.get(ticker, {}))
+            order_specs.extend(specs)
 
+        if not order_specs:
+            return []
+
+        # ── Phase 1: submit all orders ────────────────────────────────────────
+        if self.dry_run:
+            return self._dry_run_fills(order_specs, ref_prices)
+
+        submitted: dict[str, dict] = {}   # order_id → {spec, order}
+        skipped_post_close = 0
+
+        for spec in order_specs:
+            if _market_closed():
+                skipped_post_close += 1
+                continue
+            order_id = self._submit_one(spec)
+            if order_id:
+                submitted[order_id] = spec
+            if submitted or skipped_post_close < len(order_specs):
+                time.sleep(SUBMIT_SPACING)
+
+        if skipped_post_close:
+            print(f"  ⚠ POST-MARKET: skipped {skipped_post_close} order(s) — market closed")
+
+        print(f"  Placed {len(submitted)} orders")
+
+        # ── Phase 2: batch-poll until all settled ─────────────────────────────
+        fills = self._batch_poll(submitted)
         return fills
 
-    def _over_ceiling(self, ticker: str, target_usd: float) -> bool:
-        if self.max_order_notional is not None and abs(target_usd) > self.max_order_notional:
-            print(f"  CAP {ticker}: target ${target_usd:,.0f} exceeds ceiling "
-                  f"${self.max_order_notional:,.0f}; skipping (check signal sizing)")
-            return True
-        return False
+    # ── Order spec builder ────────────────────────────────────────────────────
 
-    def _rebalance_one(self, ticker: str, cur: float, target_usd: float,
-                       price: float, strategy: str) -> list[dict]:
-        """Route a single instrument's rebalance into long/short/flip orders."""
-        if self._over_ceiling(ticker, target_usd):
+    def _build_order_specs(self, ticker: str, cur: float, target_usd: float,
+                           price: float, strategy: str, quote: dict) -> list[dict]:
+        """Build order spec dicts without submitting. Mirrors the old _rebalance_one logic."""
+        if self.max_order_notional and abs(target_usd) > self.max_order_notional:
+            print(f"  CAP {ticker}: target ${target_usd:,.0f} exceeds ceiling; skipping")
             return []
 
         cur_usd = cur * price
         buffer  = max(abs(target_usd) * BUFFER_FRACTION, MIN_TRADE_USD)
+        specs   = []
 
-        # ── Target is LONG (or flat) ──────────────────────────────────────────
         if target_usd >= 0:
             if cur >= 0:
-                # Stays long: fractional notional adjustment.
                 delta_usd = target_usd - cur_usd
                 if abs(delta_usd) < buffer:
                     return []
                 side = "buy" if delta_usd > 0 else "sell"
-                return self._order_notional(ticker, side, abs(delta_usd),
-                                            price, target_usd, strategy)
-            # Currently short -> target long: FLIP (close short, then open long).
-            fills  = self._order_qty(ticker, "buy", abs(cur), price, 0.0, strategy)
-            if target_usd >= MIN_TRADE_USD:
-                fills += self._order_notional(ticker, "buy", target_usd,
-                                              price, target_usd, strategy)
-            return fills
-
-        # ── Target is SHORT ───────────────────────────────────────────────────
-        tgt_short = round(target_usd / price)   # negative int, or 0 if < ~half a share
-        if tgt_short == 0:
-            # Rounds to flat: just close whatever we hold (no new short opened).
-            if cur != 0:
-                return self._close_one(ticker, cur, price, strategy)
-            return []
-
-        if cur <= 0:
-            # Stays short (or opens from flat): whole-share delta.
-            delta_shares = tgt_short - cur          # both <= 0
-            if abs(delta_shares * price) < buffer:
+                s = self._notional_spec(ticker, side, abs(delta_usd), price,
+                                        target_usd, strategy, quote)
+                if s:
+                    specs.append(s)
+            else:
+                # Flip: close short, then open long.
+                s = self._qty_spec(ticker, "buy", abs(cur), price, 0.0, strategy, quote)
+                if s:
+                    specs.append(s)
+                if target_usd >= MIN_TRADE_USD:
+                    s = self._notional_spec(ticker, "buy", target_usd, price,
+                                            target_usd, strategy, quote)
+                    if s:
+                        specs.append(s)
+        else:
+            # Short target.
+            if not self._shortable.get(ticker, True):
+                print(f"  SKIP {ticker}: not shortable on Alpaca (signal={target_usd:+.0f})")
                 return []
-            side = "sell" if delta_shares < 0 else "buy"
-            return self._order_qty(ticker, side, abs(delta_shares),
-                                   price, target_usd, strategy)
 
-        # Currently long -> target short: FLIP (close long, then open short).
-        fills  = self._close_one(ticker, cur, price, strategy)
-        fills += self._order_qty(ticker, "sell", abs(tgt_short),
-                                 price, target_usd, strategy)
-        return fills
+            tgt_short = round(target_usd / price)
+            if tgt_short == 0:
+                if cur != 0:
+                    specs += self._build_order_specs(ticker, cur, 0.0, price,
+                                                     strategy, quote)
+                return specs
 
-    def _close_one(self, ticker: str, cur: float, price: float,
-                   strategy: str) -> list[dict]:
-        """Fully flatten an existing position."""
-        if cur > 0:
-            return self._order_notional(ticker, "sell", cur * price,
-                                        price, 0.0, strategy)
-        if cur < 0:
-            return self._order_qty(ticker, "buy", abs(cur), price, 0.0, strategy)
-        return []
+            if cur <= 0:
+                delta_shares = tgt_short - cur
+                if abs(delta_shares * price) < buffer:
+                    return []
+                side = "sell" if delta_shares < 0 else "buy"
+                s = self._qty_spec(ticker, side, abs(delta_shares), price,
+                                   target_usd, strategy, quote)
+                if s:
+                    specs.append(s)
+            else:
+                # Flip: close long, then open short.
+                s = self._notional_spec(ticker, "sell", cur * price, price,
+                                        0.0, strategy, quote)
+                if s:
+                    specs.append(s)
+                s = self._qty_spec(ticker, "sell", abs(tgt_short), price,
+                                   target_usd, strategy, quote)
+                if s:
+                    specs.append(s)
 
-    # ── Order primitives ──────────────────────────────────────────────────────
+        return specs
 
-    def _order_notional(self, ticker: str, side: str, notional: float,
-                        price: float, target_usd: float, strategy: str) -> list[dict]:
-        """Place a fractional notional order (long side only)."""
+    def _notional_spec(self, ticker, side, notional, price, target_usd,
+                       strategy, quote) -> Optional[dict]:
         notional = round(notional, 2)
         if notional < MIN_TRADE_USD:
-            return []
+            return None
         est_shares = notional / price * (1 if side == "buy" else -1)
-        return self._dispatch(ticker, side, price, target_usd, strategy,
-                              notional=notional, est_shares=est_shares)
+        return dict(ticker=ticker, side=side, price=price, target_usd=target_usd,
+                    strategy=strategy, notional=notional, qty=None,
+                    est_shares=est_shares, quote=quote)
 
-    def _order_qty(self, ticker: str, side: str, qty: int,
-                   price: float, target_usd: float, strategy: str) -> list[dict]:
-        """Place a whole-share qty order (used for the short side)."""
+    def _qty_spec(self, ticker, side, qty, price, target_usd,
+                  strategy, quote) -> Optional[dict]:
         qty = int(qty)
         if qty <= 0:
-            return []
+            return None
         est_shares = qty * (1 if side == "buy" else -1)
-        return self._dispatch(ticker, side, price, target_usd, strategy,
-                              qty=qty, est_shares=est_shares)
+        return dict(ticker=ticker, side=side, price=price, target_usd=target_usd,
+                    strategy=strategy, notional=None, qty=qty,
+                    est_shares=est_shares, quote=quote)
 
-    def _dispatch(self, ticker: str, side: str, price: float, target_usd: float,
-                  strategy: str, notional: Optional[float] = None,
-                  qty: Optional[int] = None, est_shares: float = 0.0) -> list[dict]:
-        """Simulate (dry-run) or submit a single order and build the fill dict."""
-        quote = self.get_quote(ticker)
-        mid   = quote["mid"]
-        dt    = date.today().isoformat()
-        size_str = (f"${notional:,.2f}" if notional is not None else f"{qty} sh")
+    # ── Submission + polling ──────────────────────────────────────────────────
 
-        if self.dry_run:
-            fill_price  = mid or price
-            fill_shares = est_shares
-            order_id    = f"DRY-{ticker}-{datetime.utcnow().strftime('%H%M%S%f')}"
-            status      = "dry_run"
-            print(f"  DRY  {ticker:<6} {side:<4} {fill_shares:>9.4f} sh"
-                  f"  @ ${fill_price:>8.2f}  ({size_str})")
-        else:
-            result = self._place_and_wait(ticker, side, notional=notional, qty=qty)
-            if result is None:
-                return []
-            sign        = 1 if side == "buy" else -1
-            fill_price  = result["fill_price"] or (mid or price)
-            fill_shares = result["filled_shares"] * sign
-            order_id    = result["order_id"]
-            status      = result["status"]
-            flag = "" if status in ("filled",) else f"  [{status}]"
-            print(f"  FILL {ticker:<6} {side:<4} {fill_shares:>9.4f} sh"
-                  f"  @ ${fill_price:>8.2f}  ({size_str}){flag}")
-
-        return [{
-            "date":          dt,
-            "strategy":      strategy,
-            "ticker":        ticker,
-            "side":          side,
-            "target_shares": (target_usd / price) if price else None,
-            "filled_shares": fill_shares,
-            "fill_price":    fill_price,
-            "fill_value":    abs(fill_shares * fill_price),
-            "signal_price":  price,
-            "bid":           quote["bid"],
-            "ask":           quote["ask"],
-            "spread_bps":    quote["spread_bps"],
-            "order_id":      order_id,
-            "order_status":  status,
-            "is_dry_run":    self.dry_run,
-        }]
-
-    def _place_and_wait(self, ticker: str, side: str,
-                        notional: Optional[float] = None,
-                        qty: Optional[int] = None) -> Optional[dict]:
-        """
-        Submit a market order and poll for fill.  Errors are logged, never
-        silently swallowed.  Returns a result dict whose `status` is one of:
-          filled / partially_filled / <terminal-bad> / unconfirmed.
-        Returns None only when the order could not be submitted at all.
-        """
+    def _submit_one(self, spec: dict) -> Optional[str]:
+        """Submit a single order. Returns order_id string or None on failure."""
         from alpaca.trading.requests import MarketOrderRequest
         from alpaca.trading.enums import OrderSide, TimeInForce
 
+        ticker = spec["ticker"]
+        side   = spec["side"]
         kwargs = dict(
             symbol        = ticker,
             side          = OrderSide.BUY if side == "buy" else OrderSide.SELL,
             time_in_force = TimeInForce.DAY,
         )
-        if notional is not None:
-            kwargs["notional"] = round(notional, 2)
+        if spec["notional"] is not None:
+            kwargs["notional"] = spec["notional"]
         else:
-            kwargs["qty"] = int(qty)
+            kwargs["qty"] = spec["qty"]
 
+        size_str = (f"${spec['notional']:,.2f}" if spec["notional"] is not None
+                    else f"{spec['qty']} sh")
         try:
             order = self.trading.submit_order(MarketOrderRequest(**kwargs))
+            print(f"  SUBMIT {ticker:<6} {side:<4} {size_str}")
+            return str(order.id)
         except Exception as e:
             print(f"  ERROR submit {ticker} {side}: {e}")
             return None
 
-        deadline   = time.time() + FILL_TIMEOUT
-        last_known = None
-        while time.time() < deadline:
+    def _batch_poll(self, submitted: dict[str, dict]) -> list[dict]:
+        """
+        Poll get_orders(status=open) every POLL_INTERVAL seconds.
+        When an order ID disappears from the open list it has settled.
+        Fetch final state with get_order_by_id for fill price/qty.
+        """
+        if not submitted:
+            return []
+
+        pending = set(submitted)
+        deadline = time.time() + POLL_TIMEOUT
+
+        while pending and time.time() < deadline:
             time.sleep(POLL_INTERVAL)
             try:
-                o = self.trading.get_order_by_id(order.id)
+                from alpaca.trading.requests import GetOrdersRequest
+                from alpaca.trading.enums import QueryOrderStatus
+                open_ids = {
+                    str(o.id)
+                    for o in self.trading.get_orders(
+                        filter=GetOrdersRequest(status=QueryOrderStatus.OPEN,
+                                                limit=500)
+                    )
+                }
+                pending &= open_ids   # keep only orders still open
             except Exception as e:
-                print(f"  WARN poll {ticker} ({e}); retrying")
-                continue
-            status = o.status.value
-            if status in TERMINAL_OK:
-                return {
-                    "fill_price":    float(o.filled_avg_price or 0) or None,
-                    "filled_shares": float(o.filled_qty or 0),
-                    "order_id":      str(o.id),
-                    "status":        status,
-                }
-            if status in TERMINAL_BAD:
-                print(f"  ORDER {ticker} {status}")
-                return {
-                    "fill_price":    float(o.filled_avg_price or 0) or None,
-                    "filled_shares": float(o.filled_qty or 0),
-                    "order_id":      str(o.id),
-                    "status":        status,
-                }
-            last_known = o
+                print(f"  WARN batch poll failed ({e}); retrying")
 
-        # Timed out without a terminal status — do NOT silently drop it.  Record
-        # whatever filled and flag it unconfirmed so reconciliation can catch it.
-        print(f"  TIMEOUT {ticker}: order {order.id} not confirmed in {FILL_TIMEOUT}s "
-              f"(last status: {last_known.status.value if last_known else 'unknown'})")
-        return {
-            "fill_price":    float(last_known.filled_avg_price or 0) or None if last_known else None,
-            "filled_shares": float(last_known.filled_qty or 0) if last_known else 0.0,
-            "order_id":      str(order.id),
-            "status":        "unconfirmed",
-        }
+        if pending:
+            print(f"  ⚠ TIMEOUT: {len(pending)} order(s) still open after {POLL_TIMEOUT}s")
+
+        # Fetch final state for every submitted order and build fill records.
+        # Small sleep between calls to stay within Alpaca's 200 req/min limit.
+        fills = []
+        for i, (order_id, spec) in enumerate(submitted.items()):
+            if i > 0:
+                time.sleep(0.35)
+            try:
+                o = self.trading.get_order_by_id(order_id)
+                status        = o.status.value
+                fill_price    = float(o.filled_avg_price or 0) or None
+                filled_shares = float(o.filled_qty or 0)
+                if spec["side"] == "sell":
+                    filled_shares = -filled_shares
+            except Exception as e:
+                print(f"  WARN could not fetch final status for {order_id}: {e}")
+                status, fill_price, filled_shares = "unknown", None, 0.0
+
+            ticker = spec["ticker"]
+            quote  = spec["quote"]
+            size_str = (f"${spec['notional']:,.2f}" if spec["notional"] is not None
+                        else f"{spec['qty']} sh")
+            flag = "" if status in TERMINAL_OK else f"  [{status}]"
+            print(f"  FILL {ticker:<6} {spec['side']:<4} {filled_shares:>9.4f} sh"
+                  f"  @ ${fill_price or 0:>8.2f}  ({size_str}){flag}")
+
+            fills.append({
+                "date":          date.today().isoformat(),
+                "strategy":      spec["strategy"],
+                "ticker":        ticker,
+                "side":          spec["side"],
+                "target_shares": (spec["target_usd"] / spec["price"]) if spec["price"] else None,
+                "filled_shares": filled_shares,
+                "fill_price":    fill_price,
+                "fill_value":    abs(filled_shares * (fill_price or 0)),
+                "signal_price":  spec["price"],
+                "bid":           quote.get("bid"),
+                "ask":           quote.get("ask"),
+                "spread_bps":    quote.get("spread_bps"),
+                "order_id":      order_id,
+                "order_status":  status,
+                "is_dry_run":    False,
+            })
+
+        return fills
+
+    # ── Dry-run path ──────────────────────────────────────────────────────────
+
+    def _dry_run_fills(self, order_specs: list[dict],
+                       ref_prices: dict[str, float]) -> list[dict]:
+        fills = []
+        for spec in order_specs:
+            ticker     = spec["ticker"]
+            side       = spec["side"]
+            quote      = spec.get("quote", {})
+            fill_price = quote.get("mid") or spec["price"]
+            est_sh     = spec["est_shares"]
+            size_str   = (f"${spec['notional']:,.2f}" if spec["notional"] is not None
+                          else f"{spec['qty']} sh")
+            print(f"  DRY  {ticker:<6} {side:<4} {est_sh:>9.4f} sh"
+                  f"  @ ${fill_price:>8.2f}  ({size_str})")
+            fills.append({
+                "date":          date.today().isoformat(),
+                "strategy":      spec["strategy"],
+                "ticker":        ticker,
+                "side":          side,
+                "target_shares": (spec["target_usd"] / spec["price"]) if spec["price"] else None,
+                "filled_shares": est_sh,
+                "fill_price":    fill_price,
+                "fill_value":    abs(est_sh * fill_price),
+                "signal_price":  spec["price"],
+                "bid":           quote.get("bid"),
+                "ask":           quote.get("ask"),
+                "spread_bps":    quote.get("spread_bps"),
+                "order_id":      f"DRY-{ticker}-{datetime.utcnow().strftime('%H%M%S%f')}",
+                "order_status":  "dry_run",
+                "is_dry_run":    True,
+            })
+        return fills
+
+    # ── Legacy compatibility ──────────────────────────────────────────────────
+
+    def get_quote(self, ticker: str) -> dict:
+        """Single-ticker quote (retained for any external callers)."""
+        result = self.get_quotes_batch([ticker])
+        return result.get(ticker, {"bid": None, "ask": None, "mid": None, "spread_bps": None})

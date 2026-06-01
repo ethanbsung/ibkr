@@ -3,18 +3,22 @@
 IBS Daily Signal Checker + Auto-Executor
 100% IBS mean-reversion on MES / MNQ / MGC.
 
+Signals are generated from the in-progress daily bar fetched via IBKR's
+reqHistoricalData (endDateTime='') — no real-time subscription required.
+Orders are plain DAY market orders placed just before each session close.
+
 Dry-run (default) — print signals, place nothing:
   python3 portfolio/live_signals.py
   python3 portfolio/live_signals.py --only GC
   python3 portfolio/live_signals.py --only ES NQ
 
-Live execution — place MOC orders:
+Live execution — place market orders:
   python3 portfolio/live_signals.py --execute
   python3 portfolio/live_signals.py --only GC --execute
 
 Cron schedule (all times ET — adjust cron TZ or convert to UTC):
-  15 13 * * 1-5  .../live_signals.py --only GC  --execute   # 1:15 PM MGC MOC
-  45 15 * * 1-5  .../live_signals.py --only ES NQ --execute  # 3:45 PM MES/MNQ MOC
+  28 13 * * 1-5  .../live_signals.py --only GC  --execute   # 1:28 PM — 2 min before MGC close
+  58 15 * * 1-5  .../live_signals.py --only ES NQ --execute  # 3:58 PM — 2 min before MES/MNQ close
 """
 
 import argparse
@@ -41,15 +45,15 @@ CLIENT_ID = 4
 CONTRACT_SPECS = {
     'ES': {
         'ibkr_symbol': 'MES', 'multiplier': 5,  'exchange': 'CME',
-        'name': 'Micro S&P 500', 'moc_cutoff': '3:45 PM ET',
+        'name': 'Micro S&P 500', 'exec_time': '3:58 PM ET',
     },
     'NQ': {
         'ibkr_symbol': 'MNQ', 'multiplier': 2,  'exchange': 'CME',
-        'name': 'Micro Nasdaq',  'moc_cutoff': '3:45 PM ET',
+        'name': 'Micro Nasdaq',  'exec_time': '3:58 PM ET',
     },
     'GC': {
         'ibkr_symbol': 'MGC', 'multiplier': 10, 'exchange': 'COMEX',
-        'name': 'Micro Gold',   'moc_cutoff': '1:15 PM ET',
+        'name': 'Micro Gold',   'exec_time': '1:28 PM ET',
     },
 }
 
@@ -130,16 +134,16 @@ def ibs_size(equity, price, multiplier):
 
 # ── Order placement ────────────────────────────────────────────────────────────
 
-def place_moc(ib, contract, action, quantity):
+def place_mkt(ib, contract, action, quantity):
     """
-    Place a Market-on-Close order.
+    Place a DAY market order for immediate execution.
     Returns the Trade object (live-updated by ib_insync).
     """
     order = Order(
-        orderType='MOC',
-        action=action,           # 'BUY' or 'SELL'
+        orderType='MKT',
+        action=action,       # 'BUY' or 'SELL'
         totalQuantity=quantity,
-        outsideRth=False,        # execute at official close only
+        tif='DAY',
     )
     return ib.placeOrder(contract, order)
 
@@ -151,7 +155,7 @@ def main():
     parser.add_argument('--only', nargs='+', metavar='SYM',
                         help='Check only these symbols, e.g. --only GC')
     parser.add_argument('--execute', action='store_true',
-                        help='Place MOC orders (omit for dry-run)')
+                        help='Place market orders (omit for dry-run)')
     args = parser.parse_args()
 
     valid_syms = set(CONTRACT_SPECS)
@@ -211,7 +215,7 @@ def main():
     print("=" * 76)
     print(f"  IBS  [{mode}]  |  {today}  |  checking: {checking}")
     print(f"  Equity: ${equity:,.2f}   per instrument: ${equity * IBS_PER_INSTR:,.0f}")
-    print(f"  MOC cutoffs: MES/MNQ → 3:45 PM ET   MGC → 1:15 PM ET")
+    print(f"  Execution: MES/MNQ → MKT @ 3:58 PM ET   MGC → MKT @ 1:28 PM ET")
     print("=" * 76)
 
     placed_orders = []
@@ -245,15 +249,22 @@ def main():
         if net_pos == 0 and ibs < IBS_ENTRY and tgt > 0:
             action, qty = 'BUY', tgt
             print(f"  *** ENTRY  (IBS {ibs:.3f} < {IBS_ENTRY})")
-            print(f"  ACTION: BUY {tgt} {ibkr_sym}  — MOC, cutoff {spec['moc_cutoff']}")
+            print(f"  ACTION: BUY {tgt} {ibkr_sym}  — MKT @ {spec['exec_time']}")
 
         elif net_pos > 0 and ibs > IBS_EXIT:
             action, qty = 'SELL', net_pos
             print(f"  *** EXIT   (IBS {ibs:.3f} > {IBS_EXIT})")
-            print(f"  ACTION: SELL {net_pos} {ibkr_sym}  — MOC, cutoff {spec['moc_cutoff']}")
+            print(f"  ACTION: SELL {net_pos} {ibkr_sym}  — MKT @ {spec['exec_time']}")
+
+        elif net_pos > 0 and net_pos != tgt:
+            delta = tgt - net_pos
+            action = 'BUY' if delta > 0 else 'SELL'
+            qty    = abs(delta)
+            print(f"  *** REBALANCE  {net_pos} → {tgt} contract(s)  ({action} {qty})")
+            print(f"  ACTION: {action} {qty} {ibkr_sym}  — MKT @ {spec['exec_time']}")
 
         elif net_pos > 0:
-            print(f"  HOLD long ({net_pos} contract(s))")
+            print(f"  HOLD long ({net_pos} contract(s)) — correctly sized")
         else:
             print(f"  flat — no signal")
 
@@ -269,14 +280,14 @@ def main():
             skipped.append(ibkr_sym)
             continue
 
-        trade = place_moc(ib, contract, action, qty)
+        trade = place_mkt(ib, contract, action, qty)
         ib.sleep(2)   # let TWS process and push status back
 
         status = trade.orderStatus.status
         print(f"  ORDER PLACED → status: {status}  "
               f"(orderId {trade.order.orderId})")
         placed_orders.append(
-            (f"{action} {qty:>2} {ibkr_sym} MOC", status, trade.order.orderId)
+            (f"{action} {qty:>2} {ibkr_sym} MKT", status, trade.order.orderId)
         )
 
     # ── Summary ───────────────────────────────────────────────────────────────
