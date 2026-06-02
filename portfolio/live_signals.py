@@ -102,12 +102,20 @@ def get_equity(ib):
             return float(v.value)
     return None
 
-def get_positions(ib):
-    held       = {sym: 0 for sym in CONTRACT_SPECS}
+def get_positions_with_contract(ib):
+    """Return {sym: {contract_month_YYYYMM: qty}} for all IBS instruments."""
+    held       = {sym: {} for sym in CONTRACT_SPECS}
     symbol_map = {spec['ibkr_symbol']: sym for sym, spec in CONTRACT_SPECS.items()}
     for pos in ib.positions():
-        if pos.contract.symbol in symbol_map:
-            held[symbol_map[pos.contract.symbol]] = int(pos.position)
+        sym_key = symbol_map.get(pos.contract.symbol)
+        if sym_key is None:
+            continue
+        qty = int(pos.position)
+        if qty == 0:
+            continue
+        # lastTradeDateOrContractMonth can be YYYYMM or YYYYMMDD; take first 6 chars
+        month = (pos.contract.lastTradeDateOrContractMonth or '')[:6]
+        held[sym_key][month] = held[sym_key].get(month, 0) + qty
     return held
 
 def get_daily_bar(ib, contract):
@@ -202,8 +210,8 @@ def main():
         print("WARNING: Could not read account equity. Using $250,000.")
         equity = 250_000.0
 
-    ibkr_positions  = get_positions(ib)
-    pending_symbols = get_pending_ibkr_symbols(ib)
+    positions_by_month = get_positions_with_contract(ib)
+    pending_symbols    = get_pending_ibkr_symbols(ib)
     today           = datetime.now().strftime('%Y-%m-%d')
 
     bars = {sym: get_daily_bar(ib, contract) for sym, contract in contracts.items()}
@@ -222,16 +230,27 @@ def main():
     skipped       = []
 
     for sym, contract in contracts.items():
-        spec       = CONTRACT_SPECS[sym]
-        mul        = spec['multiplier']
-        ibkr_sym   = spec['ibkr_symbol']
-        net_pos    = ibkr_positions.get(sym, 0)
-        bar        = bars.get(sym)
+        spec         = CONTRACT_SPECS[sym]
+        mul          = spec['multiplier']
+        ibkr_sym     = spec['ibkr_symbol']
+        target_month = contract_months[sym]
+
+        # Position breakdown by contract month
+        pos_by_month = positions_by_month.get(sym, {})
+        target_qty   = pos_by_month.get(target_month, 0)
+        old_months   = {m: q for m, q in pos_by_month.items()
+                        if m != target_month and q != 0}
+        old_total    = sum(old_months.values())
+        net_pos      = target_qty + old_total   # total economic exposure
 
         print(f"\n  {'─' * 72}")
-        print(f"  {sym}  {spec['name']}  ({ibkr_sym} {contract_months[sym]})"
+        print(f"  {sym}  {spec['name']}  ({ibkr_sym} {target_month})"
               f"  |  position: {net_pos:+d}")
+        if old_months:
+            detail = '  '.join(f"{m}: {q:+d}" for m, q in sorted(old_months.items()))
+            print(f"  ⚠ ROLL NEEDED — other months: {detail}")
 
+        bar = bars.get(sym)
         if bar is None:
             print(f"  IBS: no bar data available")
             continue
@@ -243,36 +262,51 @@ def main():
 
         print(f"  H {h:.2f}  L {l:.2f}  C {c:.2f}  |  IBS: {ibs:.3f}  |  target: {tgt} contract(s)")
 
-        action = None
-        qty    = 0
-
+        # IBS signal → desired qty in target month after all operations
         if net_pos == 0 and ibs < IBS_ENTRY and tgt > 0:
-            action, qty = 'BUY', tgt
+            desired_qty = tgt
             print(f"  *** ENTRY  (IBS {ibs:.3f} < {IBS_ENTRY})")
-            print(f"  ACTION: BUY {tgt} {ibkr_sym}  — MKT @ {spec['exec_time']}")
-
         elif net_pos > 0 and ibs > IBS_EXIT:
-            action, qty = 'SELL', net_pos
+            desired_qty = 0
             print(f"  *** EXIT   (IBS {ibs:.3f} > {IBS_EXIT})")
-            print(f"  ACTION: SELL {net_pos} {ibkr_sym}  — MKT @ {spec['exec_time']}")
-
         elif net_pos > 0 and net_pos != tgt:
-            delta = tgt - net_pos
-            action = 'BUY' if delta > 0 else 'SELL'
-            qty    = abs(delta)
-            print(f"  *** REBALANCE  {net_pos} → {tgt} contract(s)  ({action} {qty})")
-            print(f"  ACTION: {action} {qty} {ibkr_sym}  — MKT @ {spec['exec_time']}")
-
+            desired_qty = tgt
+            delta_label = tgt - net_pos
+            print(f"  *** REBALANCE  {net_pos} → {tgt} contract(s)"
+                  f"  ({'BUY' if delta_label > 0 else 'SELL'} {abs(delta_label)})")
         elif net_pos > 0:
+            desired_qty = net_pos   # hold size; still rolls if old months present
             print(f"  HOLD long ({net_pos} contract(s)) — correctly sized")
         else:
-            print(f"  flat — no signal")
+            desired_qty = 0
+            if not old_months:
+                print(f"  flat — no signal")
 
-        if action is None:
-            continue   # nothing to do for this instrument
+        # Build order list
+        # Phase A: roll-close — sell/buy old-month positions to zero
+        roll_closes = [('SELL' if q > 0 else 'BUY', abs(q), m)
+                       for m, q in old_months.items()]
+        # Phase B: adjust target-month to desired_qty
+        target_delta = desired_qty - target_qty
+        target_order = None
+        if target_delta > 0:
+            target_order = ('BUY', target_delta)
+            lbl = 'ROLL OPEN' if old_months and desired_qty == net_pos else 'MKT'
+            print(f"  ACTION: BUY {target_delta} {ibkr_sym} {target_month}"
+                  f"  [{lbl}]  @ {spec['exec_time']}")
+        elif target_delta < 0:
+            target_order = ('SELL', -target_delta)
+            print(f"  ACTION: SELL {-target_delta} {ibkr_sym} {target_month}"
+                  f"  [MKT]  @ {spec['exec_time']}")
+        for roll_act, roll_qty, old_month in roll_closes:
+            print(f"  ACTION: {roll_act} {roll_qty} {ibkr_sym} {old_month}"
+                  f"  [ROLL CLOSE]  MKT")
+
+        if not roll_closes and target_order is None:
+            continue   # nothing to do
 
         if not args.execute:
-            continue   # dry-run: printed signal above, stop here
+            continue   # dry-run: printed actions above, stop here
 
         # ── Live execution ────────────────────────────────────────────────────
         if ibkr_sym in pending_symbols:
@@ -280,15 +314,39 @@ def main():
             skipped.append(ibkr_sym)
             continue
 
-        trade = place_mkt(ib, contract, action, qty)
-        ib.sleep(2)   # let TWS process and push status back
+        # Execute roll closes first (old months → zero)
+        for roll_act, roll_qty, old_month in roll_closes:
+            raw = Future(symbol=ibkr_sym,
+                         lastTradeDateOrContractMonth=old_month,
+                         exchange=spec['exchange'], currency='USD')
+            old_quals = ib.qualifyContracts(raw)
+            if not old_quals:
+                print(f"  WARNING: could not qualify {ibkr_sym} {old_month}"
+                      f" — skipping roll close")
+                continue
+            trade = place_mkt(ib, old_quals[0], roll_act, roll_qty)
+            ib.sleep(2)
+            status = trade.orderStatus.status
+            print(f"  ROLL CLOSE {ibkr_sym} {old_month}"
+                  f"  {roll_act} {roll_qty}  → {status}"
+                  f"  (id {trade.order.orderId})")
+            placed_orders.append(
+                (f"ROLL {roll_act} {roll_qty:>2} {ibkr_sym} {old_month} MKT",
+                 status, trade.order.orderId)
+            )
 
-        status = trade.orderStatus.status
-        print(f"  ORDER PLACED → status: {status}  "
-              f"(orderId {trade.order.orderId})")
-        placed_orders.append(
-            (f"{action} {qty:>2} {ibkr_sym} MKT", status, trade.order.orderId)
-        )
+        # Execute target-month order (entry / exit / rebalance / roll-open)
+        if target_order:
+            action, qty = target_order
+            trade = place_mkt(ib, contract, action, qty)
+            ib.sleep(2)
+            status = trade.orderStatus.status
+            print(f"  ORDER PLACED → status: {status}"
+                  f"  (orderId {trade.order.orderId})")
+            placed_orders.append(
+                (f"{action} {qty:>2} {ibkr_sym} {target_month} MKT",
+                 status, trade.order.orderId)
+            )
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print()
