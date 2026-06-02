@@ -25,8 +25,13 @@ import argparse
 import logging
 import calendar
 import os
+import sys
+import time
 from datetime import datetime, timedelta
 from ib_insync import IB, Future, Order
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from paper.ibkr_logger import IBKRLedger
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -37,9 +42,12 @@ IBS_EXIT      = 0.90
 IBS_PER_INSTR = 1.0 / 3   # equal weight, 3 instruments
 VOL_SCALAR    = 2.0        # position size multiplier; 1.0 ≈ 5.4% ann vol, 2.0 ≈ 10.8% ann vol
 
-IB_HOST   = '127.0.0.1'
-IB_PORT   = 4002
-CLIENT_ID = 4
+IB_HOST         = '127.0.0.1'
+IB_PORT         = 4002
+CLIENT_ID       = 4
+CONNECT_TIMEOUT = 5     # seconds per attempt (localhost — fast or broken)
+MAX_RETRIES     = 3
+RETRY_DELAY     = 10    # seconds between attempts
 
 # ── Contract specifications ────────────────────────────────────────────────────
 CONTRACT_SPECS = {
@@ -89,6 +97,10 @@ def gold_contract_month(roll_days=5):
     cutoff = today + timedelta(days=roll_days)
     for year in range(today.year, today.year + 2):
         for month in (2, 4, 6, 8, 10, 12):
+            # Skip delivery month once it has started — IBKR blocks new orders
+            # on physically-delivered contracts from the 1st of the contract month.
+            if year == today.year and month <= today.month:
+                continue
             if _third_to_last_biz(year, month) >= cutoff:
                 return f"{year}{month:02d}"
     raise RuntimeError("Cannot determine gold contract month")
@@ -177,12 +189,22 @@ def main():
         active_syms = valid_syms
 
     ib = IB()
-    try:
-        ib.connect(IB_HOST, IB_PORT, clientId=CLIENT_ID)
-    except Exception as e:
-        print(f"ERROR: Could not connect to IBKR — {e}")
-        print("Make sure TWS or IB Gateway is running.")
-        return
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            ib.connect(IB_HOST, IB_PORT, clientId=CLIENT_ID, timeout=CONNECT_TIMEOUT)
+            ib.sleep(2)   # let Gateway stream initial account/position data into cache
+            break
+        except Exception as e:
+            if attempt < MAX_RETRIES:
+                print(f"WARNING: IBKR connection attempt {attempt}/{MAX_RETRIES} failed ({e}) "
+                      f"— retrying in {RETRY_DELAY}s…")
+                time.sleep(RETRY_DELAY)
+            else:
+                print(f"ERROR: Could not connect to IBKR after {MAX_RETRIES} attempts — {e}")
+                print("Make sure TWS or IB Gateway is running.")
+                return
+
+    ledger = IBKRLedger()
 
     q_month = quarterly_contract_month()
     g_month = gold_contract_month()
@@ -260,7 +282,7 @@ def main():
         ibs      = (c - l) / rng if rng > 0 else 0.5
         tgt      = ibs_size(equity, c, mul)
 
-        print(f"  H {h:.2f}  L {l:.2f}  C {c:.2f}  |  IBS: {ibs:.3f}  |  target: {tgt} contract(s)")
+        print(f"  H {h:.2f}  L {l:.2f}  C {c:.2f}  |  IBS: {ibs:.3f}  |  size: {tgt} contract(s)")
 
         # IBS signal → desired qty in target month after all operations
         if net_pos == 0 and ibs < IBS_ENTRY and tgt > 0:
@@ -326,10 +348,22 @@ def main():
                 continue
             trade = place_mkt(ib, old_quals[0], roll_act, roll_qty)
             ib.sleep(2)
-            status = trade.orderStatus.status
+            status     = trade.orderStatus.status
+            fill_price = trade.orderStatus.avgFillPrice or bar.close
+            commission = sum(
+                f.commissionReport.commission for f in trade.fills
+                if f.commissionReport.commission == f.commissionReport.commission
+            )
             print(f"  ROLL CLOSE {ibkr_sym} {old_month}"
                   f"  {roll_act} {roll_qty}  → {status}"
+                  f"  fill {fill_price:.2f}"
                   f"  (id {trade.order.orderId})")
+            if args.execute and status in ('Filled', 'PartiallyFilled') and fill_price > 0:
+                ledger.log_fill(
+                    symbol=ibkr_sym, contract=old_month, action=roll_act,
+                    qty=roll_qty, ibs=ibs, signal_price=fill_price,
+                    fill_price=fill_price, commission=commission,
+                )
             placed_orders.append(
                 (f"ROLL {roll_act} {roll_qty:>2} {ibkr_sym} {old_month} MKT",
                  status, trade.order.orderId)
@@ -340,9 +374,21 @@ def main():
             action, qty = target_order
             trade = place_mkt(ib, contract, action, qty)
             ib.sleep(2)
-            status = trade.orderStatus.status
+            status     = trade.orderStatus.status
+            fill_price = trade.orderStatus.avgFillPrice or bar.close
+            commission = sum(
+                f.commissionReport.commission for f in trade.fills
+                if f.commissionReport.commission == f.commissionReport.commission
+            )
             print(f"  ORDER PLACED → status: {status}"
+                  f"  fill {fill_price:.2f}  comm ${commission:.2f}"
                   f"  (orderId {trade.order.orderId})")
+            if args.execute and status in ('Filled', 'PartiallyFilled') and fill_price > 0:
+                ledger.log_fill(
+                    symbol=ibkr_sym, contract=target_month, action=action,
+                    qty=qty, ibs=ibs, signal_price=bar.close,
+                    fill_price=fill_price, commission=commission,
+                )
             placed_orders.append(
                 (f"{action} {qty:>2} {ibkr_sym} {target_month} MKT",
                  status, trade.order.orderId)
@@ -364,6 +410,12 @@ def main():
         print("  DRY-RUN — no orders placed. Re-run with --execute to submit.")
     print("=" * 76)
     print()
+
+    # Log daily account snapshot once per day — only on the full ES+NQ+GC run
+    # or explicitly when --only is not restricting to GC alone (last run of day).
+    is_eod_run = args.execute and (not args.only or set(s.upper() for s in args.only) != {"GC"})
+    if is_eod_run:
+        ledger.log_daily(ib)
 
     ib.disconnect()
 

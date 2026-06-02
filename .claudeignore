@@ -1,0 +1,50 @@
+# Dependencies / environments
+venv/
+.venv/
+env/
+node_modules/
+
+# Python generated files
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Market data / local databases
+Data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated outputs
+results/
+rob_port/results/
+_failed_tests/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+
+# Logs / runtime state
+*.log
+pst_updater.log
+.DS_Store
+
+# Local/private config
+.env
+.claude/settings.local.json
+router_state.json
+portfolio_state.json
+
+# Old/sandbox strategy areas usually not needed for active work
+_ES/
+_NQ/
+_orb/
+CL/
+_misc/
+
+# Backtest/cache artifacts
+account_snapshots/
+crontab_backup_*.txt

@@ -163,3 +163,130 @@
     2026-06-01  VTIP    buy      0.0000 sh @ $   50.44  slip +1.0 bps  spread 4.0 bps
 
   Done. Ledger: Data/live/trading.db
+  Shortability: 14 non-shortable symbols loaded: ['AMLP', 'EIDO', 'EWG', 'EWH', 'EWI', 'EWQ', 'FXE', 'HYD', 'IYT', 'MUB', 'USO', 'UVXY', 'VTEB', 'XRT']
+
+====================================================================
+  ETF LIVE TRADING  2026-06-02  LIVE
+  Alpaca equity: $5,039.00
+  Strategies: ['ewmac']
+====================================================================
+
+── EWMAC  capital=$5,039 ──
+  Fetching live prices for 78 tickers…
+  Got prices for 78/78 tickers
+  Generating signals…
+  Signals: 78 non-zero  (56 long, 22 short)
+  Gross long  $   +7,394.25
+  Gross short $   -2,179.85
+  Gross total $    9,574.10  (1.90x equity)
+  ⚠ Leverage cap applied: positions scaled to 52.5% (cap 1.9x)
+
+  Executing orders …
+  SKIP EIDO: not shortable on Alpaca (signal=-45)
+  SKIP EWH: not shortable on Alpaca (signal=-6)
+  SKIP FXE: not shortable on Alpaca (signal=-84)
+  SKIP UVXY: not shortable on Alpaca (signal=-244)
+  SUBMIT AMLP   buy  $10.12
+  SUBMIT BIL    sell $31.86
+  SUBMIT BWX    sell 1 sh
+  SUBMIT COWZ   sell $19.18
+  SUBMIT DBA    sell 4 sh
+  SUBMIT ECH    sell $6.23
+  SUBMIT EWA    buy  $5.00
+  SUBMIT EWL    sell $8.27
+  SUBMIT FLOT   sell $47.94
+  SUBMIT FXI    buy  1 sh
+  SUBMIT HDV    buy  $6.39
+  ERROR submit IBB sell: {"available":"0.045573685","code":40310000,"existing_qty":"0.045573685","held_for_orders":"0","message":"insufficient qty available for order (requested: 0.045598441, available: 0.045573685)","symbol":"IBB"}
+  SUBMIT ITA    sell $6.30
+  SUBMIT IYT    sell $5.34
+  SUBMIT LQD    sell $30.27
+  SUBMIT MTUM   sell $15.37
+  SUBMIT PDBC   buy  $79.85
+  SUBMIT SGOV   sell $29.03
+  SUBMIT SHY    sell $27.19
+  SUBMIT STIP   sell 2 sh
+  SUBMIT TIP    sell 1 sh
+  SUBMIT TLT    buy  $7.56
+  ERROR submit UNG sell: {"available":"1.124870107","code":40310000,"existing_qty":"1.124870107","held_for_orders":"0","message":"insufficient qty available for order (requested: 1.125544899, available: 1.124870107)","symbol":"UNG"}
+  SUBMIT UNG    sell 1 sh
+  SUBMIT USO    buy  $32.52
+  SUBMIT VCIT   sell $39.59
+  SUBMIT VCSH   sell $62.35
+  SUBMIT VGSH   sell $32.56
+  ERROR submit XBI sell: {"code":40310100,"message":"trade denied due to pattern day trading protection"}
+  ERROR submit XLC sell: {"available":"0.045569399","code":40310000,"existing_qty":"0.045569399","held_for_orders":"0","message":"insufficient qty available for order (requested: 0.045610636, available: 0.045569399)","symbol":"XLC"}
+  SUBMIT XLE    buy  $8.36
+  ERROR submit XLU buy: {"code":40310100,"message":"trade denied due to pattern day trading protection"}
+  ERROR submit XLV sell: {"available":"0.049744463","code":40310000,"existing_qty":"0.049744463","held_for_orders":"0","message":"insufficient qty available for order (requested: 0.04978828, available: 0.049744463)","symbol":"XLV"}
+  ERROR submit XLY sell: {"code":40310100,"message":"trade denied due to pattern day trading protection"}
+  Placed 27 orders
+  FILL AMLP   buy     0.1921 sh  @ $   52.69  ($10.12)
+  FILL BIL    sell   -0.3486 sh  @ $   91.39  ($31.86)
+  FILL BWX    sell   -1.0000 sh  @ $   22.02  (1 sh)
+  FILL COWZ   sell   -0.2945 sh  @ $   65.13  ($19.18)
+  FILL DBA    sell   -4.0000 sh  @ $   27.11  (4 sh)
+  FILL ECH    sell   -0.1536 sh  @ $   40.56  ($6.23)
+  FILL EWA    buy     0.1696 sh  @ $   29.48  ($5.00)
+  FILL EWL    sell   -0.1340 sh  @ $   61.71  ($8.27)
+  FILL FLOT   sell   -0.9416 sh  @ $   50.91  ($47.94)
+  FILL FXI    buy     1.0000 sh  @ $   36.35  (1 sh)
+  FILL HDV    buy     0.2352 sh  @ $   27.17  ($6.39)
+  FILL ITA    sell   -0.0276 sh  @ $  228.39  ($6.30)
+  FILL IYT    sell   -0.0636 sh  @ $   83.95  ($5.34)
+  FILL LQD    sell   -0.2778 sh  @ $  108.95  ($30.27)
+  FILL MTUM   sell   -0.0471 sh  @ $  326.32  ($15.37)
+  FILL PDBC   buy     4.4386 sh  @ $   17.99  ($79.85)
+  FILL SGOV   sell   -0.2891 sh  @ $  100.40  ($29.03)
+  FILL SHY    sell   -0.3315 sh  @ $   82.01  ($27.19)
+  FILL STIP   sell   -2.0000 sh  @ $  102.56  (2 sh)
+  FILL TIP    sell   -1.0000 sh  @ $  109.99  (1 sh)
+  FILL TLT    buy     0.0882 sh  @ $   85.68  ($7.56)
+  FILL UNG    sell   -1.0000 sh  @ $   11.47  (1 sh)
+  FILL USO    buy     0.2368 sh  @ $  137.34  ($32.52)
+  FILL VCIT   sell   -0.4802 sh  @ $   82.45  ($39.59)
+  FILL VCSH   sell   -0.7908 sh  @ $   78.84  ($62.35)
+  FILL VGSH   sell   -0.5601 sh  @ $   58.13  ($32.56)
+  FILL XLE    buy     0.1440 sh  @ $   58.04  ($8.36)
+  Placed 27 orders
+  Paper book updated: paper/ledgers/etf_ewmac
+
+====================================================================
+  LIVE LEDGER  —  EWMAC  (last 30 days)
+====================================================================
+  P&L summary (last 3 days):
+    Equity P&L          $    +39.00  [authoritative]
+    MTM P&L (diag)      $    +35.75
+    Spread cost (diag)  $    149.54
+    Alpaca equity (NAV)  $5,039.00  [authoritative]
+
+  Current positions (top 15 by value):
+    HYD        16.1132 sh  @ $   51.31  = $    826.69  daily P&L $   +1.29
+    SPY         0.6986 sh  @ $  759.52  = $    530.57  daily P&L $   +0.75
+    UUP        18.2006 sh  @ $   27.77  = $    505.43  daily P&L $   +0.00
+    VTEB       10.0048 sh  @ $   50.33  = $    503.59  daily P&L $   +0.00
+    VTIP        9.4758 sh  @ $   50.44  = $    478.01  daily P&L $   +0.00
+    MUB         4.2811 sh  @ $  107.14  = $    458.65  daily P&L $   +0.88
+    IAGG        8.8581 sh  @ $   50.26  = $    445.25  daily P&L $   +0.35
+    PDBC       21.0448 sh  @ $   17.99  = $    378.49  daily P&L $   +1.91
+    QQQ         0.5011 sh  @ $  745.96  = $    373.81  daily P&L $   +1.64
+    BNDX        6.7655 sh  @ $   48.20  = $    326.10  daily P&L $   +0.64
+    IWM         0.9656 sh  @ $  291.52  = $    281.48  daily P&L $   +2.46
+    VTV         1.1706 sh  @ $  213.45  = $    249.86  daily P&L $   +0.00
+    FLOT        4.2579 sh  @ $   50.92  = $    216.79  daily P&L $   -0.03
+    COWZ        2.9252 sh  @ $   65.15  = $    190.58  daily P&L $   -1.08
+    USMV        1.8759 sh  @ $   96.97  = $    181.92  daily P&L $   +0.08
+
+  Recent fills:
+    2026-06-02  XLE     buy      0.1440 sh @ $   58.04  slip -1.2 bps  spread 1.7 bps
+    2026-06-02  VGSH    sell    -0.5601 sh @ $   58.13  slip +0.5 bps  spread 1.7 bps
+    2026-06-02  VCSH    sell    -0.7908 sh @ $   78.84  slip +0.4 bps  spread 1.3 bps
+    2026-06-02  VCIT    sell    -0.4802 sh @ $   82.45  slip +1.0 bps  spread 1.2 bps
+    2026-06-02  USO     buy      0.2368 sh @ $  137.34  slip -0.4 bps  spread 602.5 bps
+    2026-06-02  UNG     sell    -1.0000 sh @ $   11.47  slip +4.4 bps  spread 8.7 bps
+    2026-06-02  TLT     buy      0.0882 sh @ $   85.68  slip +0.3 bps  spread 1.2 bps
+    2026-06-02  TIP     sell    -1.0000 sh @ $  109.99  slip +0.5 bps  spread 0.9 bps
+    2026-06-02  STIP    sell    -2.0000 sh @ $  102.56  slip +0.5 bps  spread 1.0 bps
+    2026-06-02  SHY     sell    -0.3315 sh @ $   82.01  slip +0.4 bps  spread 1.2 bps
+
+  Done. Ledger: Data/live/trading.db

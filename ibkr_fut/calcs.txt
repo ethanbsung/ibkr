@@ -1,0 +1,177 @@
+notional exposure per contract (base currency) = capital required = multiplier * price * fx rate
+tick value = multiplier * tick size
+total return = spot return + dividends
+excess return = total return - interest = spot return + dividends - interest
+excess return = spot return + carry = spot return + dividends - interest
+return (in price points), R^(points)_t = N_t-1 * (P_t - P_t-1)
+cumulated return (in price points)_(t=0,T) = (P_t - P_0)
+return (in currency of future), R^(instr)_t = R^(points)_t & multiplier
+Return (base currency), R^(base)_t = R^(instr)_t * fx rate
+R^(%)_t = 100 & R^(base)_t / capital_t-1
+standard deviation of a series of returns = sqrt([1 / T](r_T - r^*)^2 + [1 / T](r_T-1 - r^*)^2 + [1/T](r_T-2 - r^*)^2 + ... [1  / T](r_1 - r^*)^2)
+sharpe ratio = (mean return - risk-free rate) / standard deviation
+SR of futures = mean excess return / standard deviation
+lower percentile ratio = 1st percentile / 30th percentile
+upper percentile ratio = 99th percentile / 70th percentile
+relative lower fat tail ratio = lower percentile ratio / 4.43
+relative upper fat tail ratio = upper percentile ratio / 4.43
+current annualised standard deviation ($) = notional value * % standard deviation
+SR = mean / standard deviation
+mean = SR * standard deviation
+annualised standard deviation = sigma
+sigma(contract, base currency) = notional exposure(Base currency) * sigma_%
+sigma(Position, Base currency) = sigma(Contract, Base currency) * N
+sigma(target, Base currency) = Capital(Base currency) * target_risk
+sigma(Target, Base currency) = sigma(Position, base currency)
+N = Capital * target_risk / (Multiplier * price * fx rate * sigma_%)
+Daily risk in price points sigma_p = (Price * sigma_%) / 16
+sigma_p = Standard deviation(P_t - P_t-1, P_t-1 - P_t-2, ...)
+N = (Capital * target_risk) / (Multiplier * FX * sigma_P * 16)
+Contract leverage ratio = Notional exposure per contract / Capital
+volatility ratio = target_risk / sigma_%
+N = Volatility ratio / contract leverage ratio
+Leverage ratio = total notional exposure / capital
+Leverage ratio = volatility ratio
+Maximum N = Capital / (Margin per contract / FX)
+Maximum target_risk = (Multiplier * Price * sigma_%) / (Margin per contract)
+Maximum target_risk = sigma_% * Maximum leverage ratio = sigma_% * (Maximum capital loss / worst return)
+Capital = (N * Futures multiplier * price * FX * sigma_%) / target_risk
+Minimum capital for 1 contract = (Multiplier * price * FX * sigma_%) / target_risk
+Minimum capital for 4 contracts = (4 * Multiplier * Price * FX * sigma_%) / target_risk = 4 * notional exposure per contract / volatility ratio = (4 * Multiplier * Price_i,t * FX rate_i,t * sigma_%i,t) / (IDM * Weight_i,t * target_risk)
+Half kelly = 0.5 * Expected SR
+Trading decision: Calculate optimal position N each day, and round to the nearest whole contract
+sigma(N)_t = sqrt([1 / N](r_T - r^*_t)^2 + [1 / N](r_T-1 - r^*_t)^2 + [1/N](r_T-2 - r^*_t)^2 + ... [1  / N](r_(t-N+1) - r^*_t)^2)
+
+EWMA: r^*(lambda)_t = lambda(r_t) + lambda(1-lambda)(r_t-1) + lambda(1-lambda)^2(r_t-2 + ...)
+exponentially weighted standard deviation: sigma_exp(lambda)_t = sqrt(lambda(r_t - r^*_t)^2 + lambda(1-lambda)(r_t-1 - r^*_t)^2 + lambda(1-lambda)^2(r_t-2 - r^*_t)^2 + ...)
+for a given span in days N, calculate lambda as: lambda = 2 / (N + 1)
+given some current level of sigma_t blended estimate = sigma_blend,t = 0.3(Ten year average of sigma_t) + 0.7(sigma_t)
+SR = annual mean excess return / annualised standard deviation
+Costs in SR terms = annual cost / annualised standard deviation = pre-cost SR - post-cost SR
+Spread cost, price points = (Bid - Offer) / 2
+Spread cost, currency = Multiplier * spread cost price points = tick value * (Spread in ticks) / 2
+Total cost per trade, currency = spread cost currency + commission per contract
+Total cost per trade, % = total cost per trade currency / (Price * Multiplier)
+Risk adjusted holding cost = Risk adjusted cost per trade * rolls per year * 2
+Risk adjusted transaction cost = risk adjusted cost per trade * turnover
+Annual risk adjusted cost = risk adjusted holding cost + risk adjusted holding cost = transaction cost + holding cost = (Rolls per year * 2 + turnover) * Risk adjusted cost per trade
+annual risk adjusted cost < 0.10
+risk adjusted cost per trade < 0.01
+Average daily volume in USD risk = FX rate * Average daily volume * sigma_% * price * multiplier
+Optimal number of contracts for instrument i, given the proportion of capital(weight) allocated to it: N_i,t = Capital * Weight_i * target_risk / (Multiplier_i * Price_i,t * FX rate_i,t * sigma_%i,t)
+Rough figure for IDM: target_risk / aggregate risk
+N_i = Capital * IDM * Weight_i * target_risk / (Futures multiplier_i * Price_i * Fx rate_i * sigma_%,i)
+
+Handcrafting:
+    Divide the available instruments into asset classes. Allocated each asset class an equal fraction of the 100% in instrument weighting that is available
+    Within each asset class, divide the available instruments into similar groups. Allocate each group within an asset class an equal fraction of the instrument sweight share for that asset class.
+    Within each group, allocate to each instrument within the group an equal fraction of the instrument weight share for that group
+An approximation for IDM (preferably will calculate on our own): 1:1.00, 2:1.2, 3:1.48, 4:1.56, 5:1.7, 6:1.9, 7:2.10, 8 to 14:2.2, 15 to 24:2.30, 25 to 29:2.40, 30+:2.50
+An algorithm for automatically selecting instruments:
+    1. Decide on a set of possible instruments
+    2. Choose the first instrument for the portfolio
+    3. This forms the initial current portfolio. Measure the expected SR for this portfolio, using the instrument cost
+    4. Iterate over all instruments not in the current portfolio, considering each in turn as a potential new instrument:
+        i. Construct a trial portfolio consisting of the current portfolio and the potential new instrument
+        ii. allocate instrument weights for the trial portfolio. calculate an IDM.
+        iii. check the minimum capital requirement for all instruments. if not met, skip this instrument.
+        iv. measure the expected SR for this trial portfolio using the instrument weights, correlation matrix, and instrument cost
+    5. Choose the instrument which produces the highest trial portfolio SR from step 4. Replace the current portfolio with the trial portfolio. The new current portfolio will consist of the old current portfolio plus this new instrument.
+    If the expected SR for the new current portfolio is 10% lower than the highest current portfolio SR seen so far, stop. Otherwise, continue again from step 2
+Choosing the first instrument: We need to make some assumptions about what roughly the final portfolio will look like. For example, we might expect that we'll end up with about ten instruments. With ten instruments equally weighted, we would have an instrument weight of 10%. It isn't critical to get these initial guesses exactly right, but they are necessary to ensure we don't select a first isntrument with a very high minimum capital.
+Assume that all instruments have the same pre-cost SR so that their post-cost SR depends only on costs
+If each instrument sub-system has the same notional pre-cost annual SR*, and if the estimated turnover for each instrument is equal to T, then the net SR will be = pre-cost SR - costs: turnover multiplied by the risk adjsuted cost for the instrument, c_i
+Instrument annual SR_i = SR^* - (T * c_i)
+Instrument annual mean_i = target_risk * [SR^* - T * c_i]
+Instrument annual mean in portfolio_i = weight_i * IDM * target_risk * [SR^* - (T * c_i)]
+Portfolio mean = Sum_i(Weight_i * IDM * target_risk * [SR^* - (T * c_i)])
+Portfolio sigma = IDM * target_risk * sqrt(w SUM w')
+Portfolio SR = Sum_i=0...N(Weight_i * [SR^* - (T * c_i)]) / sqrt(w SUM w')
+
+Formula for regressing the monthly aggregate returns of backtested portfolio (y) on the benchmark buy and hold portfolio with variable risk position sizing (x) using the standard linear regression formula y_t = a + Bx_t + epsilon_t
+
+EWMAC: EWMA (N = 64, lambda = 0.031)_t = 0.031p_t + 0.031(1-0.031)p_t-1 + 0.031(1-0.031)^2p_t-2 + ...
+EWMA (N = 256, lambda = 0.0078)_t = 0.0078p_t + 0.0078(1-0.0078)p_t-1 + 0.0078(1-0.0078)^2p_t-2 + ...
+EWMAC(64, 256) = EWMA(N=64)_t - EWMA(N=256)_t
+Historical trading cost = Current cost * (Historical sigma_p / current sigma_p)
+
+N_i,t = (Sign(trend)_t * Capital * IDM * Weight_i * target_risk) / (Multiplier_i * Price_i,t * FX_i,t * sigma_%,i,t)
+Raw forecast = (Fast EWMA - Slow EWMA) / sigma_p
+Scaled forecast = Raw forecast * 10 / (Average absolute value of raw forecast)
+Forecast scalar = 10 / (Average absolute value of raw forecast)
+Scaled forecast = Raw forecast * forecast scalar
+For the EWMAC(16,64) trading rule, carver estimated the forecast scalar to be approximately 1.8. To avoid in sample cheating, we must use a purely backward looking rolling estimate of the forecast scalar when backtesting. These scalars are relatively stable over time so there is no harm in using the fixed values he provides for each strategy
+For this strategy: Scaled forecast = [(EWMA(64) - EWMA(16)) / sigma_p] * 1.9
+Using scaled forecasting for optimal position sizing: N_i = Scaled forecast_i,t * Capital * IDM * Weight_i * target_risk / (10 * Multiplier_i * Price_i,t * Fx_i,t * sigma_%i,t)
+Maximum forecast value of 20: Capped forecast_i,t = Max(Min(Scaled forecast_i,t, +20), -20)
+N_i,t = Capped forecast_i,t * Capital * IDM * Weight_i * target_risk / (10 * Multiplier_i * Price_i,t * FX_i,t * sigma_%i,t)
+
+EWMAC(16, 64): EWMA(N=16, lambda=0.118)_t = 0.118p_t + 0.118(1-0.118)p_t-1 + 0.118(1-0.118)^2p_t-2 + ...
+EWMA(N=64, lambda = 0.031)_t = 0.031p_t + 0.031(1-0.031)p_t-1 + 0.031(1-0.031)^2p_t-2 + ...
+Estimate for forecast scalar here is 4.1 for EWMAC(16,64)
+Buffer B is set as a fraction, F, of the average long position (i.e. the position we'd take for benchmark strategy): B_i,t = F * Capital * IDM * Weight_i * target_risk / (Multiplier_i * Price_i,t * FX_i,t * sigma_%i,t)
+Theoretically the correct value of F depends on several factors, including the speed and profitability of the relevant trading rule, and the costs we have to pay, but it's most convenient to set it at a fairly conservative value of 0.10
+Lower buffer, B^L_i,t = round(N_i,t - B_i,t)
+Upper buffer, B^U_i,t = round(N_i,t + B_i,t)
+Given a current position in round contracts of C: 
+    B^U_i,t <= C_i,t <+ B^L_i,t: No trading required
+    C_i,t < B^L_i,t: Buy (B^L_i,t - C_i,t) contracts
+    C_i,t > B^U_i,t: Sell (C_i,t - B^U_i,t) contracts
+
+EWMAC strategy: Trade a portfolio of one or more instruments, each with positions scaled for a variable risk estimate. Calculate a number of forecasts for different speeds of trend filter. Place a position based on the combined forecast.
+Speeds:
+    EWMAC(64,256)
+    EWMAC(32,128)
+    EWMAC(16,64)
+    EWMAC(8,32)
+    EWMAC(4,16)
+    EWMAC(2,8)
+
+Forecast scalars for different speeds of trend filter (estimates):
+    EWMAC2 : 12.1
+    EWMAC4 : 8.53
+    EWMAC8 : 5.95
+    EWMAC16 : 4.10
+    EWMAC32 : 2.79
+    EWMAC64 : 1.91
+
+Combining different forecasts: Take a weighted average of capped forecasts from different trading rules. The weights used when calculating this average are forecast weights. Just like instrument weights, the forecast weights will sum to 1 and none will be negative.
+For each trend filter j we are trading, we calculate a capped forecast at time t using the equations below on a given instrument i that we are trading:
+raw forecast_i,j,t = (Fast EWMA_i,j,t - Slow EWMA_i,j,t) / sigma_p,i,t
+We then apply a filter specific forecast scalar (which is the same as all instruments), and a cap of 20 on the absolute value of the scaled forecast:
+Scaled forecast_i,j,t = Raw forecast_i,j,t * Forecast scalar_j
+Capped forecast, f_i,j,t = Max(Min(Scaled forecast_i,j,t, +20), -20)
+We now take the weighted average of these capped forecasts, using forecast weights w_i,j summing to 1 that are specific to a given instrument:
+raw combined forecast_i,t = w_i,1 * f_i,1,t + w_i,2 * f_i,2,t + w_i,3 * f_i,3,t + ...
+
+Potential factors determining instrument weights outlined in benchmark strategy:
+    the expected pre-cost SR: better performing instruments should get a higher weight (in theory, but carver found no significant differences between instrument sub-strategy SR).
+    the costs of trading a given instrument: cheaper instruments will get a higher weight, since their post-cost SR will be higher (in theory, but once we've excluded expensive instruments costs had almost no effect on weights)
+    the correlation between instruments: we want a higher weight to instruments that are more diversifying
+
+These factors are the same for forecast weights:
+    the expected pre-cost SR: better performing trading rules should get a higher weight. Potentially, certain rules will perform differently for different instruments
+    the costs of trading a given filter: cheaper and slower trading rules will get a higher weight, since their post-cost SR will be higher. These costs will be different for each instrument.
+    The correlation between forecasts: we want a higher weight to rules that are more diversifying. Correlations for trading rule varations should be similar, regardless of the instrument that they are measured on.
+
+Method for allocating weights:
+Forecast weights should be the same across instruments, except where trading costs dictate otherwise.
+Forecast weights should be lower on rules that trade faster where instruments have a higher cost per trade.
+We should avoid over fitting forecast weights: placing too much weight on a single trading rule variation.
+Forecast weights should ideally be higher on more diversifying rule variations: the slowest and the fastest
+
+Firstly, on an instrument by instrument basis, we remove trading rules that are too expensive. Secondly, we allocate forecast weights using a top down methodology (handcrafting). For this strategy, that implies that all remaining trend filters get the same forecast weight.
+
+Removing expensive trading rules:
+We do not want to trade any instrument which uses up more than a third of our expected pre-cost return in costs.
+Breaking down annual risk adjusted costs = transaction cost + holding costs:
+risk adjusted transaction costs = risk adjusted cost per trade * annual turnover
+Risk adjusted holding costs = risk adjusted cost per trade * rolls per year * 2
+A limit of 0.10 SR units is appropriate for instruments, but for trading rules we can have a higher maximum for a couple of reasons. Firstly, if our most expensive trading rule incurs exactly 0.10 SR units in costs for a given instrument, then on average we'll have a combined forecast which always comes in well under 0.10 SR units. Secondly, the effect of buffering our positions will slow down our trading and allow us to trade a set of forecasts that is a little quicker. Because of these two effects, we use a higher limit of 0.15 SR units for selecting trading rules.
+LIMIT OF 0.15 SR units for selecting trading rules.
+
+For a given instrument if we set a maximum of 0.15 SR units in costs, then we can derive the maximum allowable turnover for a given trading rule variation:
+Annual risk adjusted costs < 0.15
+(Cost per trade * Turnover) + (Cost per trade * rolls per year * 2) < 0.15
+Turnover < [0.15 - (Cost per trade * rolls per year * 2)] / cost per trade
+

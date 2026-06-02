@@ -474,9 +474,9 @@ def _plot_and_print(is_equity, oos_equity, is_end_capital):
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig('portfolio/aggregate_port_ib_equity_curve.png', dpi=150)
+    plt.savefig('ibkr_fut/aggregate_port_ib_equity_curve.png', dpi=150)
     plt.show()
-    logger.info("Chart saved to portfolio/aggregate_port_ib_equity_curve.png")
+    logger.info("Chart saved to ibkr_fut/aggregate_port_ib_equity_curve.png")
 
 
 if __name__ == '__main__':

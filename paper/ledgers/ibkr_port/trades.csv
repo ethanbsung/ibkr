@@ -1,0 +1,2 @@
+timestamp,date,symbol,contract,action,qty,ibs,signal_price,fill_price,fill_value,slippage_usd,slippage_bps,commission
+2026-06-02 13:28:05,2026-06-02,MGC,202608,SELL,1,0.4758,4517.4,4517.4,45174.0,0.0,0.0,0.97

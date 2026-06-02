@@ -24,7 +24,7 @@ import pandas as pd
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-sys.path.insert(0, os.path.dirname(_HERE))   # repo root, for `portfolio` package
+sys.path.insert(0, os.path.dirname(_HERE))   # repo root, for `ibkr_fut` package
 import crypto_trend as ct
 from crypto_mr_backtest import load_clean, FNAME_RE
 import glob
@@ -73,7 +73,7 @@ def crypto_returns():
 # ── IBS futures portfolio returns (real backtest) ────────────────────────────
 
 def ibs_returns():
-    import portfolio.aggregate_port as ap
+    import ibkr_fut.aggregate_port as ap
     idata = ap.load_all_data()
     ind = ap.precompute_ibs(idata)
     state = ap.run_backtest(idata, ind)
