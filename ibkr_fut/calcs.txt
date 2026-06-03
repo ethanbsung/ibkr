@@ -64,7 +64,7 @@ N_i = Capital * IDM * Weight_i * target_risk / (Futures multiplier_i * Price_i *
 
 Handcrafting:
     Divide the available instruments into asset classes. Allocated each asset class an equal fraction of the 100% in instrument weighting that is available
-    Within each asset class, divide the available instruments into similar groups. Allocate each group within an asset class an equal fraction of the instrument sweight share for that asset class.
+    Within each asset class, divide the available instruments into similar groups. Allocate each group within an asset class an equal fraction of the instruments weight share for that asset class.
     Within each group, allocate to each instrument within the group an equal fraction of the instrument weight share for that group
 An approximation for IDM (preferably will calculate on our own): 1:1.00, 2:1.2, 3:1.48, 4:1.56, 5:1.7, 6:1.9, 7:2.10, 8 to 14:2.2, 15 to 24:2.30, 25 to 29:2.40, 30+:2.50
 An algorithm for automatically selecting instruments:
@@ -101,7 +101,7 @@ Scaled forecast = Raw forecast * 10 / (Average absolute value of raw forecast)
 Forecast scalar = 10 / (Average absolute value of raw forecast)
 Scaled forecast = Raw forecast * forecast scalar
 For the EWMAC(16,64) trading rule, carver estimated the forecast scalar to be approximately 1.8. To avoid in sample cheating, we must use a purely backward looking rolling estimate of the forecast scalar when backtesting. These scalars are relatively stable over time so there is no harm in using the fixed values he provides for each strategy
-For this strategy: Scaled forecast = [(EWMA(64) - EWMA(16)) / sigma_p] * 1.9
+For this strategy: Scaled forecast = [(EWMA(16) - EWMA(64)) / sigma_p] * 1.9
 Using scaled forecasting for optimal position sizing: N_i = Scaled forecast_i,t * Capital * IDM * Weight_i * target_risk / (10 * Multiplier_i * Price_i,t * Fx_i,t * sigma_%i,t)
 Maximum forecast value of 20: Capped forecast_i,t = Max(Min(Scaled forecast_i,t, +20), -20)
 N_i,t = Capped forecast_i,t * Capital * IDM * Weight_i * target_risk / (10 * Multiplier_i * Price_i,t * FX_i,t * sigma_%i,t)
@@ -175,3 +175,158 @@ Annual risk adjusted costs < 0.15
 (Cost per trade * Turnover) + (Cost per trade * rolls per year * 2) < 0.15
 Turnover < [0.15 - (Cost per trade * rolls per year * 2)] / cost per trade
 
+Top down method for choosing forecase weights:
+    Split the list of trading rules by style. Allocate between styles according to preferences
+    Within a given style, allocate equally across trading rules
+    Within a given trading rule, allocate equally across variations of each given trading rule
+
+Trading strategies are either divergent or convergent. Divergent strategies make money when markets diverge away from equilibrium: trend following is a classic. Convergent strategies make money when markets move towards their equilibrium.
+
+Applying top down method to ewmac strategy:
+    Allocate 100% of our forecast to weights of our one style (divergent)
+    We only have one trading rule: trend following with EWMAC. Allocate 100% of our forecast weights to that rule.
+    We have between one and six variations of our trading rule, depending on the instrument we're trading. Equally divide 100% of our forecast weight between these rules.
+
+As an example, suppose that for a given intsrument we drop the fastest variation of the EWMAC rule: 2,8. We then allocate a 20% forecast weight in each of the five slowest variations.
+
+The below table shows the appropriate FDM and forecast weights for a given set of trend filters. We should select the appropriate row for a given instrument, given the set of trading rule variations that we have identified as cheap enough to trade.
+                                Forecast weight for each rule variation        FDM
+EWMAC2, 4, 8, 16, 32, and 64                    0.167                          1.26
+EWMAC4, 8, 16, 32, and 64                       0.2                            1.19
+EWMAC8, 16, 32, and 64                          0.25                           1.13
+EWMAC16, 32, and 64                             0.333                          1.08
+EWMAC32 and 64                                  0.50                           1.03
+EWMAC64                                         1.0                            1.0
+
+With an FDM applied, it's now possible for the combined forecast to exceed an absolute value of 20. I'm not comfortable with that due to the likely risk, so I want to also apply a cap if the combined forecast were less than -20 or greater than +20
+
+To recap:
+We calculate a weighted average of capped forecasts for various trading rule variations, using forecast weights w summing to 1 that are specific to a given instrument, and which depend on the trading costs and turnover:
+Raw combined forecast_i,t = W_i,1 * F_i,1,t + W_i,2 * F_i,2,t + W_i,3 * F_i,3,t + ...
+
+To account for diversification we now apply a forecast diversification multiplier for the given instrument FDM_i:
+Scaled combined forecast_i,t = Raw combined forecast_i,t * FDM_j
+
+As we did for individual filters, to avoid a situation when we have too much risk in a given instrument, we cap the combined forecast:
+Capped combined forecast_i,t = Max(Min(Scaled combined forecast_i,t, +20), -20)
+
+Finally, we can plug the capped combined forecast into the now familiar position sizing equation, after which we would apply buffers and decide whether any trading was required:
+N_i,t = Capped combined forecast_i,t * Capital * IDM * Weight_i * target_risk / (10 * Multiplier_i * Price_i,t * FX_i,t * sigma_%i,t)
+
+
+Dynamic optimisation (for when you can't trade the jumbo portfolio):
+Every day we will calculate the best possible set of positions that can be held, given that positions in futures markets can only be integers. The best set of positions are those that most closely match the optimal, unrounded portfolio of positions.
+We need to introduce some formal notation. Suppose that we have a set of optimal unrounded positions in each instrument, where N_i is the unrounded number of contracts of instrument i that we would ideally hold. These will have been calculated using the trading capital that we have available, using combined forecasts, instrument weights, and IDM. Importantly, these positions will be before buffering has been applied, since buffering requires knowledge of the positions we currently hold.
+It turns out to be more natural to perform this optimisation using portfolio weights, where a portfolio weight is equal to the notional value of a position as a proportion of our trading capital. 
+We define a portfolio weight for a given instrument as:
+optimal unrounded portfolio weight, w_i = N_i * Weight per contract
+Weight per contract_i = notional exposure per contract_i / capital
+notional exposure per contract_i = multiplier_i * price_i * fx rate_i
+Our objective is to find the best set of weights, w^*_i, for which we minimise the standard deviation of the tracking error portfolio.
+This standard deviation is calculated using the two sets of weights and the covariance of asset percentage returns. Furthermore, the covariance is calculated from the correlation and annualised standard deviation of percentage returns for the underlying instruments, not the trading sub-strategies
+
+Tracking error weight e_i = w^*_i - w_i
+Vector of tracking errors e = [e_0, e_1, e_2, ...]
+covariance of asset percentage returns = SUM = sigma^T.p.sigma
+standard deviation of tracking error portfolio = sqrt(e^T.SUM.e)
+Note that T is the transposition operator, and the dots (.) in the final formula are matrix dot multiplication
+Because we can only take integer positions, our w^* must be in whole units of weight per contract. So, for example, if the weight per contract in any given instrument is 0.32, then we can only have a w^* which is one of the following values: ..., -0.96, -0.64, -0.32, 0, +0.32, +0.64, +0.96, ... and so on.
+The correlation matrix p and the annualised standard deviation sigma are both calculated from the percentage returns of all the instruments we are trading. Recall that we calculate daily percentage returns in the following way: given a back-adjusted price, p, and the price of the traded futures contract on the appropriate day, F:
+Percentage return, r_%t = (p_t - p_t-1) / F_t-1
+To find the standard deviation, we use the standard method introduced before: a EWMA with a 32-day span. For correlation, a longer look back is appropriate: we use the last six months of weekly returns.
+
+We will use the greedy algorithm. To use this method to solve the optimisation, we can use the following approach:
+    1. come up with a set of starting weights. This is equal to a zero weight in all instruments. These starting weights become the current best solution.
+    2. Find the proposed set of weights that is the best we can do, starting from the current best solution.
+    3. We set the proposed solution to be initially equal to the current best solution.
+    4. Loop over all the instruments which we can have weights for. For each instrument calculate an incremented solution:
+        i. If the optimal unrounded weight for that instrument is positive, then add the weight per contract to the current best solution weight for this instrument. This is equivalent to buying an additional contract for that instrument.
+        ii. If the optimal weight for that instrument is negative, then subtract the weight per contract from the current best solution weight for this instrument. This is equivalent to selling an additional contract for that instrument.
+        iii. Evaluate the tracking error for the incremented solution. If it is better than the proposed solution, then set the proposed solution to be equal to the incremented solution.
+    5. After completing the instrument loop you will have the best proposed solution. This will be the best solution we can have that involves adding or subtracting one contract for a single instrument.
+    6. If the best proposed solution has a lower tracking error than the current best solution, then it becomes the new current best solution. Repeat from step 4.
+    7. If the best proposed solution is the same as the current best solution, then the current best solution is considered optimal. Stop.
+
+Notice that in step 4, we don't increment the proposed solution; instead we are always starting from the baseline of the current best solution.
+The final job is to convert the optimised weights back into positions. These positions will always be integers, so no rounding is required.
+Optimised position N^*_i = Optimised portfolio weight w^*_i / weight per contract_i
+
+Carver has run this optimisation with countless examples and the results are fascinating and intuitive. For example, if an instrument has a large minimum capital and we can't take a position in it, it will take positions in instruments with smaller weights per contract that are correlated and have the same sign of position on (long or short).
+It also has a number of advantages over more complex optimisation methodologies. Firstly, it is very robust and unlikely to generate sparse portfolios consisting of positions in just one or two instruments. Similarly, it won't take potentially dangerous hedged positions since the optimised position will always be in the same direction as the forecast.
+The main disadvantage is that it may miss a slightly better set of optimal weights that will give a small improvement on the tracking error. But this is a small price to pay, since these optimal weights are often less robust.
+
+Dealing with costs: a cost penalty
+There is one important difference between dynamic and static optimisation. The static optimisation assumes that all instruments will have the same pre-cost SR. This makes sense, since there was insufficient evidence that any one instrument will perform better than another in a given strategy, over a sufficiently long backtest. In contrast the dynamic optimisation is using underlying positions that have been scaled for forecast strength.
+Since we assume that forecast strength is a good predictor of risk adjusted returns in the near future, this means the dynamic optimisation is effectively incorporating different estimates for SRs for each instrument into its calculations.
+The dynamic optimisation has no concept of costs. Fortunately, it is possible to modify the tracking error equations to include costs:
+Optimal unrounded portfolio weight w_i = N_i * Weight per contract_i
+Previous position as number of contracts held = P_i
+Optimised portfolio weight w^*_i = N^*_i * Weight per contract_i
+Previous (current) weight w^P_i = P_i * Weight per contract_i
+Cost in weight terms w^c_i = (C_i / Capital) / Weight per contract_i
+Tracking error weight e_i = w^*_i - w_i
+Vector of tracking errors e = [e_0, e_1, e_2, ...]
+Trade as a weight Delta_i = abs(w^P_i - w^*_i)
+Cost of all trades Delta = sum(Delta_0 * w^c_0 + Delta_1 * w^c_1 + Delta_2 * w^c_2 + ...)
+Covariance of asset percentage returns = Sum
+Tracking error, standard deviation and cost penalty = sqrt((e^T.Sum.e) + 50Delta)
+
+New terms introduced in these equations:
+currently held, or previous, number of contracts P_i in each instrument i
+The position weight implied by those previous contracts, w^P_i
+The estimated cost of trading a single contract of instrument i, C_i, in the same currency as our capital
+That cost translated into the cost of trading a given weight, as a proportion of capital w^c_i
+Trades in weight terms, Delta_i
+The cost of all trading in weight terms, Delta (greek symbol)
+The total cost is multiplied by 50 and then added to the tracking error. Since we are trying to minimise the tracking error, this means we will seek out optimised sets of weights which have a lower cost of trading.
+
+How do we calculate the cash cost of trading a single contract, C_i? The same way as foundational equations:
+Spread cost, price points = (Bid-Offer) / 2
+Spread cost, currency = Multiplier * Spread cost price points
+Total cost per trade, currency = Spread cost currency + commission per contract
+
+For backtesting, we will need to adjust the historical costs in currency terms, using the method described earlier.
+
+Dealing with costs: buffering
+Using a cost penalty reduces the turnover of the dynamic optimisation by some margin, but it is still higher than you would expect. The main reason for this is that the optimisation only ever puts on a position in the same direction as the underlying forecast, long or short. As a result, whenever a forecast changes sign from long to short, we will always close our entire position in that instrument (and possibly open a new position in the opposite direction).
+This behavior is unaffected by the imposition of cost penalty, and results in a lower bound below which turnover can't be reduced. It turns out this lower bound is actually quite high. Increasing the cost penalty further to try to reduce turnover only results in trading being limited to the very cheapest instruments, and heavily penalises after cost performance.
+However, there is a solution at hand. Remember that we inadvertently dropped another element of our original trading system which helps to reduce costs: buffering. Back in earlier strategies, we set the trade buffer at 10% of the average position that we expect to hold. We then constructed a buffer zone around the optimal position that we wanted to hold. If a current position were outside this zone then we would trade to the edge of the buffer. But if the position was inside the buffer zone then no trading was necessary.
+It didn't make sense to use buffered positions as an input into the dynamic optimisation, so the unrounded positions we are trying to match are calculated before a buffer is applied. Unfortunately, it isn't practical to do this type of buffering on individual positions in the dynamic optimisation.
+But we can implement buffering on the entire portfolio by using the general idea of buffering, but in tracking error units rather than position units.
+To achieve this, we first set a tracking error buffer in standard deviation terms, B_sigma. The tracking error is always positive, because it is the sum of two positive figures: an annualised standard deviation, and annualised costs. So our modified buffering methodology will look like this:
+    - Calculate the optimised portfolio of unrounded positions using the dynamic optimisation method.
+    - check the tracking error of the optimised portfolio versus the positions we already hold.
+    - if this tracking error is smaller than the buffer, then no trading is required.
+    - if this tracking error is larger than the buffer, then trade until tracking error is equal to the buffer.
+
+The analogous equivalent to the average position, used in the original buffer, is our average risk target. This is measured as an annualised standard deviation of returns. The 10% symmetric buffer we used for position buffering is equivalent to a 5% asymmetric buffer for tracking error. This gives us the following calculation for an equivalent tracking error buffer:
+B_sigma = 0.05 * target_risk
+When using a 20% risk target, the optimal buffer B_sigma is 1%
+
+Next, we calculate the tracking error of our current portfolio against the dynamically optimised portfolio. Note: this is not the same as the tracking error of the optimised portfolio against the original optimal unrounded positions. We are now trying to see if the current portfolio is sufficiently similar to the optimsed portfolio that no trading is necessary.
+This tracking error consists purely of the standard deviation and doesn't include the cost penalty, since we've already used costs in determining what the optimised portfolio will be:
+Optimised portfolio weight w^_i = N^*_i * Weight per contract_i
+Previous weight w^P_i = P_i * Weight per contract_i
+Tracking error current weight e^p_i = w^*_i - w^p_i
+Vector of tracking errors e_p = [e^p_0,e^p_1,e^p_2, ...]
+Tracking error, T = sqrt((e_p)^T.SUM.e_p)
+
+If we were to trade all the way to the new optimsed weights, we would get a tracking error of zero. But as we did earlier with position buffering, we actually want to trade to the edge of the buffer, i.e. trade in such a way that our tracking error is equal to the size of the buffer, 1%.
+To achieve this we calculate an adjustment factor, which is the distance we need to travel from the current portfolio such that the tracking error is equal to the buffer. If the tracking error of the current versus optimised portfolio is T, then:
+Adjustment factor, a = max([T-B_sigma] / T, 0)
+In an example considering T = 2.35%, we have: Adjustment factor, a = max([2.35% - 1%] / 2.35%, 0) = 0.57
+We then need to multply the trades that would be required to trade all the way to the optimsed portfolio by a: Required trade_i = round(a * [N^*_i - P_i])
+
+EXAMPLE WITH EXAMPLE VALUES:
+For example, to achieve the optimised portfolio weight for S&P 500 (0.08) without considering buffering, we would need to buy 0.08 - 0 = +0.08 weight units of S&P500. This corresponds to two contracts, since the weight per contract is 0.04. If we multiply the required trade of +0.08 by 0.57, then we get a trade of +0.0456. Similarly, the required trade in the US 10-year is reduced from +0.24 to +0.138. Since the required trade in US 5-year is zero, this is unchanged.
+Next, we convert the required trades into contract units. For S&P500, +0.0456 / 0.04 = +1.14 and for US 10-year bonds +0.138 / 0.24 = +0.57. Finally, these required trades are rounded to whole contracts to produce the trades we will actually do. We buy one S&P 500 contract, and a single US 10-year bond future, ending up with weights of [0, 0.24, 0.04] instead of the optimised weights of [0, 0.24, 0.08]
+Notice that the required trade is virtually identical to what we would do without buffering, except we buy one less S&P 500 future. 
+
+Other benefits from dynamic optimisation:
+We could include additional futures in the set of instruments which we generate potential optimal positions for, but then not actually allow yourself to hold optimised positions in those instruments.
+These could be instruments which are too costly to trade, have insufficent liquidity, or for which there are trading restrictions. In carver's portfolio, he generates positions for approximately 150 futures, but only allows himself to trade around 100.
+The advantage of this is that we will effectively get a better forecast by combining information from more instruments. For example, we know that most trends happen across an asset class. It might be that there is a decent trend in a particular group of assets, but there is a much stronger trend in instruments which we can't trade. By using dynamic optimisation we can transfer risk to correlated markets which we can trade, even if they don't have strong forecasts in their own right.
+We can also set position limits in the dynamic optimisation. For example, we might not want to hold more than 10 VIX contracts.
+There might be a situation where we are temporarily unable to trade a given instrument, for example because it has idiosyncratic market holiday, but where you wanted to reduce risk and cut an existing long position. Again, this can be dealt with by setting a minimum and maximum position limit for a given instrument, equal to its current position.
+The optimisation will do a proxy trade in instruments whose markets are currently open, either selling a positively correlated instrument or buying a negatively correlated instrument if one is available, and has the appropriate sign on its forecast.
+Another advantage comes when we come to roll our futures contracts. In the traditional strategy, we assume that we want to hold the same positions after the roll. But in a dynamic strategy, it might sometimes make sense to force an instrument that is about to roll to close. Then the optimisation will subsequently decide if opening the same position again in that instrument makes sense, or if it would be optimal to trade something else. This is particularly useful if we find a given instrument is very expensive to roll.

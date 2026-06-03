@@ -76,3 +76,29 @@ Running 2 strategies...
        crypto_carry         -0.11          1.00
 
 ================================================================================
+Running 2 strategies...
+  [crypto_trend] bar 2026-06-02: ret -0.037%  nav 0.9995  gross 1%  0 trades
+  [crypto_carry] bar 2026-06-03: ret -0.063%  nav 0.9949  gross 105%  0 trades
+
+================================================================================
+  PAPER PORTFOLIO REPORT   total capital $5,000
+================================================================================
+
+  ── crypto_trend   alloc 70%  ($3,500)  value $3,498.27   5 bars
+     NAV 0.9995   total   -0.05%   cum cost    0.00%
+     (accumulating — annualized stats shown after 20 bars)
+
+  ── crypto_carry   alloc 30%  ($1,500)  value $1,492.37   5 bars
+     NAV 0.9949   total   -0.51%   cum cost    0.49%
+     (accumulating — annualized stats shown after 20 bars)
+
+  ── TOTAL PORTFOLIO ─────────────────────────────────────────────────────
+     value $4,990.64   total   -0.19%
+     (accumulating — annualized stats shown after 20 bars)
+
+     strategy return correlations:
+                     crypto_trend  crypto_carry
+       crypto_trend          1.00         -0.36
+       crypto_carry         -0.36          1.00
+
+================================================================================

@@ -75,3 +75,19 @@ WARNING:ib_insync.wrapper:Canceled order: Trade(contract=Future(conId=712565978,
 ERROR:ib_insync.client:API connection failed: TimeoutError()
 ERROR: Could not connect to IBKR — 
 Make sure TWS or IB Gateway is running.
+
+============================================================================
+  IBS  [EXECUTE]  |  2026-06-03  |  checking: MGC
+  Equity: $251,102.05   per instrument: $83,701
+  Execution: MES/MNQ → MKT @ 3:58 PM ET   MGC → MKT @ 1:28 PM ET
+============================================================================
+
+  ────────────────────────────────────────────────────────────────────────
+  GC  Micro Gold  (MGC 202608)  |  position: +0
+  H 4525.00  L 4453.30  C 4469.80  |  IBS: 0.230  |  size: 4 contract(s)
+  flat — no signal
+
+============================================================================
+  NO ORDERS PLACED — no signals triggered
+============================================================================
+
