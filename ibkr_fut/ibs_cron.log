@@ -91,3 +91,54 @@ Make sure TWS or IB Gateway is running.
   NO ORDERS PLACED — no signals triggered
 ============================================================================
 
+
+============================================================================
+  IBS  [EXECUTE]  |  2026-06-03  |  checking: MES / MNQ
+  Equity: $251,675.65   per instrument: $83,892
+  Execution: MES/MNQ → MKT @ 3:58 PM ET   MGC → MKT @ 1:28 PM ET
+============================================================================
+
+  ────────────────────────────────────────────────────────────────────────
+  ES  Micro S&P 500  (MES 202606)  |  position: +4
+  ⚠ ROLL NEEDED — other months: 202609: +1
+  H 7628.50  L 7562.50  C 7580.50  |  IBS: 0.273  |  size: 4 contract(s)
+  HOLD long (4 contract(s)) — correctly sized
+  ACTION: BUY 1 MES 202606  [ROLL OPEN]  @ 3:58 PM ET
+  ACTION: SELL 1 MES 202609  [ROLL CLOSE]  MKT
+  ROLL CLOSE MES 202609  SELL 1  → Filled  fill 7636.25  (id 8)
+  ORDER PLACED → status: Filled  fill 7573.75  comm $0.62  (orderId 9)
+
+  ────────────────────────────────────────────────────────────────────────
+  NQ  Micro Nasdaq  (MNQ 202606)  |  position: +3
+  ⚠ ROLL NEEDED — other months: 202609: +1
+  H 30807.75  L 30495.50  C 30690.25  |  IBS: 0.624  |  size: 3 contract(s)
+  HOLD long (3 contract(s)) — correctly sized
+  ACTION: BUY 1 MNQ 202606  [ROLL OPEN]  @ 3:58 PM ET
+  ACTION: SELL 1 MNQ 202609  [ROLL CLOSE]  MKT
+  ROLL CLOSE MNQ 202609  SELL 1  → Filled  fill 30938.00  (id 11)
+  ORDER PLACED → status: Filled  fill 30644.25  comm $0.62  (orderId 12)
+
+============================================================================
+  ORDERS PLACED:
+    ROLL SELL  1 MES 202609 MKT     status: Filled                id: 8
+    BUY  1 MES 202606 MKT           status: Filled                id: 9
+    ROLL SELL  1 MNQ 202609 MKT     status: Filled                id: 11
+    BUY  1 MNQ 202606 MKT           status: Filled                id: 12
+============================================================================
+
+Traceback (most recent call last):
+  File "/home/ethanbsung/ibkr/ibkr_fut/live_signals.py", line 424, in <module>
+    main()
+  File "/home/ethanbsung/ibkr/ibkr_fut/live_signals.py", line 418, in main
+    ledger.log_daily(ib)
+  File "/home/ethanbsung/ibkr/ibkr_fut/../paper/ibkr_logger.py", line 200, in log_daily
+    prev_nav = pd.read_csv(DAILY_PATH)["nav"].iloc[-1]
+               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^
+  File "/home/ethanbsung/ibkr/venv/lib/python3.12/site-packages/pandas/core/indexing.py", line 1191, in __getitem__
+    return self._getitem_axis(maybe_callable, axis=axis)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ethanbsung/ibkr/venv/lib/python3.12/site-packages/pandas/core/indexing.py", line 1752, in _getitem_axis
+    self._validate_integer(key, axis)
+  File "/home/ethanbsung/ibkr/venv/lib/python3.12/site-packages/pandas/core/indexing.py", line 1685, in _validate_integer
+    raise IndexError("single positional indexer is out-of-bounds")
+IndexError: single positional indexer is out-of-bounds

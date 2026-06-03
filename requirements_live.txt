@@ -1,0 +1,10 @@
+# Live trading / signals stack (ibkr_fut/live_signals.py, live_port.py, live_port_pc.py)
+# Install: pip install -r requirements_live.txt
+# NOTE: also requires a running IB Gateway or TWS accepting API connections.
+
+ib_insync==0.9.86      # IBKR API client (live_signals: IB, Future, Order)
+eventkit==1.0.3        # ib_insync dependency
+nest-asyncio==1.6.0    # ib_insync dependency
+numpy==2.3.2           # via paper.ibkr_logger.IBKRLedger
+pandas==2.3.1          # via paper.ibkr_logger.IBKRLedger
+pytz==2025.2           # live_port.py / live_port_pc.py timezone handling
