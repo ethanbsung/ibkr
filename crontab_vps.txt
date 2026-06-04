@@ -1,0 +1,32 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  VPS crontab — host TZ is UTC; CRON_TZ pins every job to US Eastern (auto-DST).
+#  Repo at /home/ethan/ibkr.  Install with:  crontab /home/ethan/ibkr/crontab_vps.txt
+#  (If this cron build ignores CRON_TZ, see the literal-UTC note at the bottom.)
+# ════════════════════════════════════════════════════════════════════════════
+CRON_TZ=America/New_York
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# EWMAC dynamic-optimisation futures — 6:00 PM ET weekdays.
+# Runs AFTER the futures daily bars settle (~5 PM ET) and AFTER the 5–6 PM ET CME
+# maintenance halt, so pst_updater pulls complete closes and orders fill in the
+# evening session. Refreshes data, then places orders.
+0 18 * * 1-5 /home/ethan/ibkr/ibkr_fut/run_dynamic.sh --execute >> /home/ethan/ibkr/ibkr_fut/dynamic_cron.log 2>&1
+
+# Crypto trend paper trading — 6 AM ET daily (run_paper.sh logs itself).
+0 6 * * * /home/ethan/ibkr/paper/run_paper.sh >> /home/ethan/ibkr/paper/paper_cron.log 2>&1
+
+# ETF shortability refresh — 3:50 PM ET weekdays (before the 3:55 PM trade).
+50 15 * * 1-5 /home/ethan/ibkr/etf/live/run_etf_shortability.sh >> /home/ethan/ibkr/paper/etf_shortability.log 2>&1
+
+# ETF EWMAC live trading — 3:55 PM ET weekdays.
+55 15 * * 1-5 /home/ethan/ibkr/etf/live/run_etf_daily.sh >> /home/ethan/ibkr/paper/etf_daily.log 2>&1
+
+# ETF nightly data refresh — 6:30 PM ET weekdays.
+30 18 * * 1-5 /home/ethan/ibkr/etf/live/run_etf_refresh.sh >> /home/ethan/ibkr/paper/etf_refresh.log 2>&1
+
+# ── Note: IBS (run_ibs.sh) is intentionally GONE — strategy retired. ──
+#
+# ── If CRON_TZ is unsupported, delete the CRON_TZ line and use literal UTC.
+#    During EDT (Mar–Nov, UTC-4):  ET+4h →  6PM ET=22:00, 6AM ET=10:00,
+#      3:50PM=19:50, 3:55PM=19:55, 6:30PM=22:30 UTC.
+#    During EST (Nov–Mar, UTC-5):  add one more hour. CRON_TZ avoids this entirely.

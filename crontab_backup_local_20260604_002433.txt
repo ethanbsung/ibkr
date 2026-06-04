@@ -1,0 +1,17 @@
+# Ensure cron can find basic binaries
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# IBS auto-execution — America/Detroit (ET), weekdays only
+
+# Crypto trend paper trading — daily at 6am ET (after 00:00 UTC daily bar close)
+# Idempotent + data-driven (acts on latest completed UTC bar); logs to paper/paper_cron.log
+0 6 * * * /home/ethanbsung/ibkr/paper/run_paper.sh
+
+# ETF shortability refresh — 3:50 PM ET weekdays (runs before 3:55 PM trade)
+50 15 * * 1-5 /home/ethanbsung/ibkr/etf/live/run_etf_shortability.sh >> /home/ethanbsung/ibkr/paper/etf_shortability.log 2>&1
+
+# ETF EWMAC live trading — 3:58 PM ET weekdays
+55 15 * * 1-5 /home/ethanbsung/ibkr/etf/live/run_etf_daily.sh >> /home/ethanbsung/ibkr/paper/etf_daily.log 2>&1
+
+# ETF nightly data refresh — 6:30 PM ET weekdays
+30 18 * * 1-5 /home/ethanbsung/ibkr/etf/live/run_etf_refresh.sh >> /home/ethanbsung/ibkr/paper/etf_refresh.log 2>&1

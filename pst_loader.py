@@ -28,7 +28,7 @@ import os
 import glob
 import pandas as pd
 
-PST_BASE = "/home/ethanbsung/ibkr/Data/pst/futures"
+PST_BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Data", "pst", "futures")
 
 
 class PSTLoader:

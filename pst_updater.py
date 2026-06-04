@@ -26,8 +26,9 @@ from ib_insync import IB, Future, Forex, util
 # Config                                                               #
 # ------------------------------------------------------------------ #
 
-PST_BASE  = "/home/ethanbsung/ibkr/Data/pst/futures"
-IB_CFG    = "/home/ethanbsung/ibkr/Data/pst/ib_config"
+_REPO     = os.path.dirname(os.path.abspath(__file__))
+PST_BASE  = os.path.join(_REPO, "Data", "pst", "futures")
+IB_CFG    = os.path.join(_REPO, "Data", "pst", "ib_config")
 IB_HOST   = "127.0.0.1"
 IB_PORT   = 4002    # IB Gateway paper; live = 4001
 IB_CLIENT = 10

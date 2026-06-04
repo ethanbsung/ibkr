@@ -229,3 +229,41 @@ def test_optimise_positions_end_to_end():
     )
     assert np.allclose(N, [2.0, -2.0])
     assert N.dtype == float and np.allclose(N, np.round(N))
+
+
+# ── min=max=current / wider optimisation universe (calcs.txt 326-330) ──────────────
+
+def _corr_cov(vol, rho):
+    v = np.asarray(vol, float)
+    r = np.array(rho, float)
+    return np.diag(v) @ r @ np.diag(v)
+
+
+def test_locked_instrument_held_at_current():
+    # A non-tradable instrument must keep its current position exactly, never trade.
+    cov = _corr_cov([0.20, 0.20], [[1.0, 0.0], [0.0, 1.0]])
+    wpc = np.array([0.01, 0.01])
+    N = optimise_positions(
+        covariance=cov, weight_per_contract=wpc,
+        optimal_unrounded_positions=np.array([4.0, 4.0]),
+        previous_positions=np.array([2.0, 0.0]),
+        use_costs=False, use_buffering=False,
+        tradable=np.array([False, True]),
+    )
+    assert N[0] == 2.0          # locked at its current 2 contracts
+    assert N[1] == 4.0          # tradable one optimises freely
+
+
+def test_locked_risk_transfers_to_correlated_tradable():
+    # Carver's point (calcs 326-328): optimise over an instrument you can't trade and
+    # its risk loads onto a correlated tradable neighbour.
+    cov = _corr_cov([0.20, 0.20], [[1.0, 0.95], [0.95, 1.0]])
+    wpc = np.array([0.01, 0.01])
+    target = np.array([3.0, 3.0])
+    both = optimise_positions(cov, wpc, target, previous_positions=np.zeros(2),
+                              use_costs=False, use_buffering=False)
+    locked = optimise_positions(cov, wpc, target, previous_positions=np.zeros(2),
+                                use_costs=False, use_buffering=False,
+                                tradable=np.array([False, True]))
+    assert locked[0] == 0.0
+    assert locked[1] > both[1]   # neighbour takes extra contracts to cover the locked one

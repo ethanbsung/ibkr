@@ -150,6 +150,7 @@ def _simulate(uni: dict, capital: float, target_risk: float,
     sigma, forecast = uni["sigma"], uni["forecast"]
     mult, spread, commission = uni["mult"], uni["spread"], uni["commission"]
     W, C, est = uni["W"], uni["C"], uni["est"]
+    tradable = uni["tradable"]
     T, n = len(idx), len(names)
     idx_values = idx.values
 
@@ -160,6 +161,7 @@ def _simulate(uni: dict, capital: float, target_risk: float,
     abs_pos_sum = 0.0
     n_held_sum = 0.0
     te_sum, te_count = 0.0, 0       # tracking error of held vs ideal (diagnostic)
+    gross_lev = np.zeros(T)         # realised gross leverage of held book (diagnostic)
     idm_cache: dict[tuple, tuple] = {}
 
     for t in range(T):
@@ -230,6 +232,7 @@ def _simulate(uni: dict, capital: float, target_risk: float,
                 target_risk=target_risk,
                 use_costs=use_costs,
                 use_buffering=use_buffering,
+                tradable=tradable[live_idx],
             )
 
         # Step 5: trade costs on the change, then carry positions forward.
@@ -246,6 +249,9 @@ def _simulate(uni: dict, capital: float, target_risk: float,
         te_count += 1
         n_held_sum += int(np.count_nonzero(N_star))
 
+        # Realised gross leverage = total notional / capital (calcs.txt line 33).
+        gross_lev[t] = float(np.sum(np.abs(N_star) * ml * rl * fl) / capital)
+
         abs_pos_sum += np.abs(pos).sum()
         pnl_list[t] = daily_pnl - trade_cost
 
@@ -261,6 +267,10 @@ def _simulate(uni: dict, capital: float, target_risk: float,
     stats = performance_stats(equity, daily_returns, costs_pct=costs_pct, turnover=turnover)
     stats["avg_instruments_held"] = round(n_held_sum / te_count, 1) if te_count else 0.0
     stats["avg_tracking_error_pct"] = round(100 * te_sum / te_count, 2) if te_count else 0.0
+    gl = gross_lev[gross_lev > 0]
+    stats["gross_lev_mean"] = round(float(gl.mean()), 1) if gl.size else 0.0
+    stats["gross_lev_p95"]  = round(float(np.percentile(gl, 95)), 1) if gl.size else 0.0
+    stats["gross_lev_max"]  = round(float(gl.max()), 1) if gl.size else 0.0
 
     return {"equity": equity, "daily_returns": daily_returns, "stats": stats}
 
@@ -272,11 +282,12 @@ def run_dynamic(
     use_costs: bool = True,
     use_buffering: bool = True,
     label: str = "(Jumbo)",
+    tradable_set: set | None = None,
 ) -> dict:
     """Build the universe once, then run the dynamic-opt backtest at each capital level."""
     names = list(instruments.keys()) if isinstance(instruments, dict) else list(instruments)
     print(f"Loading {len(names)} instruments {label} for dynamic optimisation...")
-    uni = _build_universe(names)
+    uni = _build_universe(names, tradable_set)
     if uni is None:
         print("No tradable instruments.")
         return {}
@@ -297,7 +308,9 @@ def run_dynamic(
             "Max DD %":     st["max_drawdown_pct"],
             "Skew":         st["skew"],
             "Avg #Held":    st["avg_instruments_held"],
-            "Avg TE %":     st["avg_tracking_error_pct"],
+            "Lev mean":     st["gross_lev_mean"],
+            "Lev p95":      st["gross_lev_p95"],
+            "Lev max":      st["gross_lev_max"],
         })
 
     print("\n" + "=" * 110)
@@ -329,11 +342,12 @@ def run_comparison(
     capitals: list[float] = (100_000, 250_000, 1_000_000),
     target_risk: float = TARGET_RISK,
     label: str = "(Carver Jumbo)",
+    tradable_set: set | None = None,
 ) -> dict:
     """Dynamic optimisation vs naive per-instrument rounding at matched capital levels."""
     names = list(instruments.keys()) if isinstance(instruments, dict) else list(instruments)
     print(f"Loading {len(names)} instruments {label} for dynamic-vs-naive comparison...")
-    uni = _build_universe(names)
+    uni = _build_universe(names, tradable_set)
     if uni is None:
         print("No tradable instruments.")
         return {}
