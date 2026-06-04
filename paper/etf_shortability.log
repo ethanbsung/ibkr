@@ -155,3 +155,4 @@ Querying Alpaca asset info for 71 symbols…
 
 Non-shortable (17): ['AMLP', 'BWX', 'EIDO', 'EWG', 'EWH', 'EWI', 'EWQ', 'EWU', 'FXE', 'FXY', 'HYD', 'IYT', 'MUB', 'USO', 'UVXY', 'VTEB', 'XRT']
 Saved → Data/etf/etf_shortability.json
+ERROR: ALPACA_API_KEY and ALPACA_SECRET_KEY must be set in .env
