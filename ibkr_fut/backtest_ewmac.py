@@ -40,7 +40,7 @@ from ibkr_fut.ewmac_signals import (
 
 # ── Parameters ───────────────────────────────────────────────────────────────────
 
-CAPITAL          = 50_000_000   # fixed capital for position sizing throughout
+CAPITAL          = 100_000   # fixed capital for position sizing throughout
 TARGET_RISK      = 0.20
 BUFFER_FRAC      = 0.10         # [calcs line 113]
 COMMISSION       = 1.5          # round-trip commission per contract
