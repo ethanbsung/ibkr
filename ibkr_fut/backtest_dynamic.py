@@ -48,11 +48,17 @@ CAPITAL_SWEEP = [100_000, 250_000, 1_000_000, 50_000_000]
 RESULTS_DIR   = "ibkr_fut/results"
 
 
-def _build_universe(instruments: list[str]) -> dict | None:
+def _build_universe(instruments: list[str], tradable_set: set | None = None) -> dict | None:
     """
     Build aligned numpy panels for every instrument with valid signals.
     Returns a dict of arrays (T x n) plus per-instrument scalars and the
     covariance estimator, or None if nothing is tradable.
+
+    tradable_set: optional set of instrument names we are allowed to trade. The full
+    `instruments` list forms the optimisation universe (drives covariance + target
+    weights); names outside tradable_set are held at min=max=current so the optimiser
+    transfers their risk onto correlated tradable markets (calcs.txt lines 326-330).
+    None => every instrument with valid signals is tradable (original behaviour).
     """
     specs, signals = {}, {}
     for instr in instruments:
@@ -114,10 +120,17 @@ def _build_universe(instruments: list[str]) -> dict | None:
         {i: specs[i].raw_price for i in names},
     )
 
+    if tradable_set is None:
+        tradable = np.ones(n, dtype=bool)
+    else:
+        tradable = np.array([i in tradable_set for i in names], dtype=bool)
+        print(f"  {int(tradable.sum())}/{n} instruments tradable "
+              f"(rest held at min=max=current)")
+
     return dict(
         names=names, idx=idx, price=price, raw=raw, fx=fx, sigma=sigma,
         forecast=forecast, mult=mult, spread=spread, commission=commission,
-        W=W, C=C, est=est,
+        W=W, C=C, est=est, tradable=tradable,
     )
 
 
@@ -190,7 +203,9 @@ def _simulate(uni: dict, capital: float, target_risk: float,
         # Step 3: ideal unrounded positions  [calcs line 214]
         N_unrounded = (fcl * capital * idm_t * w_n * target_risk) / (10.0 * ml * rl * fl * sl)
         weight_per_contract = ml * rl * fl / capital                      # [calcs line 226]
-        cost_per_contract = (2.0 * spread[live_idx] * ml + commission[live_idx]) * fl
+        # One-way cost per contract: half-spread crossing (SpreadCost) + half the
+        # round-trip commission. (Was 2*spread + full commission = 2x the true cost.)
+        cost_per_contract = (spread[live_idx] * ml + commission[live_idx] / 2.0) * fl
 
         cov = est.covariance_by_index(pd.Timestamp(idx_values[t]), live_idx)
         prev_live = pos[live_idx]

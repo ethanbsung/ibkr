@@ -215,6 +215,7 @@ def greedy_optimise_weights(
     target_weights: np.ndarray,
     previous_weights: np.ndarray | None = None,
     cost_in_weight: np.ndarray | None = None,
+    locked: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Greedy integer optimiser (calcs.txt lines 238-256).
@@ -227,6 +228,13 @@ def greedy_optimise_weights(
 
     target_weights:  optimal unrounded portfolio weights w_i = N_i * weight_per_contract_i.
     Returns optimised weights w*_i (whole multiples of weight_per_contract_i).
+
+    locked:  optional boolean mask of instruments held at min=max=current position
+    (calcs.txt line 330) — used for the wider optimisation universe (instruments we
+    optimise over but cannot trade). A locked instrument starts at its *previous*
+    weight and is never moved, so its tracking-error contribution e_i = prev_i -
+    target_i is fixed and the optimiser instead loads the desired risk onto its
+    correlated, tradable neighbours through the off-diagonal covariance.
 
     The objective is evaluated incrementally for speed. The tracking-error variance
     V = e'Sigma e (e = w - target) updates in O(1) for a one-contract move at i:
@@ -243,12 +251,17 @@ def greedy_optimise_weights(
     if cost_in_weight is None:
         cost_in_weight = np.zeros(n)
     cost = np.asarray(cost_in_weight, dtype=float)
+    if locked is None:
+        locked = np.zeros(n, dtype=bool)
+    else:
+        locked = np.asarray(locked, dtype=bool)
 
     direction = np.sign(target)
     step = np.asarray(weight_per_contract, dtype=float) * direction   # signed weight step
     diag = np.diag(cov)
 
     w = np.zeros(n)
+    w[locked] = prev[locked]          # hold non-tradable instruments at current position
     e = w - target
     g = cov @ e                       # gradient Sigma e
     V = float(e @ g)
@@ -256,7 +269,7 @@ def greedy_optimise_weights(
     cur_cost = COST_MULTIPLIER * float(np.sum(cur_abs * cost))
     cur_obj = (np.sqrt(V) if V > 0 else 0.0) + cur_cost
 
-    immovable = step == 0.0
+    immovable = (step == 0.0) | locked
     cost_term = COST_MULTIPLIER * cost
 
     while True:
@@ -337,6 +350,7 @@ def optimise_positions(
     target_risk: float = 0.20,
     use_costs: bool = True,
     use_buffering: bool = True,
+    tradable: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Full single-period dynamic optimisation: greedy + (optional) cost penalty +
@@ -345,6 +359,11 @@ def optimise_positions(
     weight_per_contract_i = multiplier_i * price_i * fx_i / capital.   [calcs line 226]
     cost_per_contract_i is the cash cost of trading one contract (base currency);
     converted to weight terms as (C_i / capital) / weight_per_contract_i.  [calcs line 268]
+
+    tradable:  optional boolean mask (True = may be traded). Instruments with
+    tradable=False are part of the optimisation universe — they shape the target and
+    the covariance — but are held at min=max=current position (calcs.txt line 330):
+    Carver optimises over ~150 futures while only trading ~100 (calcs.txt lines 326-328).
     """
     n = len(optimal_unrounded_positions)
     wpc = np.asarray(weight_per_contract, dtype=float)
@@ -352,15 +371,18 @@ def optimise_positions(
 
     if previous_positions is None:
         previous_positions = np.zeros(n)
-    previous_weights = np.asarray(previous_positions, dtype=float) * wpc
+    prev_positions = np.asarray(previous_positions, dtype=float)
+    previous_weights = prev_positions * wpc
 
     if use_costs and cost_per_contract is not None and capital:
         cost_in_weight = (np.asarray(cost_per_contract, dtype=float) / capital) / wpc
     else:
         cost_in_weight = np.zeros(n)
 
+    locked = None if tradable is None else ~np.asarray(tradable, dtype=bool)
+
     opt_weights = greedy_optimise_weights(
-        covariance, wpc, target_weights, previous_weights, cost_in_weight
+        covariance, wpc, target_weights, previous_weights, cost_in_weight, locked
     )
 
     if use_buffering:
@@ -370,4 +392,7 @@ def optimise_positions(
     else:
         final_weights = opt_weights
 
-    return np.round(final_weights / wpc)
+    result = np.round(final_weights / wpc)
+    if locked is not None:
+        result[locked] = prev_positions[locked]   # enforce min=max=current exactly
+    return result

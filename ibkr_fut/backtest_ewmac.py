@@ -234,7 +234,10 @@ def simulate_instrument(
         trade_size = abs(new_pos - current_pos)
         trade_cost = 0.0
         if trade_size > 0:
-            trade_cost  = trade_size * (2.0 * spread * mult + commission) * fx
+            # One-way cost: cross the half-spread (SpreadCost) + half the round-trip
+            # commission, per contract traded. (Previously double-counted: 2*spread +
+            # full round-trip commission per one-way trade = 2x the true cost.)
+            trade_cost  = trade_size * (spread * mult + commission / 2.0) * fx
             total_cost += trade_cost
             abs_changes += trade_size
             current_pos  = new_pos
