@@ -15,10 +15,11 @@ source "$REPO/venv/bin/activate"
 echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') run_dynamic start (repo=$REPO) ====="
 
 # 1. Refresh PST futures + FX data from IBKR so EWMAC signals use today's close.
-#    Update the full Jumbo universe (non-US contracts may fail on a paper data
-#    subscription — pst_updater skips those gracefully).
-JUMBO_INSTRUMENTS=$(python3 -c "from ibkr_fut.jumbo import JUMBO; print(' '.join(JUMBO))")
-python3 pst_updater.py $JUMBO_INSTRUMENTS --fx || echo "WARN: pst_updater nonzero; proceeding with existing data"
+UNIVERSE_INSTRUMENTS=$(python3 -c "from ibkr_fut.instrument_universe import UNIVERSE; print(' '.join(UNIVERSE))")
+python3 pst_updater.py $UNIVERSE_INSTRUMENTS --fx || echo "WARN: pst_updater nonzero; proceeding with existing data"
 
-# 2. Run the EWMAC dynamic-optimisation executor (args passed through, e.g. --execute).
+# 2. Refresh volume cache weekly (stale after 7 days; used by instrument_selection filter).
+python3 ibkr_fut/volume_collector.py --max-age 7 || echo "WARN: volume_collector nonzero; proceeding with existing cache"
+
+# 3. Run the EWMAC dynamic-optimisation executor (args passed through, e.g. --execute).
 python3 ibkr_fut/live_dynamic.py "$@"

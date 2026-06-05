@@ -19,11 +19,11 @@ Replaces the IBS strategy (ibkr_fut/live_signals.py). Once per day this script:
      orders, logging fills + a daily snapshot to paper/ledgers/ibkr_dynamic/.
 
 TRADABLE SET (the menu the optimiser picks from) — computed each run as the Jumbo
-instruments that are (a) on a US exchange your paper account can trade, (b) fresh
-in the PST data, and (c) cheap enough that ONE contract fits the account
-(notional ≤ capital × MAX_NOTIONAL_FRAC). At $100k this is ~30 micros/minis across
-every asset class except bonds (all too big at this capital). Tune the three knobs
-below or pass --max-notional-frac to widen/narrow the menu.
+instruments that pass instrument_selection filters (SR cost ≤ 0.01, annual vol ≥ 5%,
+history ≥ 512 days, volume if cached) AND have fresh PST data (≤ FRESH_DAYS old).
+This matches the filter applied in backtest_dynamic.py --filter, so live and backtest
+use an identical eligible universe. Run volume_collector.py periodically to keep the
+volume cache current and enable the liquidity filter.
 
 Sizing/forecasts use PST daily closes (kept current by pst_updater.py — run it
 before this script; see ibkr_fut/run_dynamic.sh). No live quotes are needed: orders
@@ -53,15 +53,15 @@ from ib_insync import IB, Future, Order
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from pst_loader import PSTLoader
 from ibkr_fut.jumbo import JUMBO
-from ibkr_fut.backtest_dynamic import _build_universe
+from ibkr_fut.instrument_universe import UNIVERSE
+from ibkr_fut.backtest_dynamic import _build_universe, get_eligible_set
 from ibkr_fut.backtest_ewmac import TARGET_RISK, IDM_CAP
 from ibkr_fut.dynamic_opt import optimise_positions
+from ibkr_fut.volume_collector import load_cache as load_volume_cache
 from paper.dyn_ledger import DynLedger
 
-# ── Tradable-set filter (the three knobs) ──────────────────────────────────────
-US_EXCHANGES      = {"CME", "CBOT", "COMEX", "NYMEX", "CFE", "NYBOT", "GLOBEX"}
-MAX_NOTIONAL_FRAC = 1.0   # one contract's notional must be ≤ capital × this
-FRESH_DAYS        = 5     # PST data must be no more than this many calendar days old
+# ── Tradable-set filter ────────────────────────────────────────────────────────
+FRESH_DAYS = 5   # PST data must be no more than this many calendar days old
 
 # ── Strategy parameters (match the backtest you validated) ─────────────────────
 DYN_TARGET_RISK = TARGET_RISK   # 0.20 — same as backtest_dynamic / backtest_ewmac
@@ -118,62 +118,74 @@ def ib_spec(ibcfg: pd.DataFrame, instr: str) -> dict | None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_tradable_set(capital: float, ibcfg: pd.DataFrame,
-                       max_notional_frac: float = MAX_NOTIONAL_FRAC,
                        verbose: bool = True) -> tuple[set, list]:
     """
-    Decide which Jumbo instruments the optimiser may actually trade at this capital.
+    Decide which Jumbo instruments the optimiser may actually trade today.
 
-    A Jumbo instrument is tradable iff: it maps to a US exchange, its PST data is
-    fresh (≤ FRESH_DAYS old), and one contract's notional ≤ capital * frac. Returns
-    (tradable_set, rows) where rows is a per-instrument diagnostic table.
+    An instrument is tradable iff it passes instrument_selection filters (cost,
+    annual vol floor, history) AND its PST data is fresh (≤ FRESH_DAYS old).
+    Volume filters are skipped when no cached volume data exists.
+
+    Returns (tradable_set, rows) where rows is a per-instrument diagnostic table.
     """
     today = pd.Timestamp(date.today())
-    cap_limit = capital * max_notional_frac
-    tradable, rows = set(), []
 
-    for instr in JUMBO:
-        spec = ib_spec(ibcfg, instr)
+    # Step 1: instrument_selection filters (cost, too-safe, history).
+    volume_cache = load_volume_cache()
+    eligible = get_eligible_set(UNIVERSE)
+
+    # Step 2: freshness check — PST data must be recent enough to trade on.
+    tradable, rows = set(), []
+    for instr in UNIVERSE:
         reason = ""
-        notional = np.nan
         last_date = None
-        if spec is None:
-            reason = "no IB config"
-        elif spec["exchange"] not in US_EXCHANGES:
-            reason = f"non-US ({spec['exchange']})"
-        else:
-            try:
-                mp = pst.multiple_prices(instr)["PRICE"].dropna()
-                last_price = float(mp.iloc[-1])
-                last_date = mp.index[-1]
-                mult = float(pst.instrument_info(instr)["Pointsize"])
-                notional = mult * last_price          # USD (all US-exchange = USD)
-                if (today - last_date.normalize()).days > FRESH_DAYS:
-                    reason = f"stale ({last_date.date()})"
-                elif notional > cap_limit:
-                    reason = f"too big (${notional:,.0f})"
-            except Exception as e:
-                reason = f"data error ({e})"
+        try:
+            mp = pst.multiple_prices(instr)["PRICE"].dropna()
+            last_date = mp.index[-1]
+            age = (today - last_date.normalize()).days
+            if age > FRESH_DAYS:
+                reason = f"stale ({last_date.date()}, {age}d old)"
+        except Exception as e:
+            reason = f"data error ({e})"
+
+        if not reason and instr not in eligible:
+            reason = "filtered (cost/vol/history)"
+
         if not reason:
             tradable.add(instr)
         rows.append({
-            "instr": instr, "class": JUMBO[instr],
-            "notional": notional,
+            "instr":     instr,
+            "class":     UNIVERSE[instr],
             "last_date": last_date.date() if last_date is not None else None,
-            "tradable": not reason, "reason": reason,
+            "tradable":  not reason,
+            "reason":    reason,
         })
 
     if verbose:
-        keep = sorted((r for r in rows if r["tradable"]), key=lambda r: r["notional"])
+        keep   = sorted(r["instr"] for r in rows if r["tradable"])
+        filtered = [r for r in rows if not r["tradable"]]
         print(f"\n  TRADABLE SET — {len(tradable)} instruments "
-              f"(US exchange · fresh · 1 contract ≤ ${cap_limit:,.0f}):")
+              f"(instrument_selection filters · fresh PST data ≤ {FRESH_DAYS}d):")
         line, n = "    ", 0
-        for r in keep:
-            line += f"{r['instr']:<14}"
+        for instr in keep:
+            line += f"{instr:<16}"
             n += 1
             if n % 5 == 0:
                 print(line); line = "    "
         if n % 5:
             print(line)
+
+        # Group filtered instruments by reason for a compact summary
+        reason_groups: dict[str, list[str]] = {}
+        for r in filtered:
+            tag = r["reason"]
+            if "cost" in tag or "vol" in tag or "history" in tag:
+                tag = "filtered (cost/vol/history)"
+            reason_groups.setdefault(tag, []).append(r["instr"])
+        print(f"\n  Excluded ({len(filtered)}):")
+        for reason, instrs in sorted(reason_groups.items()):
+            print(f"    {reason}: {sorted(instrs)}")
+
     return tradable, rows
 
 
@@ -291,7 +303,7 @@ def get_positions_by_instr(ib, ibcfg: pd.DataFrame) -> tuple[dict, list]:
     """
     # (symbol, exchange) -> instr, restricted to Jumbo
     rev = {}
-    for instr in JUMBO:
+    for instr in UNIVERSE:
         spec = ib_spec(ibcfg, instr)
         if spec:
             rev[(spec["symbol"], spec["exchange"])] = instr
@@ -329,9 +341,15 @@ def hold_contract_month(instr: str) -> str | None:
 
 def qualify(ib, spec: dict, month: str):
     """Qualify an IBKR future for (instrument spec, contract month). None on fail."""
-    raw = Future(symbol=spec["symbol"], lastTradeDateOrContractMonth=month,
-                 exchange=spec["exchange"], currency=spec["currency"],
-                 tradingClass=spec["trading_class"] or "")
+    mult = spec.get("multiplier")
+    raw = Future(
+        symbol=spec["symbol"],
+        lastTradeDateOrContractMonth=month,
+        exchange=spec["exchange"],
+        currency=spec["currency"],
+        multiplier=str(int(mult)) if mult is not None else "",
+        tradingClass=spec["trading_class"] or "",
+    )
     try:
         quals = ib.qualifyContracts(raw)
     except Exception:
@@ -473,8 +491,6 @@ def main():
                     help="Override capital (default: live NetLiquidation)")
     ap.add_argument("--target-risk", type=float, default=DYN_TARGET_RISK,
                     help=f"Annual risk target (default {DYN_TARGET_RISK})")
-    ap.add_argument("--max-notional-frac", type=float, default=MAX_NOTIONAL_FRAC,
-                    help="Tradable iff 1 contract ≤ capital × this (default %(default)s)")
     args = ap.parse_args()
 
     mode = "EXECUTE" if args.execute else "DRY-RUN"
@@ -507,19 +523,20 @@ def main():
 
     print("=" * 80)
     print(f"  EWMAC DYNAMIC OPT  [{mode}]  |  {today}  |  capital ${capital:,.0f}")
-    print(f"  target risk {args.target_risk:.0%}  |  optimise over Jumbo "
-          f"({len(JUMBO)} instr), trade US-exchange affordable subset")
+    print(f"  target risk {args.target_risk:.0%}  |  optimise over UNIVERSE "
+          f"({len(UNIVERSE)} instr), trade instrument-selection-eligible subset")
     print("=" * 80)
 
     # ── Tradable set + universe ──────────────────────────────────────────────
-    tradable_set, _ = build_tradable_set(capital, ibcfg, args.max_notional_frac)
+    tradable_set, _ = build_tradable_set(capital, ibcfg)
     if not tradable_set:
         print("ERROR: no tradable instruments at this capital — aborting.")
         ib.disconnect()
         return
 
-    print(f"\n  Building Jumbo universe from PST data…")
-    uni = _build_universe(list(JUMBO.keys()), tradable_set=tradable_set)
+    print(f"\n  Building universe from PST data…")
+    uni = _build_universe(list(UNIVERSE.keys()), tradable_set=tradable_set,
+                          lookback_days=3000)
     if uni is None:
         print("ERROR: universe build failed (no instruments with valid signals).")
         ib.disconnect()
@@ -529,7 +546,7 @@ def main():
     held, unknown = get_positions_by_instr(ib, ibcfg)
     current = {instr: sum(months.values()) for instr, months in held.items()}
     if unknown:
-        print(f"\n  ⚠ Held futures NOT in Jumbo (left untouched): {unknown}")
+        print(f"\n  ⚠ Held futures NOT in UNIVERSE (left untouched): {unknown}")
     if current:
         print(f"\n  Current positions (net): "
               + "  ".join(f"{k} {v:+d}" for k, v in sorted(current.items())))

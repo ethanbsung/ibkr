@@ -83,7 +83,10 @@ class InstrumentSpec:
 
 def _pst_spec(instrument: str) -> InstrumentSpec | None:
     """Build an InstrumentSpec from PST futures data (the futures adapter)."""
-    info = pst.instrument_info(instrument)
+    try:
+        info = pst.instrument_info(instrument)
+    except (ValueError, KeyError):
+        return None
     mult = float(info["Pointsize"])
     ccy  = str(info["Currency"])
 

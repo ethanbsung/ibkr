@@ -48,7 +48,7 @@ JUMBO: dict[str, str] = {
     "AUD": "FX", "CAD": "FX", "CHF": "FX", "EUR": "FX", "GBP": "FX",
     "JPY": "FX", "NOK": "FX", "NZD": "FX", "SEK": "FX",
     "GBPEUR": "FX", "YENEUR": "FX", "BRE": "FX", "CNH": "FX",
-    "INR": "FX", "MXP": "FX", "RUR": "FX", "SGD": "FX",
+    "INR": "FX", "MXP": "FX", "SGD": "FX",
 
     # ── Metals & crypto (9) ──────────────────────────────────────────────────
     "ALUMINIUM": "Metals", "COPPER": "Metals", "GOLD_micro": "Metals",
