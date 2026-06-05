@@ -263,8 +263,13 @@ class Executor:
                 if abs(delta_usd) < buffer:
                     return []
                 side = "buy" if delta_usd > 0 else "sell"
-                s = self._notional_spec(ticker, side, abs(delta_usd), price,
-                                        target_usd, strategy, quote)
+                if side == "sell" and abs(delta_usd) / price >= cur - 1e-6:
+                    # Selling notional can round up past available shares; use exact qty.
+                    s = self._qty_spec(ticker, "sell", cur, price,
+                                       target_usd, strategy, quote)
+                else:
+                    s = self._notional_spec(ticker, side, abs(delta_usd), price,
+                                            target_usd, strategy, quote)
                 if s:
                     specs.append(s)
             else:
@@ -301,8 +306,8 @@ class Executor:
                     specs.append(s)
             else:
                 # Flip: close long, then open short.
-                s = self._notional_spec(ticker, "sell", cur * price, price,
-                                        0.0, strategy, quote)
+                s = self._qty_spec(ticker, "sell", cur, price,
+                                   0.0, strategy, quote)
                 if s:
                     specs.append(s)
                 s = self._qty_spec(ticker, "sell", abs(tgt_short), price,
