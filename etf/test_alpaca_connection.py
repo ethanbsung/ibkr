@@ -8,13 +8,37 @@ Requires env vars: ALPACA_API_KEY, ALPACA_SECRET_KEY
 
 import os
 import sys
+from pathlib import Path
 
 PASS = "[PASS]"
 FAIL = "[FAIL]"
 INFO = "[INFO]"
 
+def load_dotenv():
+    # Walk up from this file's location to find a .env
+    for parent in Path(__file__).resolve().parents:
+        env_file = parent / ".env"
+        if env_file.exists():
+            loaded = []
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, val = line.partition("=")
+                    key = key.strip()
+                    val = val.strip().strip('"').strip("'")
+                    if key not in os.environ:  # don't override real env vars
+                        os.environ[key] = val
+                        loaded.append(key)
+            print(f"{INFO} Loaded {len(loaded)} var(s) from {env_file}")
+            return
+    print(f"{INFO} No .env file found in any parent directory")
+
+
 def check_env_vars():
     print("\n--- 1. Environment Variables ---")
+    load_dotenv()
     api_key = os.environ.get("ALPACA_API_KEY", "")
     secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
 
