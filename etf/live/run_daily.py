@@ -38,6 +38,7 @@ from datetime import date
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from etf.live._env import load_dotenv
 from etf.live.strategy_ewmac import EWMACStrategy
 from etf.live.executor import Executor
 from etf.live.ledger import Ledger
@@ -71,6 +72,7 @@ def build_strategies(capital: float) -> dict:
 
 
 def main():
+    load_dotenv()
     ap = argparse.ArgumentParser(description="ETF live trading — daily run")
     ap.add_argument("--capital-override", type=float, default=None,
                     help="Override Alpaca equity with a fixed capital amount (testing only)")
