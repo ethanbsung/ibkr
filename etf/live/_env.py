@@ -16,4 +16,7 @@ def load_dotenv(path: str = None) -> None:
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+                key = k.strip()
+                val = v.strip().strip('"').strip("'")
+                if not os.environ.get(key):
+                    os.environ[key] = val
