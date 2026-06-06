@@ -462,3 +462,12 @@ Traceback (most recent call last):
   File "/home/ethan/ibkr/etf/live/../../etf/live/executor.py", line 82, in __init__
     raise EnvironmentError(
 OSError: ALPACA_API_KEY and ALPACA_SECRET_KEY must be set in .env
+Traceback (most recent call last):
+  File "/home/ethan/ibkr/etf/live/run_daily.py", line 240, in <module>
+    main()
+  File "/home/ethan/ibkr/etf/live/run_daily.py", line 92, in main
+    executor = Executor(dry_run=dry_run)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ethan/ibkr/etf/live/../../etf/live/executor.py", line 82, in __init__
+    raise EnvironmentError(
+OSError: ALPACA_API_KEY and ALPACA_SECRET_KEY must be set in .env
