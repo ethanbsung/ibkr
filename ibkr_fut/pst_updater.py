@@ -156,6 +156,7 @@ def fetch_bars(
 
     df["date"] = pd.to_datetime(df["date"]).dt.date
     s = df.set_index("date")["close"].dropna()
+    s = s[pd.to_datetime(s.index).day_of_week < 5]   # drop Sat/Sun (Asian overnight sessions)
     return s[(s.index >= start) & (s.index <= end)]
 
 # ------------------------------------------------------------------ #
@@ -269,11 +270,16 @@ def update_prices(
     adj_daily   = adj.resample("D").last().dropna()
     multi_daily = multi.resample("D").last()
 
-    last_date = adj_daily.index[-1].date()
-    today     = date.today()
+    LOOKBACK_DAYS  = 3
+    true_last_date = adj_daily.index[-1].date()
+    today          = date.today()
+
+    # Re-fetch the last LOOKBACK_DAYS so preliminary closes get replaced by
+    # final settlement prices on subsequent runs.
+    last_date = max(true_last_date - timedelta(days=LOOKBACK_DAYS), PST_CUTOFF.date())
 
     if last_date >= today:
-        log.info(f"  {instrument}: up to date ({last_date})")
+        log.info(f"  {instrument}: up to date ({true_last_date})")
         return
 
     # --- Starting contract ---
@@ -369,40 +375,39 @@ def update_prices(
         log.warning(f"  {instrument}: no new bars to save")
         return
 
-    # --- Append adjusted prices ---
-    # Historical adjusted rows only change when a roll occurred inside this
-    # update (hist_adj != 0). On a plain daily append they are byte-identical,
-    # so we append the new rows instead of rewriting (and re-serialising, which
-    # drifts float reprs across the whole file).
+    # --- Write adjusted prices ---
+    # Trim the lookback window from existing data so re-fetched rows
+    # (with final settlement prices) replace any preliminary closes.
     rewrite_history = abs(hist_adj) > 1e-9
+    # build_schedule starts at last_date+1, so the first re-fetched row is last_date+1.
+    # Trim existing data to strictly before that point so there are no gaps or overlaps.
+    lookback_cutoff = pd.Timestamp(last_date + timedelta(days=1)).normalize()
 
     new_adj = pd.Series(new_adj_rows, name="price")
     new_adj.index = (pd.DatetimeIndex(pd.to_datetime(list(new_adj_rows.keys())))
                      .normalize() + pd.Timedelta(hours=23))
     new_adj.index.name = "DATETIME"
-    new_adj = new_adj[new_adj.index > adj.index[-1]]
 
+    adj_base = adj[adj.index.normalize() < lookback_cutoff]
     if rewrite_history:
-        combined_adj = pd.concat([adj + hist_adj, new_adj]).sort_index()
-        combined_adj = combined_adj[~combined_adj.index.duplicated(keep="last")]
-        combined_adj.to_csv(adj_fp, header=True)
+        combined_adj = pd.concat([adj_base + hist_adj, new_adj]).sort_index()
     else:
-        new_adj.to_csv(adj_fp, mode="a", header=False)
+        combined_adj = pd.concat([adj_base, new_adj]).sort_index()
+    combined_adj.to_csv(adj_fp, header=True)
 
-    # --- Append multiple prices ---
-    # Raw front/forward prices are never adjusted retroactively, so multiple
-    # prices are always pure appends.
+    # --- Write multiple prices ---
     new_multi = pd.DataFrame.from_dict(new_multi_rows, orient="index")
     new_multi.index = (pd.DatetimeIndex(pd.to_datetime(list(new_multi_rows.keys())))
                        .normalize() + pd.Timedelta(hours=23))
     new_multi.index.name = "DATETIME"
-    new_multi = new_multi[new_multi.index > multi.index[-1]]
     new_multi = new_multi[list(multi.columns)]   # match existing column order
-    new_multi.to_csv(multi_fp, mode="a", header=False)
+    multi_base = multi[multi.index.normalize() < lookback_cutoff]
+    combined_multi = pd.concat([multi_base, new_multi]).sort_index()
+    combined_multi.to_csv(multi_fp, header=True)
 
-    log.info(f"  {instrument}: +{len(new_adj_rows)} bars, hist adj {hist_adj:+.4f} "
-             f"({'rewrote history' if rewrite_history else 'append-only'}) → "
-             f"last price {new_adj.iloc[-1]:.4f}")
+    log.info(f"  {instrument}: {last_date} → {today} | {len(new_adj_rows)} bars "
+             f"| hist adj {hist_adj:+.4f} ({'roll rewrite' if rewrite_history else 'lookback rewrite'}) "
+             f"| last price {new_adj.iloc[-1]:.4f}")
 
 # ------------------------------------------------------------------ #
 # Carry prices                                                         #
