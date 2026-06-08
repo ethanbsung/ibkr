@@ -1,0 +1,18 @@
+2026-06-08 22:05:06,648 INFO Connecting to 127.0.0.1:4002 with clientId 5...
+2026-06-08 22:05:06,651 INFO Connected
+2026-06-08 22:05:06,662 INFO Logged on to server version 176
+2026-06-08 22:05:06,722 INFO Warning 2104, reqId -1: Market data farm connection is OK:usfarm
+2026-06-08 22:05:06,722 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:apachmds
+2026-06-08 22:05:06,722 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:euhmds
+2026-06-08 22:05:06,722 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:ushmds
+2026-06-08 22:05:06,722 INFO Warning 2158, reqId -1: Sec-def data farm connection is OK:secdefnj
+2026-06-08 22:05:06,722 INFO API connection ready
+2026-06-08 22:05:06,743 INFO position: Position(account='DUA295747', contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', multiplier='2', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, avgCost=0.0)
+2026-06-08 22:05:06,786 INFO position: Position(account='DUA295747', contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', multiplier='5', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, avgCost=0.0)
+2026-06-08 22:05:06,866 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7407.25, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-08 22:05:06,867 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29411.21484375, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-08 22:05:06,891 INFO execDetails Execution(execId='0000e1a7.6a39b7fb.01.01', time=datetime.datetime(2026, 6, 8, 19, 33, 54, tzinfo=datetime.timezone.utc), acctNumber='DUA295747', exchange='CME', side='BOT', shares=3.0, price=29460.5, permId=973543714, clientId=99, orderId=4, liquidation=0, cumQty=3.0, avgPrice=29460.5, orderRef='', evRule='', evMultiplier=0.0, modelCode='', lastLiquidity=1)
+2026-06-08 22:05:06,891 INFO execDetails Execution(execId='0000e1a7.6a39b7fc.01.01', time=datetime.datetime(2026, 6, 8, 19, 33, 54, tzinfo=datetime.timezone.utc), acctNumber='DUA295747', exchange='CME', side='BOT', shares=4.0, price=7417.5, permId=973543715, clientId=99, orderId=6, liquidation=0, cumQty=4.0, avgPrice=7417.5, orderRef='', evRule='', evMultiplier=0.0, modelCode='', lastLiquidity=1)
+2026-06-08 22:05:06,891 INFO commissionReport: CommissionReport(execId='0000e1a7.6a39b7fb.01.01', commission=1.86, currency='USD', realizedPNL=4882.28, yield_=0.0, yieldRedemptionDate=0)
+2026-06-08 22:05:06,891 INFO commissionReport: CommissionReport(execId='0000e1a7.6a39b7fc.01.01', commission=2.48, currency='USD', realizedPNL=3155.04, yield_=0.0, yieldRedemptionDate=0)
+2026-06-08 22:05:06,892 INFO Synchronization complete

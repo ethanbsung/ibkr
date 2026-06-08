@@ -698,3 +698,471 @@ Make sure IB Gateway / TWS is running on port 4002.
 2026-06-08 22:03:08,945 INFO   KOSDAQ: 2026-06-03 → 2026-06-08 | 3 bars | hist adj +0.0000 (lookback rewrite) | last price 1572.2000
 2026-06-08 22:03:08,957 INFO [59/114] FTSECHINAH
 2026-06-08 22:03:09,008 INFO   FTSECHINAH: 2026-06-03 → 2026-06-08 (1 contracts)
+2026-06-08 22:03:26,905 INFO   FTSECHINAH: 2026-06-03 → 2026-06-08 | 3 bars | hist adj +0.0000 (lookback rewrite) | last price 15867.5000
+2026-06-08 22:03:26,910 INFO [60/114] FTSETAIWAN
+2026-06-08 22:03:26,976 INFO   FTSETAIWAN: 2026-06-03 → 2026-06-08 (2 contracts)
+2026-06-08 22:03:30,902 INFO   FTSETAIWAN: 2026-06-03 → 2026-06-08 | 3 bars | hist adj -11.5000 (roll rewrite) | last price 3705.5000
+2026-06-08 22:03:30,908 INFO [61/114] VIX
+2026-06-08 22:03:31,191 INFO   VIX: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:03:32,547 ERROR Error 200, reqId 137: The contract description specified for VIX is ambiguous., contract: Future(symbol='VIX', lastTradeDateOrContractMonth='202607', multiplier='1000', exchange='CFE', currency='USD', includeExpired=True)
+2026-06-08 22:03:34,409 INFO   VIX: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 20.9500
+2026-06-08 22:03:34,416 INFO [62/114] V2X
+2026-06-08 22:03:34,659 INFO   V2X: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:03:37,912 INFO   V2X: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 21.1500
+2026-06-08 22:03:37,918 INFO [63/114] AUD
+2026-06-08 22:03:38,169 INFO   AUD: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:03:40,621 INFO   AUD: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 0.7044
+2026-06-08 22:03:40,630 INFO [64/114] CAD
+2026-06-08 22:03:41,020 INFO   CAD: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:03:43,943 INFO   CAD: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 0.7167
+2026-06-08 22:03:43,954 INFO [65/114] CHF
+2026-06-08 22:03:44,317 INFO   CHF: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:03:47,307 INFO   CHF: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 1.2542
+2026-06-08 22:03:47,315 INFO [66/114] EUR
+2026-06-08 22:03:47,531 INFO   EUR: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:03:49,715 INFO   EUR: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 1.1532
+2026-06-08 22:03:49,721 INFO [67/114] GBP
+2026-06-08 22:03:50,025 INFO   GBP: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:03:52,474 INFO   GBP: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 1.3338
+2026-06-08 22:03:52,482 INFO [68/114] JPY
+2026-06-08 22:03:52,786 INFO   JPY: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:03:55,235 INFO   JPY: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 0.0062
+2026-06-08 22:03:55,242 INFO [69/114] NOK
+2026-06-08 22:03:55,356 INFO   NOK: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:03:57,168 INFO   NOK: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 0.1056
+2026-06-08 22:03:57,173 INFO [70/114] NZD
+2026-06-08 22:03:57,432 INFO   NZD: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:03:57,435 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7407.25, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-08 22:03:57,436 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29411.21484375, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-08 22:03:59,721 INFO   NZD: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 0.5811
+2026-06-08 22:03:59,730 INFO [71/114] SEK
+2026-06-08 22:03:59,887 INFO   SEK: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:01,955 INFO   SEK: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 0.1060
+2026-06-08 22:04:01,961 INFO [72/114] GBPEUR
+2026-06-08 22:04:02,249 INFO   GBPEUR: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:05,161 INFO   GBPEUR: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 0.8646
+2026-06-08 22:04:05,170 INFO [73/114] YENEUR
+2026-06-08 22:04:05,527 INFO   YENEUR: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:08,421 INFO   YENEUR: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 184.7200
+2026-06-08 22:04:08,428 INFO [74/114] BRE
+2026-06-08 22:04:08,563 INFO   BRE: 2026-05-29 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:10,457 INFO   BRE: 2026-05-29 → 2026-06-08 | 1 bars | hist adj +0.0000 (lookback rewrite) | last price 0.1978
+2026-06-08 22:04:10,462 INFO [75/114] CNH
+2026-06-08 22:04:10,586 INFO   CNH: 2026-06-03 → 2026-06-08 (2 contracts)
+2026-06-08 22:04:14,879 INFO   CNH: 2026-06-03 → 2026-06-08 | 3 bars | hist adj -0.0133 (roll rewrite) | last price 6.7699
+2026-06-08 22:04:14,887 INFO [76/114] INR
+2026-06-08 22:04:14,926 INFO   INR: 2026-06-02 → 2026-06-08 (2 contracts)
+2026-06-08 22:04:26,519 INFO   INR: 2026-06-02 → 2026-06-08 | 4 bars | hist adj -0.3300 (roll rewrite) | last price 104.0800
+2026-06-08 22:04:26,524 INFO [77/114] MXP
+2026-06-08 22:04:26,791 INFO   MXP: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:29,139 INFO   MXP: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 0.0572
+2026-06-08 22:04:29,146 INFO [78/114] SGD
+2026-06-08 22:04:29,185 INFO   SGD: 2026-06-03 → 2026-06-08 (2 contracts)
+2026-06-08 22:04:32,893 INFO   SGD: 2026-06-03 → 2026-06-08 | 3 bars | hist adj -0.0025 (roll rewrite) | last price 1.2844
+2026-06-08 22:04:32,899 INFO [79/114] DX
+2026-06-08 22:04:33,172 INFO   DX: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:35,775 INFO   DX: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 99.7600
+2026-06-08 22:04:35,780 INFO [80/114] TWD-mini
+2026-06-08 22:04:35,795 INFO   TWD-mini: 2026-05-29 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:37,644 INFO   TWD-mini: 2026-05-29 → 2026-06-08 | 2 bars | hist adj +0.0000 (lookback rewrite) | last price 0.3170
+2026-06-08 22:04:37,650 INFO [81/114] IRON
+2026-06-08 22:04:37,736 INFO   IRON: 2026-06-03 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:40,799 INFO   IRON: 2026-06-03 → 2026-06-08 | 3 bars | hist adj +0.0000 (lookback rewrite) | last price 100.1500
+2026-06-08 22:04:40,805 INFO [82/114] GOLD_micro
+2026-06-08 22:04:41,041 INFO   GOLD_micro: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:43,276 INFO   GOLD_micro: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 4363.4000
+2026-06-08 22:04:43,281 INFO [83/114] SILVER
+2026-06-08 22:04:43,652 INFO   SILVER: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:47,119 INFO   SILVER: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 68.5850
+2026-06-08 22:04:47,126 INFO [84/114] COPPER
+2026-06-08 22:04:47,368 INFO   COPPER: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:49,576 INFO   COPPER: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 6.3500
+2026-06-08 22:04:49,582 INFO [85/114] PLAT
+2026-06-08 22:04:49,827 INFO   PLAT: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:52,220 INFO   PLAT: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 1755.3000
+2026-06-08 22:04:52,226 INFO [86/114] PALLAD
+2026-06-08 22:04:52,401 INFO   PALLAD: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:54,754 INFO   PALLAD: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 1216.5000
+2026-06-08 22:04:54,763 INFO [87/114] ALUMINIUM
+2026-06-08 22:04:54,805 INFO   ALUMINIUM: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:56,176 INFO   ALUMINIUM: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 3666.0000
+2026-06-08 22:04:56,179 INFO [88/114] BITCOIN
+2026-06-08 22:04:56,267 INFO   BITCOIN: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:57,904 INFO   BITCOIN: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 60515.0000
+2026-06-08 22:04:57,909 INFO [89/114] ETHEREUM
+2026-06-08 22:04:57,971 INFO   ETHEREUM: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:04:59,430 INFO   ETHEREUM: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 1579.5000
+2026-06-08 22:04:59,434 INFO [90/114] CRUDE_W_mini
+2026-06-08 22:04:59,543 INFO   CRUDE_W_mini: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:02,725 INFO   CRUDE_W_mini: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 89.2500
+2026-06-08 22:05:02,740 INFO [91/114] BRENT-LAST
+2026-06-08 22:05:02,817 INFO   BRENT-LAST: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:05,124 INFO   BRENT-LAST: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 92.2500
+2026-06-08 22:05:05,136 INFO [92/114] GAS_US_mini
+2026-06-08 22:05:05,427 INFO   GAS_US_mini: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:08,461 INFO   GAS_US_mini: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 3.1950
+2026-06-08 22:05:08,495 INFO [93/114] GAS-LAST
+2026-06-08 22:05:08,701 INFO   GAS-LAST: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:11,258 INFO   GAS-LAST: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 3.1960
+2026-06-08 22:05:11,265 INFO [94/114] HEATOIL
+2026-06-08 22:05:11,559 INFO   HEATOIL: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:14,982 INFO   HEATOIL: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 3.5738
+2026-06-08 22:05:15,007 INFO [95/114] GASOILINE
+2026-06-08 22:05:15,417 INFO   GASOILINE: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:19,228 INFO   GASOILINE: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 3.0190
+2026-06-08 22:05:19,235 INFO [96/114] CORN
+2026-06-08 22:05:19,416 INFO   CORN: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:21,972 INFO   CORN: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 446.0000
+2026-06-08 22:05:21,981 INFO [97/114] WHEAT
+2026-06-08 22:05:22,216 INFO   WHEAT: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:25,066 INFO   WHEAT: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 613.7500
+2026-06-08 22:05:25,075 INFO [98/114] SOYBEAN
+2026-06-08 22:05:25,241 INFO   SOYBEAN: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:27,849 INFO   SOYBEAN: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 1135.5000
+2026-06-08 22:05:27,857 INFO [99/114] SOYMEAL
+2026-06-08 22:05:28,136 INFO   SOYMEAL: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:31,393 INFO   SOYMEAL: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 303.8000
+2026-06-08 22:05:31,404 INFO [100/114] SOYOIL
+2026-06-08 22:05:31,733 INFO   SOYOIL: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:35,166 INFO   SOYOIL: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 72.2500
+2026-06-08 22:05:35,181 INFO [101/114] OATIES
+2026-06-08 22:05:35,395 INFO   OATIES: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:38,015 INFO   OATIES: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 335.0000
+2026-06-08 22:05:38,025 INFO [102/114] REDWHEAT
+2026-06-08 22:05:38,258 INFO   REDWHEAT: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:41,194 INFO   REDWHEAT: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 639.7500
+2026-06-08 22:05:41,202 INFO [103/114] RICE
+2026-06-08 22:05:41,437 INFO   RICE: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:44,223 INFO   RICE: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 12.8300
+2026-06-08 22:05:44,231 INFO [104/114] LEANHOG
+2026-06-08 22:05:44,393 INFO   LEANHOG: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:46,969 INFO   LEANHOG: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 96.1000
+2026-06-08 22:05:46,978 INFO [105/114] LIVECOW
+2026-06-08 22:05:47,156 INFO   LIVECOW: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:49,873 INFO   LIVECOW: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 236.3250
+2026-06-08 22:05:49,880 INFO [106/114] FEEDCOW
+2026-06-08 22:05:50,099 INFO   FEEDCOW: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:52,841 INFO   FEEDCOW: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 347.1250
+2026-06-08 22:05:52,848 INFO [107/114] BBCOMM
+2026-06-08 22:05:52,920 INFO   BBCOMM: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:05:54,611 INFO   BBCOMM: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 132.8000
+2026-06-08 22:05:54,619 INFO [108/114] CHEESE
+2026-06-08 22:05:54,727 INFO   CHEESE: 2026-06-02 → 2026-06-08 (2 contracts)
+2026-06-08 22:05:59,059 INFO   CHEESE: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0410 (roll rewrite) | last price 1.6650
+2026-06-08 22:05:59,065 INFO [109/114] COFFEE
+2026-06-08 22:05:59,107 INFO   COFFEE: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:06:01,197 INFO   COFFEE: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 241.2000
+2026-06-08 22:06:01,201 INFO [110/114] COCOA
+2026-06-08 22:06:01,392 INFO   COCOA: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:06:04,066 INFO   COCOA: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 3893.0000
+2026-06-08 22:06:04,072 INFO [111/114] SUGAR11
+2026-06-08 22:06:04,281 INFO   SUGAR11: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:06:07,105 INFO   SUGAR11: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 14.6300
+2026-06-08 22:06:07,111 INFO [112/114] COTTON2
+2026-06-08 22:06:07,393 INFO   COTTON2: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:06:10,654 INFO   COTTON2: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 77.4600
+2026-06-08 22:06:10,661 INFO [113/114] OJ
+2026-06-08 22:06:10,804 INFO   OJ: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:06:12,756 INFO   OJ: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 166.6500
+2026-06-08 22:06:12,761 INFO [114/114] RUBBER
+2026-06-08 22:06:12,796 INFO   RUBBER: 2026-06-02 → 2026-06-08 (1 contracts)
+2026-06-08 22:06:14,725 INFO   RUBBER: 2026-06-02 → 2026-06-08 | 4 bars | hist adj +0.0000 (lookback rewrite) | last price 224.3000
+2026-06-08 22:06:14,732 INFO Updating FX rates ...
+2026-06-08 22:06:14,946 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:cashhmds
+2026-06-08 22:06:15,591 INFO   FX AUDUSD: +3 bars → 2026-06-09 = 0.70442
+2026-06-08 22:06:16,249 INFO   FX CADUSD: +3 bars (inv) → 2026-06-09 = 0.716702
+2026-06-08 22:06:16,908 INFO   FX CHFUSD: +3 bars → 2026-06-09 = 1.25344
+2026-06-08 22:06:17,557 INFO   FX EURUSD: +3 bars → 2026-06-09 = 1.15345
+2026-06-08 22:06:18,245 INFO   FX GBPUSD: +3 bars → 2026-06-09 = 1.33398
+2026-06-08 22:06:18,917 INFO   FX HKDUSD: +3 bars (inv) → 2026-06-09 = 0.127603
+2026-06-08 22:06:19,571 INFO   FX JPYUSD: +3 bars (inv) → 2026-06-09 = 0.00624428
+2026-06-08 22:06:20,237 INFO   FX KRWUSD: +3 bars (inv) → 2026-06-09 = 0.000654496
+2026-06-08 22:06:20,895 INFO   FX CNHUSD: +3 bars (inv) → 2026-06-09 = 0.147409
+2026-06-08 22:06:21,555 INFO   FX SGDUSD: +3 bars (inv) → 2026-06-09 = 0.775955
+2026-06-08 22:06:22,204 INFO   FX MXPUSD: +3 bars (inv) → 2026-06-09 = 0.0572761
+2026-06-08 22:06:22,850 INFO   FX SEKUSD: +3 bars (inv) → 2026-06-09 = 0.105988
+2026-06-08 22:06:22,853 INFO Disconnecting from 127.0.0.1:4002, 28.2 kB sent in 295 messages, 177 kB received in 701 messages, session time 378 s.
+2026-06-08 22:06:22,854 INFO Disconnecting
+2026-06-08 22:06:22,855 INFO Done. 114 updated, 0 failed.
+2026-06-08 22:06:25,421 INFO Fetching volume for 114 instruments ...
+2026-06-08 22:06:25,448 INFO Connecting to 127.0.0.1:4002 with clientId 15...
+2026-06-08 22:06:25,451 INFO Connected
+2026-06-08 22:06:25,463 INFO Logged on to server version 176
+2026-06-08 22:06:25,518 INFO Warning 2104, reqId -1: Market data farm connection is OK:usfarm
+2026-06-08 22:06:25,518 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:apachmds
+2026-06-08 22:06:25,518 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:euhmds
+2026-06-08 22:06:25,518 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:cashhmds
+2026-06-08 22:06:25,518 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:ushmds
+2026-06-08 22:06:25,518 INFO Warning 2158, reqId -1: Sec-def data farm connection is OK:secdefnj
+2026-06-08 22:06:25,518 INFO API connection ready
+2026-06-08 22:06:25,528 INFO position: Position(account='DUA295747', contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', multiplier='2', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, avgCost=0.0)
+2026-06-08 22:06:25,572 INFO position: Position(account='DUA295747', contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', multiplier='5', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, avgCost=0.0)
+2026-06-08 22:06:25,659 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7407.25, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-08 22:06:25,660 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29411.21484375, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-08 22:06:25,691 INFO execDetails Execution(execId='0000e1a7.6a39b7fb.01.01', time=datetime.datetime(2026, 6, 8, 19, 33, 54, tzinfo=datetime.timezone.utc), acctNumber='DUA295747', exchange='CME', side='BOT', shares=3.0, price=29460.5, permId=973543714, clientId=99, orderId=4, liquidation=0, cumQty=3.0, avgPrice=29460.5, orderRef='', evRule='', evMultiplier=0.0, modelCode='', lastLiquidity=1)
+2026-06-08 22:06:25,692 INFO execDetails Execution(execId='0000e1a7.6a39b7fc.01.01', time=datetime.datetime(2026, 6, 8, 19, 33, 54, tzinfo=datetime.timezone.utc), acctNumber='DUA295747', exchange='CME', side='BOT', shares=4.0, price=7417.5, permId=973543715, clientId=99, orderId=6, liquidation=0, cumQty=4.0, avgPrice=7417.5, orderRef='', evRule='', evMultiplier=0.0, modelCode='', lastLiquidity=1)
+2026-06-08 22:06:25,692 INFO commissionReport: CommissionReport(execId='0000e1a7.6a39b7fb.01.01', commission=1.86, currency='USD', realizedPNL=4882.28, yield_=0.0, yieldRedemptionDate=0)
+2026-06-08 22:06:25,692 INFO commissionReport: CommissionReport(execId='0000e1a7.6a39b7fc.01.01', commission=2.48, currency='USD', realizedPNL=3155.04, yield_=0.0, yieldRedemptionDate=0)
+2026-06-08 22:06:25,693 INFO Synchronization complete
+2026-06-08 22:06:25,693 INFO Connected to IB.
+2026-06-08 22:06:25,693 INFO [1/114] US2
+2026-06-08 22:06:26,274 INFO   US2: avg 552620 contracts/day (29 bars)
+2026-06-08 22:06:26,274 INFO [2/114] US3
+2026-06-08 22:06:26,757 INFO   US3: avg 4539 contracts/day (23 bars)
+2026-06-08 22:06:26,757 INFO [3/114] US5
+2026-06-08 22:06:27,282 INFO   US5: avg 816840 contracts/day (29 bars)
+2026-06-08 22:06:27,282 INFO [4/114] US10
+2026-06-08 22:06:27,801 INFO   US10: avg 1159885 contracts/day (29 bars)
+2026-06-08 22:06:27,802 INFO [5/114] US10U
+2026-06-08 22:06:28,325 INFO   US10U: avg 363713 contracts/day (29 bars)
+2026-06-08 22:06:28,325 INFO [6/114] US20
+2026-06-08 22:06:28,844 INFO   US20: avg 259692 contracts/day (29 bars)
+2026-06-08 22:06:28,844 INFO [7/114] US30
+2026-06-08 22:06:29,357 INFO   US30: avg 209050 contracts/day (29 bars)
+2026-06-08 22:06:29,357 INFO [8/114] SOFR
+2026-06-08 22:06:30,127 INFO   SOFR: avg 65626 contracts/day (29 bars)
+2026-06-08 22:06:30,127 INFO [9/114] FED
+2026-06-08 22:06:31,171 INFO   FED: avg 23490 contracts/day (29 bars)
+2026-06-08 22:06:31,172 INFO [10/114] SHATZ
+2026-06-08 22:06:31,709 INFO   SHATZ: avg 121537 contracts/day (22 bars)
+2026-06-08 22:06:31,709 INFO [11/114] BOBL
+2026-06-08 22:06:32,256 INFO   BOBL: avg 120889 contracts/day (27 bars)
+2026-06-08 22:06:32,257 INFO [12/114] BUND
+2026-06-08 22:06:32,795 INFO   BUND: avg 159237 contracts/day (30 bars)
+2026-06-08 22:06:32,796 INFO [13/114] BUXL
+2026-06-08 22:06:33,335 INFO   BUXL: avg 20302 contracts/day (23 bars)
+2026-06-08 22:06:33,336 INFO [14/114] OAT
+2026-06-08 22:06:33,873 INFO   OAT: avg 42254 contracts/day (22 bars)
+2026-06-08 22:06:33,874 INFO [15/114] BTP3
+2026-06-08 22:06:34,492 INFO   BTP3: avg 52476 contracts/day (13 bars)
+2026-06-08 22:06:34,492 INFO [16/114] BTP
+2026-06-08 22:06:35,040 INFO   BTP: avg 43935 contracts/day (30 bars)
+2026-06-08 22:06:35,041 INFO [17/114] BTP5
+2026-06-08 22:06:35,593 INFO [18/114] BONO
+2026-06-08 22:06:36,218 INFO   BONO: avg 7 contracts/day (9 bars)
+2026-06-08 22:06:36,219 INFO [19/114] CH10
+2026-06-08 22:06:36,836 INFO   CH10: avg 19 contracts/day (4 bars)
+2026-06-08 22:06:36,836 INFO [20/114] EURIBOR
+2026-06-08 22:06:37,475 INFO   EURIBOR: avg 1780 contracts/day (30 bars)
+2026-06-08 22:06:37,476 INFO [21/114] KR3
+2026-06-08 22:06:38,189 INFO   KR3: avg 146201 contracts/day (30 bars)
+2026-06-08 22:06:38,190 INFO [22/114] KR10
+2026-06-08 22:06:38,909 INFO   KR10: avg 78767 contracts/day (30 bars)
+2026-06-08 22:06:38,910 INFO [23/114] SP500_micro
+2026-06-08 22:06:39,404 INFO   SP500_micro: avg 1328433 contracts/day (29 bars)
+2026-06-08 22:06:39,404 INFO [24/114] NASDAQ_micro
+2026-06-08 22:06:39,863 INFO   NASDAQ_micro: avg 2496955 contracts/day (29 bars)
+2026-06-08 22:06:39,863 INFO [25/114] DOW_mini
+2026-06-08 22:06:40,389 INFO   DOW_mini: avg 101586 contracts/day (29 bars)
+2026-06-08 22:06:40,389 INFO [26/114] R1000
+2026-06-08 22:06:40,859 INFO   R1000: avg 186 contracts/day (29 bars)
+2026-06-08 22:06:40,859 INFO [27/114] RUSSELL_mini
+2026-06-08 22:06:41,393 INFO   RUSSELL_mini: avg 176308 contracts/day (29 bars)
+2026-06-08 22:06:41,394 INFO [28/114] SP400
+2026-06-08 22:06:41,881 INFO   SP400: avg 12201 contracts/day (29 bars)
+2026-06-08 22:06:41,881 INFO [29/114] DAX
+2026-06-08 22:06:42,411 INFO   DAX: avg 27938 contracts/day (30 bars)
+2026-06-08 22:06:42,412 INFO [30/114] EUROSTX
+2026-06-08 22:06:43,071 INFO   EUROSTX: avg 521386 contracts/day (30 bars)
+2026-06-08 22:06:43,071 INFO [31/114] EURO600
+2026-06-08 22:06:43,619 INFO   EURO600: avg 83468 contracts/day (30 bars)
+2026-06-08 22:06:43,620 INFO [32/114] SMI
+2026-06-08 22:06:44,183 INFO   SMI: avg 20917 contracts/day (30 bars)
+2026-06-08 22:06:44,183 INFO [33/114] DJSTX-SMALL
+2026-06-08 22:06:44,728 INFO   DJSTX-SMALL: avg 727 contracts/day (30 bars)
+2026-06-08 22:06:44,728 INFO [34/114] EU-DIV30
+2026-06-08 22:06:45,270 INFO   EU-DIV30: avg 1682 contracts/day (30 bars)
+2026-06-08 22:06:45,271 INFO [35/114] ATX
+2026-06-08 22:06:45,826 INFO   ATX: avg 28 contracts/day (23 bars)
+2026-06-08 22:06:45,827 INFO [36/114] OMX
+2026-06-08 22:06:46,371 INFO   OMX: avg 18 contracts/day (18 bars)
+2026-06-08 22:06:46,371 INFO [37/114] IBEX_mini
+2026-06-08 22:06:46,946 INFO   IBEX_mini: avg 2085 contracts/day (30 bars)
+2026-06-08 22:06:46,946 INFO [38/114] AEX
+2026-06-08 22:06:47,479 INFO   AEX: avg 7884 contracts/day (28 bars)
+2026-06-08 22:06:47,480 INFO [39/114] CAC
+2026-06-08 22:06:48,043 INFO   CAC: avg 31524 contracts/day (30 bars)
+2026-06-08 22:06:48,043 INFO [40/114] EU-AUTO
+2026-06-08 22:06:48,567 INFO   EU-AUTO: avg 1242 contracts/day (30 bars)
+2026-06-08 22:06:48,567 INFO [41/114] EU-BASIC
+2026-06-08 22:06:49,106 INFO   EU-BASIC: avg 3220 contracts/day (30 bars)
+2026-06-08 22:06:49,106 INFO [42/114] EU-HEALTH
+2026-06-08 22:06:49,658 INFO   EU-HEALTH: avg 784 contracts/day (30 bars)
+2026-06-08 22:06:49,658 INFO [43/114] EU-INSURE
+2026-06-08 22:06:50,192 INFO   EU-INSURE: avg 1045 contracts/day (30 bars)
+2026-06-08 22:06:50,193 INFO [44/114] EU-OIL
+2026-06-08 22:06:50,725 INFO   EU-OIL: avg 2960 contracts/day (30 bars)
+2026-06-08 22:06:50,725 INFO [45/114] EU-TECH
+2026-06-08 22:06:51,255 INFO   EU-TECH: avg 784 contracts/day (30 bars)
+2026-06-08 22:06:51,255 INFO [46/114] EU-TRAVEL
+2026-06-08 22:06:51,783 INFO   EU-TRAVEL: avg 233 contracts/day (30 bars)
+2026-06-08 22:06:51,783 INFO [47/114] EU-UTILS
+2026-06-08 22:06:52,316 INFO   EU-UTILS: avg 1463 contracts/day (30 bars)
+2026-06-08 22:06:52,316 INFO [48/114] FTSECHINAA
+2026-06-08 22:06:53,043 INFO   FTSECHINAA: avg 221595 contracts/day (30 bars)
+2026-06-08 22:06:53,044 INFO [49/114] MSCISING
+2026-06-08 22:06:53,778 INFO   MSCISING: avg 21405 contracts/day (29 bars)
+2026-06-08 22:06:53,778 INFO [50/114] FTSEINDO
+2026-06-08 22:06:54,512 INFO   FTSEINDO: avg 43 contracts/day (14 bars)
+2026-06-08 22:06:54,512 INFO [51/114] FTSEVIET
+2026-06-08 22:06:55,243 INFO   FTSEVIET: avg 793 contracts/day (16 bars)
+2026-06-08 22:06:55,244 INFO [52/114] JGB
+2026-06-08 22:06:55,963 INFO   JGB: avg 42716 contracts/day (30 bars)
+2026-06-08 22:06:55,963 INFO [53/114] NIKKEI
+2026-06-08 22:06:56,194 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7402.0, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-08 22:06:56,194 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29383.4609375, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-08 22:06:56,743 INFO   NIKKEI: avg 8585 contracts/day (30 bars)
+2026-06-08 22:06:56,743 INFO [54/114] NIKKEI400
+2026-06-08 22:06:57,476 INFO [55/114] TOPIX
+2026-06-08 22:06:58,195 INFO   TOPIX: avg 404 contracts/day (30 bars)
+2026-06-08 22:06:58,195 INFO [56/114] MUMMY
+2026-06-08 22:06:58,910 INFO   MUMMY: avg 273 contracts/day (30 bars)
+2026-06-08 22:06:58,910 INFO [57/114] KOSPI
+2026-06-08 22:06:59,641 INFO   KOSPI: avg 671 contracts/day (30 bars)
+2026-06-08 22:06:59,641 INFO [58/114] KOSDAQ
+2026-06-08 22:07:00,364 INFO   KOSDAQ: avg 374 contracts/day (29 bars)
+2026-06-08 22:07:00,364 INFO [59/114] FTSECHINAH
+2026-06-08 22:07:01,112 INFO   FTSECHINAH: avg 1651 contracts/day (17 bars)
+2026-06-08 22:07:01,113 INFO [60/114] FTSETAIWAN
+2026-06-08 22:07:01,861 INFO   FTSETAIWAN: avg 33462 contracts/day (30 bars)
+2026-06-08 22:07:01,862 INFO [61/114] VIX
+2026-06-08 22:07:02,529 INFO   VIX: avg 66053 contracts/day (29 bars)
+2026-06-08 22:07:02,531 INFO [62/114] V2X
+2026-06-08 22:07:03,080 INFO   V2X: avg 10726 contracts/day (30 bars)
+2026-06-08 22:07:03,081 INFO [63/114] AUD
+2026-06-08 22:07:03,761 INFO   AUD: avg 93759 contracts/day (29 bars)
+2026-06-08 22:07:03,761 INFO [64/114] CAD
+2026-06-08 22:07:04,369 INFO   CAD: avg 61551 contracts/day (29 bars)
+2026-06-08 22:07:04,369 INFO [65/114] CHF
+2026-06-08 22:07:04,867 INFO   CHF: avg 22231 contracts/day (29 bars)
+2026-06-08 22:07:04,868 INFO [66/114] EUR
+2026-06-08 22:07:05,499 INFO   EUR: avg 151202 contracts/day (29 bars)
+2026-06-08 22:07:05,500 INFO [67/114] GBP
+2026-06-08 22:07:06,168 INFO   GBP: avg 80740 contracts/day (29 bars)
+2026-06-08 22:07:06,168 INFO [68/114] JPY
+2026-06-08 22:07:06,773 INFO   JPY: avg 111096 contracts/day (29 bars)
+2026-06-08 22:07:06,773 INFO [69/114] NOK
+2026-06-08 22:07:07,232 INFO   NOK: avg 164 contracts/day (29 bars)
+2026-06-08 22:07:07,232 INFO [70/114] NZD
+2026-06-08 22:07:07,742 INFO   NZD: avg 32371 contracts/day (29 bars)
+2026-06-08 22:07:07,742 INFO [71/114] SEK
+2026-06-08 22:07:08,194 INFO   SEK: avg 218 contracts/day (29 bars)
+2026-06-08 22:07:08,195 INFO [72/114] GBPEUR
+2026-06-08 22:07:08,656 INFO   GBPEUR: avg 2851 contracts/day (29 bars)
+2026-06-08 22:07:08,656 INFO [73/114] YENEUR
+2026-06-08 22:07:09,108 INFO   YENEUR: avg 1379 contracts/day (29 bars)
+2026-06-08 22:07:09,108 INFO [74/114] BRE
+2026-06-08 22:07:09,708 INFO   BRE: avg 10492 contracts/day (27 bars)
+2026-06-08 22:07:09,709 INFO [75/114] CNH
+2026-06-08 22:07:10,483 INFO   CNH: avg 111112 contracts/day (30 bars)
+2026-06-08 22:07:10,483 INFO [76/114] INR
+2026-06-08 22:07:11,005 INFO   INR: avg 579 contracts/day (20 bars)
+2026-06-08 22:07:11,005 INFO [77/114] MXP
+2026-06-08 22:07:11,529 INFO   MXP: avg 54754 contracts/day (29 bars)
+2026-06-08 22:07:11,529 INFO [78/114] SGD
+2026-06-08 22:07:12,255 INFO   SGD: avg 9 contracts/day (22 bars)
+2026-06-08 22:07:12,255 INFO [79/114] DX
+2026-06-08 22:07:12,760 INFO   DX: avg 22841 contracts/day (30 bars)
+2026-06-08 22:07:12,761 INFO [80/114] TWD-mini
+2026-06-08 22:07:13,484 INFO [81/114] IRON
+2026-06-08 22:07:14,299 INFO   IRON: avg 56949 contracts/day (30 bars)
+2026-06-08 22:07:14,299 INFO [82/114] GOLD_micro
+2026-06-08 22:07:14,778 INFO   GOLD_micro: avg 179304 contracts/day (29 bars)
+2026-06-08 22:07:14,778 INFO [83/114] SILVER
+2026-06-08 22:07:15,246 INFO   SILVER: avg 447 contracts/day (27 bars)
+2026-06-08 22:07:15,246 INFO [84/114] COPPER
+2026-06-08 22:07:15,898 INFO   COPPER: avg 337 contracts/day (29 bars)
+2026-06-08 22:07:15,899 INFO [85/114] PLAT
+2026-06-08 22:07:16,444 INFO   PLAT: avg 140 contracts/day (22 bars)
+2026-06-08 22:07:16,444 INFO [86/114] PALLAD
+2026-06-08 22:07:16,951 INFO   PALLAD: avg 2414 contracts/day (28 bars)
+2026-06-08 22:07:16,952 INFO [87/114] ALUMINIUM
+2026-06-08 22:07:17,490 INFO   ALUMINIUM: avg 12 contracts/day (18 bars)
+2026-06-08 22:07:17,490 INFO [88/114] BITCOIN
+2026-06-08 22:07:17,948 INFO   BITCOIN: avg 37130 contracts/day (30 bars)
+2026-06-08 22:07:17,948 INFO [89/114] ETHEREUM
+2026-06-08 22:07:18,422 INFO   ETHEREUM: avg 5935 contracts/day (30 bars)
+2026-06-08 22:07:18,423 INFO [90/114] CRUDE_W_mini
+2026-06-08 22:07:18,993 INFO   CRUDE_W_mini: avg 5855 contracts/day (29 bars)
+2026-06-08 22:07:18,993 INFO [91/114] BRENT-LAST
+2026-06-08 22:07:19,683 INFO   BRENT-LAST: avg 12832 contracts/day (29 bars)
+2026-06-08 22:07:19,683 INFO [92/114] GAS_US_mini
+2026-06-08 22:07:20,236 INFO   GAS_US_mini: avg 1510 contracts/day (29 bars)
+2026-06-08 22:07:20,237 INFO [93/114] GAS-LAST
+2026-06-08 22:07:20,897 INFO   GAS-LAST: avg 269 contracts/day (29 bars)
+2026-06-08 22:07:20,898 INFO [94/114] HEATOIL
+2026-06-08 22:07:21,528 INFO   HEATOIL: avg 18282 contracts/day (29 bars)
+2026-06-08 22:07:21,528 INFO [95/114] GASOILINE
+2026-06-08 22:07:22,143 INFO   GASOILINE: avg 23327 contracts/day (29 bars)
+2026-06-08 22:07:22,144 INFO [96/114] CORN
+2026-06-08 22:07:22,640 INFO   CORN: avg 162804 contracts/day (30 bars)
+2026-06-08 22:07:22,641 INFO [97/114] WHEAT
+2026-06-08 22:07:23,149 INFO   WHEAT: avg 59632 contracts/day (30 bars)
+2026-06-08 22:07:23,150 INFO [98/114] SOYBEAN
+2026-06-08 22:07:23,642 INFO   SOYBEAN: avg 89364 contracts/day (30 bars)
+2026-06-08 22:07:23,643 INFO [99/114] SOYMEAL
+2026-06-08 22:07:24,173 INFO   SOYMEAL: avg 50638 contracts/day (30 bars)
+2026-06-08 22:07:24,173 INFO [100/114] SOYOIL
+2026-06-08 22:07:24,682 INFO   SOYOIL: avg 60310 contracts/day (30 bars)
+2026-06-08 22:07:24,682 INFO [101/114] OATIES
+2026-06-08 22:07:25,159 INFO   OATIES: avg 434 contracts/day (30 bars)
+2026-06-08 22:07:25,159 INFO [102/114] REDWHEAT
+2026-06-08 22:07:25,662 INFO   REDWHEAT: avg 24712 contracts/day (30 bars)
+2026-06-08 22:07:25,662 INFO [103/114] RICE
+2026-06-08 22:07:26,143 INFO   RICE: avg 846 contracts/day (30 bars)
+2026-06-08 22:07:26,143 INFO [104/114] LEANHOG
+2026-06-08 22:07:26,632 INFO   LEANHOG: avg 11470 contracts/day (30 bars)
+2026-06-08 22:07:26,632 INFO [105/114] LIVECOW
+2026-06-08 22:07:27,143 INFO   LIVECOW: avg 10779 contracts/day (30 bars)
+2026-06-08 22:07:27,144 INFO [106/114] FEEDCOW
+2026-06-08 22:07:27,645 INFO   FEEDCOW: avg 8869 contracts/day (30 bars)
+2026-06-08 22:07:27,645 INFO [107/114] BBCOMM
+2026-06-08 22:07:28,118 INFO   BBCOMM: avg 506 contracts/day (30 bars)
+2026-06-08 22:07:28,119 INFO [108/114] CHEESE
+2026-06-08 22:07:28,618 INFO   CHEESE: avg 217 contracts/day (29 bars)
+2026-06-08 22:07:28,618 INFO [109/114] COFFEE
+2026-06-08 22:07:29,090 INFO   COFFEE: avg 9963 contracts/day (30 bars)
+2026-06-08 22:07:29,091 INFO [110/114] COCOA
+2026-06-08 22:07:29,593 INFO   COCOA: avg 12264 contracts/day (30 bars)
+2026-06-08 22:07:29,594 INFO [111/114] SUGAR11
+2026-06-08 22:07:30,099 INFO   SUGAR11: avg 45964 contracts/day (30 bars)
+2026-06-08 22:07:30,099 INFO [112/114] COTTON2
+2026-06-08 22:07:30,611 INFO   COTTON2: avg 22118 contracts/day (30 bars)
+2026-06-08 22:07:30,612 INFO [113/114] OJ
+2026-06-08 22:07:31,117 INFO   OJ: avg 703 contracts/day (30 bars)
+2026-06-08 22:07:31,118 INFO [114/114] RUBBER
+2026-06-08 22:07:31,851 INFO   RUBBER: avg 4056 contracts/day (30 bars)
+2026-06-08 22:07:31,853 INFO Disconnecting from 127.0.0.1:4002, 13.3 kB sent in 236 messages, 1.62 MB received in 2405 messages, session time 66.4 s.
+2026-06-08 22:07:31,853 INFO Disconnecting
+2026-06-08 22:07:31,858 INFO Disconnected from IB.
+/home/ethan/ibkr/ibkr_fut/volume_collector.py:290: FutureWarning: The behavior of DataFrame concatenation with empty or all-NA entries is deprecated. In a future version, this will no longer exclude empty or all-NA columns when determining the result dtypes. To retain the old behavior, exclude the relevant entries before the concat operation.
+  cache = pd.concat([cache, new_rows], ignore_index=True)
+2026-06-08 22:07:31,931 INFO Volume cache updated: /home/ethan/ibkr/Data/volume_cache.csv
+2026-06-08 22:07:35,515 INFO Connecting to 127.0.0.1:4002 with clientId 5...
+2026-06-08 22:07:35,518 INFO Connected
+2026-06-08 22:07:35,543 INFO Logged on to server version 176
+2026-06-08 22:07:35,556 ERROR Error 326, reqId -1: Unable to connect as the client id is already in use. Retry with a unique client id.
+2026-06-08 22:07:36,058 ERROR Peer closed connection. clientId 5 already in use?
+2026-06-08 22:07:40,532 INFO Disconnecting
+2026-06-08 22:07:40,534 ERROR API connection failed: TimeoutError()
+2026-06-08 22:07:50,538 INFO Connecting to 127.0.0.1:4002 with clientId 5...
+2026-06-08 22:07:50,544 INFO Connected
+2026-06-08 22:07:50,570 INFO Logged on to server version 176
+2026-06-08 22:07:50,578 ERROR Error 326, reqId -1: Unable to connect as the client id is already in use. Retry with a unique client id.
+2026-06-08 22:07:51,080 ERROR Peer closed connection. clientId 5 already in use?
+2026-06-08 22:07:55,551 INFO Disconnecting
+2026-06-08 22:07:55,551 ERROR API connection failed: TimeoutError()
+2026-06-08 22:08:05,552 INFO Connecting to 127.0.0.1:4002 with clientId 5...
+2026-06-08 22:08:05,553 INFO Connected
+2026-06-08 22:08:05,560 INFO Logged on to server version 176
+2026-06-08 22:08:05,562 ERROR Error 326, reqId -1: Unable to connect as the client id is already in use. Retry with a unique client id.
+2026-06-08 22:08:06,071 ERROR Peer closed connection. clientId 5 already in use?
+2026-06-08 22:08:10,559 INFO Disconnecting
+2026-06-08 22:08:10,560 ERROR API connection failed: TimeoutError()
+================================================================================
+  EWMAC DYNAMIC OPT  [COMPUTE]  |  2026-06-08  |  DRY-RUN
+================================================================================
+WARNING: IBKR connect 1/3 failed () — retry in 10s…
+WARNING: IBKR connect 2/3 failed () — retry in 10s…
+ERROR: could not connect to IBKR after 3 attempts — 
+Make sure IB Gateway / TWS is running on port 4002.
