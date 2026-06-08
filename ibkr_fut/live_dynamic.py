@@ -372,14 +372,15 @@ def hold_contract_month(instr: str) -> str | None:
 
 
 def qualify(ib, spec: dict, month: str):
-    """Qualify an IBKR future for (instrument spec, contract month). None on fail."""
-    mult = spec.get("multiplier")
+    """Qualify an IBKR future for (instrument spec, contract month). None on fail.
+
+    Only symbol, exchange, month, and trading_class (if set) are sent — IB fills
+    in currency, multiplier, conId, etc. from its contract database.
+    """
     raw = Future(
         symbol=spec["symbol"],
         lastTradeDateOrContractMonth=month,
         exchange=spec["exchange"],
-        currency=spec["currency"],
-        multiplier=str(int(mult)) if mult is not None else "",
         tradingClass=spec["trading_class"] or "",
     )
     try:
@@ -503,7 +504,7 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
             continue
         sym = spec["symbol"]
         pm  = spec["price_magnifier"]
-        ibmult = spec["multiplier"] or 1.0
+        ibmult = 1.0   # updated from qualified contract below
 
         target_month = hold_contract_month(instr)
         if target_month is None:
@@ -566,6 +567,7 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
             if c is None:
                 print(f"    WARNING: could not qualify {sym} {m} — skip roll close")
                 continue
+            ibmult = float(c.multiplier) if c.multiplier else 1.0
 
             if not _is_open(c):
                 print(f"    DEFERRED — {sym} {m} market closed")
@@ -612,6 +614,7 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                 print(f"    DEFERRED — {sym} {target_month} market closed")
                 skipped.append(f"{sym} (market closed)")
             else:
+                ibmult = float(c.multiplier) if c.multiplier else 1.0
                 ok, reason, ticker = pre_trade_checks(ib, c, sig_px, sigma, q)
                 if not ok:
                     print(f"    SKIP pre-trade [{sym} {target_month}]: {reason}")
