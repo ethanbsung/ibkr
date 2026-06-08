@@ -769,7 +769,10 @@ def run_daemon(args):
 
         # ── 5. Sleep until next cycle ─────────────────────────────────────────
         print(f"[{_now()}] Next cycle in {DAEMON_SLEEP_SECS // 60}m…")
-        ib.sleep(DAEMON_SLEEP_SECS)
+        try:
+            ib.sleep(DAEMON_SLEEP_SECS)
+        except Exception:
+            ib = None   # reconnect at top of next cycle
 
 
 def main():
