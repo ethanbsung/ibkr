@@ -38,12 +38,13 @@ def main():
 
     for pos in positions:
         contract = pos.contract
+        ib.qualifyContracts(contract)  # fills in exchange and other missing fields
         qty = pos.position  # positive = long, negative = short
         side = "SELL" if qty > 0 else "BUY"
         close_qty = abs(int(qty))
 
         print(f"  {side} {close_qty} {contract.symbol} {contract.lastTradeDateOrContractMonth} "
-              f"(currently {qty:+.0f})  avgCost={pos.avgCost:.4f}")
+              f"exchange={contract.exchange} (currently {qty:+.0f})  avgCost={pos.avgCost:.4f}")
 
         if args.execute:
             order = Order(
