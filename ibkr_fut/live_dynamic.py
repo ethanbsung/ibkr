@@ -15,8 +15,9 @@ Replaces the IBS strategy (ibkr_fut/live_signals.py). Once per day this script:
      chooses which instruments to hold; everything else in the Jumbo is locked at
      its current position (0) so its risk transfers onto correlated tradables
      (Carver: optimise over ~150, trade ~100).
-  4. Reconciles target vs held (handling contract rolls) and submits DAY market
-     orders, logging fills + a daily snapshot to paper/ledgers/ibkr_dynamic/.
+  4. Reconciles target vs held (handling contract rolls) and submits orders via
+     Carver's passive-aggressive limit order algorithm, logging fills + a daily
+     snapshot to paper/ledgers/ibkr_dynamic/.
 
 TRADABLE SET (the menu the optimiser picks from) — computed each run as the Jumbo
 instruments that pass instrument_selection filters (SR cost ≤ 0.01, annual vol ≥ 5%,
@@ -26,8 +27,20 @@ use an identical eligible universe. Run volume_collector.py periodically to keep
 volume cache current and enable the liquidity filter.
 
 Sizing/forecasts use PST daily closes (kept current by pst_updater.py — run it
-before this script; see ibkr_fut/run_dynamic.sh). No live quotes are needed: orders
-are plain market orders.
+before this script; see ibkr_fut/run_dynamic.sh).
+
+MODES
+-----
+--mode compute  (6:00 PM ET)
+    Connect to IBKR for capital + positions, run optimisation, save
+    targets_snapshot.json. No orders placed.
+
+--mode execute  (6:05 PM ET)
+    Load targets_snapshot.json, reconnect to IBKR for current positions,
+    run pre-trade checks, place limit orders via passive-aggressive algo.
+
+No --mode (default):
+    Run compute then execute in a single session (manual testing / dry-runs).
 
 ADDING STRATEGIES LATER: compute_targets() returns a {instrument: net_contracts}
 dict. To add another strategy, produce a second such dict and merge (sum) the two
@@ -36,15 +49,17 @@ optimisation universe; this netting hook is the simple path.
 
 Dry-run (default) — print the plan, place nothing:
   python3 ibkr_fut/live_dynamic.py
-Live execution:
-  python3 ibkr_fut/live_dynamic.py --execute
+Live execution (split cron):
+  python3 ibkr_fut/live_dynamic.py --mode compute
+  python3 ibkr_fut/live_dynamic.py --mode execute --execute
 """
 
 import argparse
+import json
 import os
 import sys
 import time
-from datetime import date
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
@@ -57,6 +72,7 @@ from ibkr_fut.backtest_dynamic import _build_universe, get_eligible_set
 from ibkr_fut.backtest_ewmac import TARGET_RISK, IDM_CAP
 from ibkr_fut.dynamic_opt import optimise_positions
 from ibkr_fut.volume_collector import load_cache as load_volume_cache
+from ibkr_fut.algo_execution import pre_trade_checks, algo_exec
 from paper.dyn_ledger import DynLedger
 
 # ── Tradable-set filter ────────────────────────────────────────────────────────
@@ -76,7 +92,9 @@ FALLBACK_CAPITAL = 100_000.0
 
 # Repo-relative so the same checkout works on any host (laptop, VPS).
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IB_CONFIG_PATH = os.path.join(_REPO_ROOT, "Data/pst/ib_config/ib_config_futures.csv")
+IB_CONFIG_PATH    = os.path.join(_REPO_ROOT, "Data/pst/ib_config/ib_config_futures.csv")
+SNAPSHOT_PATH     = os.path.join(_REPO_ROOT, "ibkr_fut", "targets_snapshot.json")
+LAST_TARGETS_PATH = os.path.join(_REPO_ROOT, "ibkr_fut", "last_targets.json")
 
 pst = PSTLoader()
 
@@ -199,8 +217,9 @@ def compute_targets(uni: dict, capital: float, current_positions: dict,
     the actual held positions. Returns:
       targets    {instrument: target_net_contracts}  (only instruments with a
                  nonzero target or a nonzero current holding)
-      diag       {instrument: {forecast, n_ideal, raw_price, mult}} for held/traded
-                 instruments, plus '_meta' with idm / n_live / date / gross_lev.
+      diag       {instrument: {forecast, n_ideal, raw_price, mult, sigma}} for
+                 held/traded instruments, plus '_meta' with idm / n_live / date /
+                 gross_lev.
     """
     names, idx = uni["names"], uni["idx"]
     price, raw, fx = uni["price"], uni["raw"], uni["fx"]
@@ -265,10 +284,11 @@ def compute_targets(uni: dict, capital: float, current_positions: dict,
         if tgt != 0 or current_positions.get(nm, 0) != 0:
             targets[nm] = tgt
             diag[nm] = {
-                "forecast": float(fcl[k]),
-                "n_ideal":  float(N_unrounded[k]),
+                "forecast":  float(fcl[k]),
+                "n_ideal":   float(N_unrounded[k]),
                 "raw_price": float(rl[k]),
-                "mult":     float(ml[k]),
+                "mult":      float(ml[k]),
+                "sigma":     float(sl[k]),   # annualised vol fraction; used for price-divergence check
             }
 
     # Held instruments that aren't live today: hold them (don't blind-trade).
@@ -356,9 +376,78 @@ def qualify(ib, spec: dict, month: str):
     return quals[0] if quals else None
 
 
-def place_mkt(ib, contract, action: str, qty: int):
-    order = Order(orderType="MKT", action=action, totalQuantity=qty, tif="DAY")
-    return ib.placeOrder(contract, order)
+# ══════════════════════════════════════════════════════════════════════════════
+# Snapshot helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _Encoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, date):
+            return obj.isoformat()
+        if hasattr(obj, "isoformat"):   # pd.Timestamp
+            return obj.isoformat()
+        return super().default(obj)
+
+
+def save_snapshot(path: str, today: str, capital: float,
+                  targets: dict, diag: dict) -> None:
+    """Atomically write compute-phase results to disk."""
+    payload = {
+        "date":        today,
+        "computed_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "capital":     capital,
+        "targets":     targets,
+        "diag":        diag,
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(payload, fh, cls=_Encoder, indent=2)
+    os.replace(tmp, path)
+
+
+def load_snapshot(path: str, today: str) -> dict:
+    """Load the snapshot written by the compute phase. Abort if missing or stale."""
+    if not os.path.exists(path):
+        print(f"ERROR: snapshot not found at {path}. "
+              f"Run --mode compute first.")
+        raise SystemExit(1)
+    with open(path) as fh:
+        snap = json.load(fh)
+    if snap.get("date") != today:
+        print(f"ERROR: snapshot is from {snap.get('date')}, expected {today}. "
+              f"Re-run --mode compute.")
+        raise SystemExit(1)
+    return snap
+
+
+def check_last_targets(path: str, current_positions: dict) -> None:
+    """Warn about instruments where actual IBKR positions differ from last run's targets."""
+    if not os.path.exists(path):
+        return
+    with open(path) as fh:
+        last = json.load(fh)
+    last_targets = last.get("targets", {})
+    all_instrs = set(last_targets) | set(current_positions)
+    mismatches = []
+    for instr in sorted(all_instrs):
+        expected = int(last_targets.get(instr, 0))
+        actual   = int(current_positions.get(instr, 0))
+        if expected != actual:
+            mismatches.append(f"{instr}: expected {expected:+d}, actual {actual:+d}")
+    if mismatches:
+        print(f"\n  ⚠ RECONCILIATION vs last run ({last.get('date')}):")
+        for m in mismatches:
+            print(f"    {m}")
+
+
+def save_last_targets(path: str, targets: dict, today: str) -> None:
+    """Persist today's targets for reconciliation at the next execute run."""
+    with open(path, "w") as fh:
+        json.dump({"date": today, "targets": targets}, fh, indent=2)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -368,8 +457,8 @@ def place_mkt(ib, contract, action: str, qty: int):
 def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool):
     """
     For each instrument with a target or current holding, roll out of old months and
-    move the hold-month position to the target. Prints the plan; places orders and
-    logs fills when execute=True.
+    move the hold-month position to the target. Prints the plan; places orders via
+    the passive-aggressive limit order algorithm when execute=True.
     """
     pending = {t.contract.symbol for t in ib.openTrades()}
     placed, skipped = [], []
@@ -397,10 +486,10 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool)
         desired      = int(targets.get(instr, net_held))
 
         d = diag.get(instr, {})
-        fc = d.get("forecast")
+        fc      = d.get("forecast")
         n_ideal = d.get("n_ideal")
-        # PST raw price → IBKR price units for slippage logging
-        sig_px = (d.get("raw_price") / pm) if d.get("raw_price") else None
+        sigma   = d.get("sigma", 0.20)
+        sig_px  = (d.get("raw_price") / pm) if d.get("raw_price") else None
 
         fc_s = f"fcast {fc:+.1f}" if fc is not None else "fcast n/a"
         ni_s = f"ideal {n_ideal:+.2f}" if n_ideal is not None else ""
@@ -420,11 +509,11 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool)
             continue
 
         if target_delta > 0:
-            print(f"    ACTION: BUY  {target_delta} {sym} {target_month} [MKT]")
+            print(f"    ACTION: BUY  {target_delta} {sym} {target_month} [LMT ALGO]")
         elif target_delta < 0:
-            print(f"    ACTION: SELL {-target_delta} {sym} {target_month} [MKT]")
+            print(f"    ACTION: SELL {-target_delta} {sym} {target_month} [LMT ALGO]")
         for act, q, m in roll_closes:
-            print(f"    ACTION: {act} {q} {sym} {m} [ROLL CLOSE MKT]")
+            print(f"    ACTION: {act} {q} {sym} {m} [ROLL CLOSE LMT ALGO]")
 
         if not execute:
             continue
@@ -434,47 +523,77 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool)
             skipped.append(sym)
             continue
 
-        # Execute roll closes first.
+        # ── Execute roll closes first ─────────────────────────────────────────
         for act, q, m in roll_closes:
             c = qualify(ib, spec, m)
             if c is None:
                 print(f"    WARNING: could not qualify {sym} {m} — skip roll close")
                 continue
-            tr = place_mkt(ib, c, act, q)
-            ib.sleep(2)
-            st = tr.orderStatus.status
-            fp = tr.orderStatus.avgFillPrice or (sig_px or 0.0)
-            comm = sum(fl.commissionReport.commission for fl in tr.fills
-                       if fl.commissionReport.commission == fl.commissionReport.commission)
-            print(f"    ROLL {act} {q} {sym} {m} → {st}  fill {fp:.4f}")
-            if st in ("Filled", "PartiallyFilled") and fp > 0:
-                ledger.log_fill(symbol=sym, contract=m, action=act, qty=q,
-                                multiplier=ibmult, signal_price=(sig_px or fp),
-                                fill_price=fp, commission=comm, forecast=fc)
-            placed.append((f"ROLL {act} {q} {sym} {m}", st, tr.order.orderId))
 
-        # Execute target-month move.
+            ok, reason, ticker = pre_trade_checks(ib, c, sig_px, sigma, q)
+            if not ok:
+                print(f"    SKIP ROLL pre-trade [{sym} {m}]: {reason}")
+                skipped.append(f"{sym} {m} (pre-trade)")
+                continue
+
+            result = algo_exec(ib, c, act, q, ticker)
+            ib.cancelMktData(c)
+
+            fp = result.avg_price or sig_px or 0.0
+            aggr = "AGGRESSIVE" if result.was_aggressive else "passive"
+            print(f"    ROLL {act} {q} {sym} {m} → {result.status}  "
+                  f"fill {fp:.4f}  [{aggr}]")
+
+            if result.status in ("Filled", "PartiallyFilled") and result.avg_price > 0:
+                ledger.log_fill(symbol=sym, contract=m, action=act,
+                                qty=result.filled_qty, multiplier=ibmult,
+                                signal_price=(sig_px or result.avg_price),
+                                fill_price=result.avg_price,
+                                commission=result.commission, forecast=fc)
+            if result.status == "PartiallyFilled":
+                print(f"    WARN: partial roll fill {result.filled_qty}/{q} {sym} {m} — "
+                      f"remainder stays in expiring month")
+            if result.status in ("Unfilled", "Cancelled"):
+                print(f"    WARN: {result.status} on ROLL {sym} {m} — no fill logged")
+
+            placed.append((f"ROLL {act} {q} {sym} {m}", result.status, result.order_id))
+
+        # ── Execute target-month move ─────────────────────────────────────────
         if target_delta != 0:
             act = "BUY" if target_delta > 0 else "SELL"
-            q = abs(target_delta)
-            c = qualify(ib, spec, target_month)
+            q   = abs(target_delta)
+            c   = qualify(ib, spec, target_month)
             if c is None:
                 print(f"    WARNING: could not qualify {sym} {target_month} — skip")
+                skipped.append(f"{sym} (qualify failed)")
             else:
-                tr = place_mkt(ib, c, act, q)
-                ib.sleep(2)
-                st = tr.orderStatus.status
-                fp = tr.orderStatus.avgFillPrice or (sig_px or 0.0)
-                comm = sum(fl.commissionReport.commission for fl in tr.fills
-                           if fl.commissionReport.commission == fl.commissionReport.commission)
-                print(f"    ORDER {act} {q} {sym} {target_month} → {st}  "
-                      f"fill {fp:.4f}  comm ${comm:.2f}")
-                if st in ("Filled", "PartiallyFilled") and fp > 0:
-                    ledger.log_fill(symbol=sym, contract=target_month, action=act,
-                                    qty=q, multiplier=ibmult,
-                                    signal_price=(sig_px or fp), fill_price=fp,
-                                    commission=comm, forecast=fc)
-                placed.append((f"{act} {q} {sym} {target_month}", st, tr.order.orderId))
+                ok, reason, ticker = pre_trade_checks(ib, c, sig_px, sigma, q)
+                if not ok:
+                    print(f"    SKIP pre-trade [{sym} {target_month}]: {reason}")
+                    skipped.append(f"{sym} (pre-trade: {reason})")
+                else:
+                    result = algo_exec(ib, c, act, q, ticker)
+                    ib.cancelMktData(c)
+
+                    fp   = result.avg_price or sig_px or 0.0
+                    aggr = "AGGRESSIVE" if result.was_aggressive else "passive"
+                    print(f"    ORDER {act} {q} {sym} {target_month} → {result.status}  "
+                          f"fill {fp:.4f}  comm ${result.commission:.2f}  [{aggr}]")
+
+                    if result.status in ("Filled", "PartiallyFilled") and result.avg_price > 0:
+                        ledger.log_fill(symbol=sym, contract=target_month, action=act,
+                                        qty=result.filled_qty, multiplier=ibmult,
+                                        signal_price=(sig_px or result.avg_price),
+                                        fill_price=result.avg_price,
+                                        commission=result.commission, forecast=fc)
+                    if result.status == "PartiallyFilled":
+                        print(f"    WARN: partial fill {result.filled_qty}/{q} — "
+                              f"remainder will rebalance tomorrow")
+                    if result.status in ("Unfilled", "Cancelled"):
+                        print(f"    WARN: {result.status} — no fill logged for {sym}")
+
+                    placed.append((f"{act} {q} {sym} {target_month}",
+                                   result.status, result.order_id))
 
     return placed, skipped
 
@@ -483,25 +602,14 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool)
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
-def main():
-    ap = argparse.ArgumentParser(description="EWMAC dynamic-optimisation live executor")
-    ap.add_argument("--execute", action="store_true", help="Place orders (omit = dry-run)")
-    ap.add_argument("--capital", type=float, default=None,
-                    help="Override capital (default: live NetLiquidation)")
-    ap.add_argument("--target-risk", type=float, default=DYN_TARGET_RISK,
-                    help=f"Annual risk target (default {DYN_TARGET_RISK})")
-    args = ap.parse_args()
-
-    mode = "EXECUTE" if args.execute else "DRY-RUN"
-    today = date.today().isoformat()
-
-    # ── Connect ──────────────────────────────────────────────────────────────
+def _connect() -> IB | None:
+    """Connect to IBKR with retries. Returns IB instance or None on failure."""
     ib = IB()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             ib.connect(IB_HOST, IB_PORT, clientId=CLIENT_ID, timeout=CONNECT_TIMEOUT)
             ib.sleep(2)
-            break
+            return ib
         except Exception as e:
             if attempt < MAX_RETRIES:
                 print(f"WARNING: IBKR connect {attempt}/{MAX_RETRIES} failed ({e}) — "
@@ -510,81 +618,159 @@ def main():
             else:
                 print(f"ERROR: could not connect to IBKR after {MAX_RETRIES} attempts — {e}")
                 print("Make sure IB Gateway / TWS is running on port 4002.")
+    return None
+
+
+def main():
+    ap = argparse.ArgumentParser(description="EWMAC dynamic-optimisation live executor")
+    ap.add_argument("--execute", action="store_true",
+                    help="Place orders (omit = dry-run)")
+    ap.add_argument("--capital", type=float, default=None,
+                    help="Override capital (default: live NetLiquidation)")
+    ap.add_argument("--target-risk", type=float, default=DYN_TARGET_RISK,
+                    help=f"Annual risk target (default {DYN_TARGET_RISK})")
+    ap.add_argument("--mode", choices=["compute", "execute"], default=None,
+                    help="compute: optimise + save snapshot.  "
+                         "execute: load snapshot + trade.  "
+                         "Default (omit): run both in sequence.")
+    args = ap.parse_args()
+
+    today       = date.today().isoformat()
+    mode_str    = "EXECUTE" if args.execute else "DRY-RUN"
+    run_compute = args.mode in (None, "compute")
+    run_execute = args.mode in (None, "execute")
+
+    ib     = None   # shared connection for default (no --mode) runs
+    ibcfg  = None
+    targets = diag = meta = None
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # COMPUTE PHASE — optimise and save snapshot
+    # ══════════════════════════════════════════════════════════════════════════
+    if run_compute:
+        print("=" * 80)
+        print(f"  EWMAC DYNAMIC OPT  [COMPUTE]  |  {today}  |  {mode_str}")
+        print("=" * 80)
+
+        ib = _connect()
+        if ib is None:
+            return
+        ibcfg = load_ib_config()
+
+        capital = args.capital or get_equity(ib)
+        if capital is None:
+            print(f"WARNING: could not read equity — using ${FALLBACK_CAPITAL:,.0f}")
+            capital = FALLBACK_CAPITAL
+        capital = float(capital)
+
+        print(f"\n  capital ${capital:,.0f}  |  target risk {args.target_risk:.0%}  |  "
+              f"universe {len(UNIVERSE)} instr")
+
+        tradable_set, _ = build_tradable_set(capital, ibcfg)
+        if not tradable_set:
+            print("ERROR: no tradable instruments at this capital — aborting.")
+            ib.disconnect()
+            return
+
+        print(f"\n  Building universe from PST data…")
+        uni = _build_universe(list(UNIVERSE.keys()), tradable_set=tradable_set,
+                              lookback_days=3000)
+        if uni is None:
+            print("ERROR: universe build failed (no instruments with valid signals).")
+            ib.disconnect()
+            return
+
+        held_c, unknown_c = get_positions_by_instr(ib, ibcfg)
+        current_c = {instr: sum(m.values()) for instr, m in held_c.items()}
+        if unknown_c:
+            print(f"\n  ⚠ Held futures NOT in UNIVERSE: {unknown_c}")
+        if current_c:
+            print(f"\n  Current positions (net): "
+                  + "  ".join(f"{k} {v:+d}" for k, v in sorted(current_c.items())))
+        else:
+            print(f"\n  Current positions: flat")
+
+        targets, diag = compute_targets(uni, capital, current_c, args.target_risk)
+        meta = diag.get("_meta", {})
+        print(f"\n  Optimisation as of {meta.get('date')}  |  IDM {meta.get('idm')}  "
+              f"|  {meta.get('n_live')} live  |  target holds {meta.get('n_held_target')}  "
+              f"|  gross lev {meta.get('gross_lev')}x")
+
+        save_snapshot(SNAPSHOT_PATH, today, capital, targets, diag)
+        print(f"\n  Snapshot saved → {SNAPSHOT_PATH}")
+
+        if args.mode == "compute":
+            ib.disconnect()
+            print(f"\n  Compute done. Run --mode execute --execute to place orders.")
+            return
+
+        # Default mode: keep connection open, fall through to execute phase.
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # EXECUTE PHASE — pre-trade checks + passive-aggressive algo
+    # ══════════════════════════════════════════════════════════════════════════
+    if run_execute:
+        if args.mode == "execute":
+            # Separate cron run: load snapshot written by the compute job.
+            snap    = load_snapshot(SNAPSHOT_PATH, today)
+            targets = snap["targets"]
+            diag    = snap["diag"]
+            capital = snap["capital"]
+            meta    = diag.get("_meta", {})
+
+            ib = _connect()
+            if ib is None:
                 return
+            ibcfg = load_ib_config()
 
-    ibcfg = load_ib_config()
+        # Read current positions from IBKR (always fresh).
+        held, unknown = get_positions_by_instr(ib, ibcfg)
+        current = {instr: sum(m.values()) for instr, m in held.items()}
 
-    equity = args.capital or get_equity(ib)
-    if equity is None:
-        print(f"WARNING: could not read equity — using ${FALLBACK_CAPITAL:,.0f}")
-        equity = FALLBACK_CAPITAL
-    capital = float(equity)
+        if unknown:
+            print(f"\n  ⚠ Held futures NOT in UNIVERSE (left untouched): {unknown}")
+        if current:
+            print(f"\n  Current positions (net): "
+                  + "  ".join(f"{k} {v:+d}" for k, v in sorted(current.items())))
+        else:
+            print(f"\n  Current positions: flat")
 
-    print("=" * 80)
-    print(f"  EWMAC DYNAMIC OPT  [{mode}]  |  {today}  |  capital ${capital:,.0f}")
-    print(f"  target risk {args.target_risk:.0%}  |  optimise over UNIVERSE "
-          f"({len(UNIVERSE)} instr), trade instrument-selection-eligible subset")
-    print("=" * 80)
+        check_last_targets(LAST_TARGETS_PATH, current)
 
-    # ── Tradable set + universe ──────────────────────────────────────────────
-    tradable_set, _ = build_tradable_set(capital, ibcfg)
-    if not tradable_set:
-        print("ERROR: no tradable instruments at this capital — aborting.")
+        print("\n" + "=" * 80)
+        print(f"  EWMAC DYNAMIC OPT  [EXECUTE — {mode_str}]  |  {today}")
+        print(f"  Snapshot as of {meta.get('date')}  |  capital ${capital:,.0f}  "
+              f"|  IDM {meta.get('idm')}  |  {meta.get('n_live')} live  "
+              f"|  target holds {meta.get('n_held_target')}  "
+              f"|  gross lev {meta.get('gross_lev')}x")
+        print("=" * 80)
+
+        ledger = DynLedger()
+        print("\n" + "-" * 80)
+        placed, skipped = reconcile_and_execute(
+            ib, ibcfg, targets, held, diag, ledger, execute=args.execute)
+
+        save_last_targets(LAST_TARGETS_PATH, targets, today)
+
+        # ── Summary ───────────────────────────────────────────────────────────
+        print("\n" + "=" * 80)
+        if args.execute:
+            if placed:
+                print("  ORDERS PLACED:")
+                for desc, st, oid in placed:
+                    print(f"    {desc:<32} status {st:<18} id {oid}")
+            if skipped:
+                print(f"  SKIPPED: {', '.join(str(s) for s in skipped)}")
+            if not placed and not skipped:
+                print("  NO ORDERS — already at target.")
+            ib.sleep(2)
+            ledger.log_daily(ib, n_positions=meta.get("n_held_target"),
+                             gross_leverage=meta.get("gross_lev"))
+        else:
+            print("  DRY-RUN — no orders placed. Re-run with --execute to submit.")
+        print("=" * 80 + "\n")
+
         ib.disconnect()
-        return
-
-    print(f"\n  Building universe from PST data…")
-    uni = _build_universe(list(UNIVERSE.keys()), tradable_set=tradable_set,
-                          lookback_days=3000)
-    if uni is None:
-        print("ERROR: universe build failed (no instruments with valid signals).")
-        ib.disconnect()
-        return
-
-    # ── Current positions ────────────────────────────────────────────────────
-    held, unknown = get_positions_by_instr(ib, ibcfg)
-    current = {instr: sum(months.values()) for instr, months in held.items()}
-    if unknown:
-        print(f"\n  ⚠ Held futures NOT in UNIVERSE (left untouched): {unknown}")
-    if current:
-        print(f"\n  Current positions (net): "
-              + "  ".join(f"{k} {v:+d}" for k, v in sorted(current.items())))
-    else:
-        print(f"\n  Current positions: flat")
-
-    # ── Optimise ─────────────────────────────────────────────────────────────
-    targets, diag = compute_targets(uni, capital, current, args.target_risk)
-    meta = diag.get("_meta", {})
-    print(f"\n  Optimisation as of {meta.get('date')}  |  IDM {meta.get('idm')}  "
-          f"|  {meta.get('n_live')} live  |  target holds {meta.get('n_held_target')}  "
-          f"|  gross lev {meta.get('gross_lev')}x")
-
-    # ── Reconcile + execute ──────────────────────────────────────────────────
-    ledger = DynLedger()
-    print("\n" + "-" * 80)
-    placed, skipped = reconcile_and_execute(
-        ib, ibcfg, targets, held, diag, ledger, execute=args.execute)
-
-    # ── Summary ──────────────────────────────────────────────────────────────
-    print("\n" + "=" * 80)
-    if args.execute:
-        if placed:
-            print("  ORDERS PLACED:")
-            for desc, st, oid in placed:
-                print(f"    {desc:<32} status {st:<18} id {oid}")
-        if skipped:
-            print(f"  SKIPPED (already pending): {', '.join(skipped)}")
-        if not placed and not skipped:
-            print("  NO ORDERS — already at target.")
-        # Daily snapshot
-        ib.sleep(2)
-        ledger.log_daily(ib, n_positions=meta.get("n_held_target"),
-                         gross_leverage=meta.get("gross_lev"))
-    else:
-        print("  DRY-RUN — no orders placed. Re-run with --execute to submit.")
-    print("=" * 80 + "\n")
-
-    ib.disconnect()
 
 
 if __name__ == "__main__":

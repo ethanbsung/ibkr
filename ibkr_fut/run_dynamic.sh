@@ -15,11 +15,13 @@ source "$REPO/venv/bin/activate"
 echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') run_dynamic start (repo=$REPO) ====="
 
 # 1. Refresh PST futures + FX data from IBKR so EWMAC signals use today's close.
-UNIVERSE_INSTRUMENTS=$(python3 -c "from ibkr_fut.instrument_universe import UNIVERSE; print(' '.join(UNIVERSE))")
+UNIVERSE_INSTRUMENTS=$(python3 -c "from ibkr_fut.instrument_universe import UNIVERSE; print(' '.join(UNIVERSE))") \
+  || { echo "ERROR: failed to load UNIVERSE — aborting compute (no snapshot written)"; exit 1; }
 python3 ibkr_fut/pst_updater.py $UNIVERSE_INSTRUMENTS --fx || echo "WARN: pst_updater nonzero; proceeding with existing data"
 
 # 2. Refresh volume cache weekly (stale after 7 days; used by instrument_selection filter).
 python3 ibkr_fut/volume_collector.py --max-age 7 || echo "WARN: volume_collector nonzero; proceeding with existing cache"
 
-# 3. Run the EWMAC dynamic-optimisation executor (args passed through, e.g. --execute).
-python3 ibkr_fut/live_dynamic.py "$@"
+# 3. Run the EWMAC dynamic-optimisation executor — compute phase only.
+#    Order execution is handled separately by run_execution.sh at 6:05 PM ET.
+python3 ibkr_fut/live_dynamic.py --mode compute

@@ -12,11 +12,13 @@
 # ════════════════════════════════════════════════════════════════════════════
 PATH=/usr/local/bin:/usr/bin:/bin
 
-# EWMAC dynamic-optimisation futures — 6:00 PM ET (22:00 UTC EDT) weekdays.
+# EWMAC dynamic-optimisation futures — two-step execution:
+#   6:00 PM ET (22:00 UTC EDT): data refresh + portfolio optimisation → targets_snapshot.json
+#   6:05 PM ET (22:05 UTC EDT): passive-aggressive limit order execution
 # Runs AFTER the futures daily bars settle (~5 PM ET) and AFTER the 5–6 PM ET CME
-# maintenance halt, so pst_updater pulls complete closes and orders fill in the
-# evening session. Refreshes data, then places orders.
-0 22 * * 1-5 /home/ethan/ibkr/ibkr_fut/run_dynamic.sh --execute >> /home/ethan/ibkr/ibkr_fut/dynamic_cron.log 2>&1
+# maintenance halt, so pst_updater pulls complete closes and orders enter the evening session.
+0 22 * * 1-5 /home/ethan/ibkr/ibkr_fut/run_dynamic.sh >> /home/ethan/ibkr/ibkr_fut/dynamic_cron.log 2>&1
+5 22 * * 1-5 /home/ethan/ibkr/ibkr_fut/run_execution.sh >> /home/ethan/ibkr/ibkr_fut/execution_cron.log 2>&1
 
 # Crypto trend paper trading — 6 AM ET (10:00 UTC EDT) daily.
 0 10 * * * /home/ethan/ibkr/paper/run_paper.sh >> /home/ethan/ibkr/paper/paper_cron.log 2>&1
