@@ -4,8 +4,6 @@ Extract historical performance data from IBKR for accurate risk calculations
 """
 
 from ib_insync import *
-import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 import json
 

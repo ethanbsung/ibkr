@@ -34,14 +34,13 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pst_loader import PSTLoader
+from ibkr_fut.pst_loader import PSTLoader
 from ibkr_fut.instrument_universe import UNIVERSE
 from ibkr_fut.foundations import (
     blended_vol,
     pct_returns_backadjusted,
     sr_cost_per_trade,
     PST_CUTOFF,
-    ANNUAL_DAYS,
 )
 from ibkr_fut.volume_collector import load_cache, compute_volume_risk
 

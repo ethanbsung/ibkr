@@ -3,8 +3,6 @@
 Script to update README.md with live trading metrics from account snapshots
 """
 import json
-import os
-import re
 import urllib.parse
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional

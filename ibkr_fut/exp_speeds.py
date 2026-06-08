@@ -13,7 +13,6 @@ instrument_signals looks up at call time), then calling run_portfolio unchanged.
 """
 import sys, os, io, contextlib
 import numpy as np
-import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ibkr_fut.backtest_ewmac as bt

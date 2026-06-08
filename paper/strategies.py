@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from engine import Strategy
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(_ROOT, 'crypto'))
+sys.path.insert(0, os.path.join(_ROOT, 'research', 'crypto'))
 import crypto_trend as ct   # noqa: E402
 
 _LEDGERS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ledgers')

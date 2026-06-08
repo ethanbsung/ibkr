@@ -29,7 +29,7 @@ import pandas as pd
 from ib_insync import IB, Future, util
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pst_loader import PSTLoader
+from ibkr_fut.pst_loader import PSTLoader
 from ibkr_fut.instrument_universe import UNIVERSE
 from ibkr_fut.foundations import blended_vol, pct_returns_backadjusted, PST_CUTOFF
 

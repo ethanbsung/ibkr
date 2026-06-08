@@ -16,11 +16,10 @@ import matplotlib.pyplot as plt
 from tabulate import tabulate
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pst_loader import PSTLoader
+from ibkr_fut.pst_loader import PSTLoader
 from ibkr_fut.foundations import (
     PST_CUTOFF,
     ANNUAL_DAYS,
-    VOL_SCALAR,
     blended_vol,
     pct_returns_backadjusted,
     sigma_p_from_pct,
@@ -29,13 +28,11 @@ from ibkr_fut.foundations import (
     compute_corr_matrix,
     handcraft_weights,
     idm_from_corr,
-    idm_from_count,
     performance_stats,
 )
 from ibkr_fut.ewmac_signals import (
     combined_forecast,
     eligible_speeds,
-    _SPEED_TURNOVER,
 )
 
 # ── Parameters ───────────────────────────────────────────────────────────────────

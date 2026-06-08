@@ -27,7 +27,6 @@ from tabulate import tabulate
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ibkr_fut.foundations import (
-    PST_CUTOFF,
     ANNUAL_DAYS,
     compute_corr_matrix,
     handcraft_weights,
@@ -39,7 +38,6 @@ from ibkr_fut.backtest_ewmac import (
     instrument_signals,
     TARGET_RISK,
     IDM_CAP,
-    COMMISSION,
 )
 from ibkr_fut.dynamic_opt import CovarianceEstimator, optimise_positions
 
@@ -728,8 +726,6 @@ def run_snapshot(
     print(f"{'=' * 90}")
 
     rows = []
-    from ibkr_fut.instrument_selection import build_selection_table
-    from ibkr_fut.volume_collector import load_cache
     sel_tbl = build_selection_table(pst, universe_dict, load_cache()) if apply_filter else None
 
     for k, j in enumerate(live_idx):

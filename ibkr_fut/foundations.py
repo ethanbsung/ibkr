@@ -10,7 +10,7 @@ import pandas as pd
 from scipy.cluster import hierarchy as sch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pst_loader import PSTLoader
+from ibkr_fut.pst_loader import PSTLoader
 
 PST_CUTOFF  = pd.Timestamp.today().normalize()   # use all data through the present (PST static dump + IBKR-appended)
 ANNUAL_DAYS = 256   # trading days per year            [calcs line 21]

@@ -13,8 +13,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import logging
-from datetime import datetime, timedelta
-import calendar
+from datetime import datetime
 from io import StringIO
 from ib_insync import IB, ContFuture, util
 

@@ -18,12 +18,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ibkr_fut.jumbo import JUMBO
 from ibkr_fut.backtest_dynamic import _build_universe
-from ibkr_fut.backtest_ewmac import TARGET_RISK, IDM_CAP
+from ibkr_fut.backtest_ewmac import IDM_CAP
 from ibkr_fut.dynamic_opt import (
     optimise_positions,
     tracking_error_std,
     greedy_optimise_weights,
-    apply_buffering,
 )
 
 # ─── Parameters ───────────────────────────────────────────────────────────────

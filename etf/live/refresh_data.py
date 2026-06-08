@@ -31,10 +31,9 @@ import json
 import os
 import sys
 import time
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from etf_data_getter import download_ticker, OUTPUT_DIR   # canonical full-history loader
+from etf.live.etf_data_getter import download_ticker, OUTPUT_DIR
 
 UNIVERSE_FILE = "Data/etf/etf_universe_greedy.json"
 MIN_ROWS      = 50    # reject obviously-bad downloads

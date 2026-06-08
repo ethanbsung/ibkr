@@ -14,7 +14,6 @@ from ibkr_fut.dynamic_opt import (
     covariance_from_corr_and_vol,
     weekly_pct_returns,
     CovarianceEstimator,
-    tracking_error_std,
     cost_penalty,
     _objective,
     greedy_optimise_weights,

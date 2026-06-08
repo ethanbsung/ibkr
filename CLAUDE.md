@@ -33,13 +33,13 @@ python3 etf/live/run_daily.py --execute
 python3 etf/live/refresh_data.py
 
 # Account summary (requires IB Gateway on port 4002)
-python3 account_summary.py
+python3 scripts/account_summary.py
 
 # Rob_port backtests (Carver framework)
-python3 rob_port/chapter4.py
+python3 research/rob_port/chapter4.py
 
 # Crypto backtests
-python3 crypto/crypto_trend.py
+python3 research/crypto/crypto_trend.py
 ```
 
 ## Architecture Overview
@@ -56,7 +56,7 @@ There are three independent live-trading pipelines, each with its own ledger and
 ### 2. Futures EWMAC Dynamic (`ibkr_fut/`)
 - **Entry point:** `ibkr_fut/live_dynamic.py` (cron: 6 PM ET weekdays, run via `run_dynamic.sh`)
 - Reads capital from IBKR (port 4002), builds a Carver "Jumbo" universe from PST CSV data, runs joint portfolio optimisation (`dynamic_opt.optimise_positions`), reconciles target vs held, and submits DAY market orders.
-- **Data pipeline:** `pst_updater.py` must run before `live_dynamic.py` to pull fresh PST closes.
+- **Data pipeline:** `ibkr_fut/pst_updater.py` must run before `live_dynamic.py` to pull fresh PST closes.
 - **IBS strategy:** retired (`run_ibs.sh` removed from cron). The IBS/Williams `live_port.py` (8-strategy 50/50 IBS+Williams on ES/YM/GC/NQ) still exists but is not in the active cron.
 
 ### 3. ETF EWMAC Live (`etf/live/`)
@@ -67,14 +67,17 @@ There are three independent live-trading pipelines, each with its own ledger and
 - **Ledger:** SQLite, exported to `paper/` book format.
 - **Env:** Alpaca credentials in `.env`; loaded via `etf/live/_env.py`.
 
-### Backtesting & Research
-- **`rob_port/`** — Robert Carver "Systematic Trading" framework: `chapter1.py`–`chapter10.py`, handcrafted weights, dynamic optimisation, EWMAC signals across 75 instruments.
-- **`_ES/`, `_NQ/`, `crypto/`, `_orb/`, `_misc/`** — standalone backtest scripts per strategy/instrument. Each is independent; they read from `Data/`.
+### Backtesting & Research (`research/`)
+- **`research/rob_port/`** — Robert Carver "Systematic Trading" framework: `chapter1.py`–`chapter10.py`, handcrafted weights, dynamic optimisation, EWMAC signals across 75 instruments.
+- **`research/crypto/`** — crypto strategy research (trend, carry, mean-reversion backtests). `paper/strategies.py` imports `crypto_trend.py` from here.
+- **`research/etf/`** — ETF backtest scripts (EWMAC vol-adj, MR, greedy selection). `etf/live/` imports `ewmac_backtest.py` from `etf/live/`; research scripts reference it via sys.path.
+- **`research/es/`, `research/nq/`, `research/cl/`, `research/orb/`** — standalone per-instrument backtests.
+- **`archive/`** — failed experiments (`archive/failed/`) and miscellaneous one-offs (`archive/misc/`).
 - **`Data/`** — market data warehouse: daily OHLCV CSVs, binance spot/perp/funding data, Coinbase candles.
 
 ### Data Flow
 ```
-pst_updater.py → Data/<instrument>_daily_data.csv
+ibkr_fut/pst_updater.py → Data/<instrument>_daily_data.csv
                       ↓
 ibkr_fut/live_dynamic.py  (futures, IBKR)
 rob_port/backtest_dynamic.py  (backtests)
@@ -94,7 +97,7 @@ Coinbase API (real-time) → paper/engine.py → paper/ledgers/
 | `ibkr_fut/jumbo.py` | Builds the full ~150-instrument Carver universe |
 | `ibkr_fut/foundations.py` | Core Carver math: EWMAC, vol scaling, handcraft weights |
 | `ibkr_fut/dynamic_opt.py` | Joint portfolio optimiser (IDM, SR-cost aware) |
-| `pst_updater.py` / `pst_loader.py` | Price series table: fetch + load PST CSVs |
+| `ibkr_fut/pst_updater.py` / `ibkr_fut/pst_loader.py` | Price series table: fetch + load PST CSVs |
 | `etf/live/_env.py` | Loads `.env` for Alpaca API keys |
 | `crontab_vps.txt` | Canonical VPS cron schedule (America/New_York TZ) |
 

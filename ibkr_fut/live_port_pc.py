@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 from ib_insync import *
 import logging
-import sys
 import json
 import os
 import time

@@ -6,14 +6,13 @@ All equations reference ibkr_fut/calcs.txt (Carver AFTS chapters 7-9).
 
 import sys
 import os
-import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pst_loader import PSTLoader
+from ibkr_fut.pst_loader import PSTLoader
 from ibkr_fut.foundations import (
     PST_CUTOFF,
     blended_vol,

@@ -12,21 +12,12 @@ Adding a new strategy: create a new file with a class that has:
 """
 
 import json
-import os
-import sys
 
 import numpy as np
 import pandas as pd
 
-# Allow imports from the etf/ parent directory
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from ewmac_backtest import (
+from etf.live.ewmac_backtest import (
     EWMAC_VARIANTS,
-    FORECAST_TARGET,
-    IDM_CAP,
-    DATA_DIR,
-    WARMUP_BARS,
     GROSS_LEVERAGE_CAP,   # single source of truth — Reg-T 1.9x gross cap
     blended_vol,
     normalised_ewmac,

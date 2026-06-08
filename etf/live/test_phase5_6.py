@@ -17,9 +17,8 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ewmac_backtest import size_targets, apply_buffer
+from etf.live.ewmac_backtest import size_targets, apply_buffer
 from etf.live.executor import BUFFER_FRACTION
 import etf.live.strategy_ewmac as strat_mod
 
