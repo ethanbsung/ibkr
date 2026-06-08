@@ -65,6 +65,7 @@ Daemon (started by run_execution.sh):
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -73,6 +74,10 @@ from datetime import date, datetime
 import numpy as np
 import pandas as pd
 from ib_insync import IB, Future, Order
+
+# ib_insync logs every portfolio tick and every reconnect event at INFO level.
+# Our own print() statements cover what matters; suppress the noise.
+logging.getLogger("ib_insync").setLevel(logging.ERROR)
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from ibkr_fut.pst_loader import PSTLoader
