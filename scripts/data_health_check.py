@@ -83,7 +83,9 @@ def check_carry(verbose: bool) -> list[str]:
     warnings = []
     multi_dir = os.path.join(PST_BASE, "multiple_prices_csv")
 
-    # VIX/VIX_mini: structurally no carry (front month = shortest tenor).
+    # VIX/VIX_mini: CarryOffset=-1 (pysystemtrade canonical) means the carry contract
+    # is the prior expired month — IBKR won't serve expired contracts so carry is
+    # always NaN. This is expected; pst_updater cannot fill it.
     # SGX thin instruments and soft commodities: deferred contracts routinely have
     # zero IBKR volume so carry is unavailable on many days. Known structural gap.
     CARRY_EXEMPT = {
