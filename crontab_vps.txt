@@ -14,11 +14,15 @@ PATH=/usr/local/bin:/usr/bin:/bin
 
 # EWMAC dynamic-optimisation futures — two-step execution:
 #   6:00 PM ET (22:00 UTC EDT): data refresh + portfolio optimisation → targets_snapshot.json
-#   6:05 PM ET (22:05 UTC EDT): passive-aggressive limit order execution
-# Runs AFTER the futures daily bars settle (~5 PM ET) and AFTER the 5–6 PM ET CME
-# maintenance halt, so pst_updater pulls complete closes and orders enter the evening session.
-0 22 * * 1-5 /home/ethan/ibkr/ibkr_fut/run_dynamic.sh >> /home/ethan/ibkr/ibkr_fut/dynamic_cron.log 2>&1
-5 22 * * 1-5 /home/ethan/ibkr/ibkr_fut/run_execution.sh >> /home/ethan/ibkr/ibkr_fut/execution_cron.log 2>&1
+#   6:05 PM ET (22:05 UTC EDT): starts background daemon (market-hours aware, cycles ~10 min)
+#     - CME/NYMEX/CBOT instruments placed immediately (~6:05 PM, market just reopened)
+#     - Asian instruments placed when TSE/OSE/KSE open (~8–9 PM ET)
+#     - Eurex/LIFFE instruments placed when BUND/DAX/EUROSTX open (~2–3 AM ET)
+#     - Daemon reloads targets_snapshot.json automatically when next day's compute runs
+#     - Daemon log: ibkr_fut/daemon_cron.log
+# Runs Sun–Thu (markets closed after Friday settlement; Sunday evening session covers Mon open).
+0 22 * * 0,1-4 /home/ethan/ibkr/ibkr_fut/run_dynamic.sh >> /home/ethan/ibkr/ibkr_fut/dynamic_cron.log 2>&1
+5 22 * * 0,1-4 /home/ethan/ibkr/ibkr_fut/run_execution.sh >> /home/ethan/ibkr/ibkr_fut/execution_cron.log 2>&1
 
 # Data health check — 6:15 PM ET (22:15 UTC EDT) weekdays, after pst_updater completes.
 15 22 * * 1-5 cd /home/ethan/ibkr && source venv/bin/activate && python3 scripts/data_health_check.py >> /home/ethan/ibkr/scripts/data_health.log 2>&1

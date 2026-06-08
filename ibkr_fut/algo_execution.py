@@ -18,7 +18,9 @@ Order is cancelled after TOTAL_TIME_OUT seconds if still unfilled.
 import math
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from ib_insync import IB, Contract, Order, Ticker
 
@@ -186,6 +188,66 @@ def algo_exec(
         commission    = commission,
         order_id      = trade.order.orderId,
     )
+
+
+# ── Market-hours check ────────────────────────────────────────────────────────
+
+_IB_TZ_MAP = {
+    "US/Eastern":                  "America/New_York",
+    "EST":                         "America/New_York",
+    "EST (Eastern Standard Time)": "America/New_York",
+    "CST (Central Standard Time)": "America/Chicago",
+    "US/Central":                  "America/Chicago",
+    "MET":                         "Europe/Berlin",
+    "MET (Middle Europe Time)":    "Europe/Berlin",
+    "GB-Eire":                     "Europe/London",
+    "JST":                         "Asia/Tokyo",
+    "JST (Japan Standard Time)":   "Asia/Tokyo",
+    "Japan":                       "Asia/Tokyo",
+    "Hongkong":                    "Asia/Hong_Kong",
+    "Australia/NSW":               "Australia/Sydney",
+    "Singapore":                   "Asia/Singapore",
+    "Korea":                       "Asia/Seoul",
+    "":                            "UTC",
+}
+
+
+def is_contract_okay_to_trade(ib: IB, contract: Contract) -> bool:
+    """Return True if 'now' falls within one of the contract's IB trading windows.
+
+    Parses the tradingHours string from IB contract details, e.g.:
+      "20260608:1700-20260609:1600;20260609:CLOSED;20260610:1700-20260611:1600"
+    Times are in the exchange's local timezone (given by timeZoneId).
+    """
+    try:
+        details = ib.reqContractDetails(contract)
+    except Exception:
+        return False
+    if not details:
+        return False
+
+    cd = details[0]
+    tz_id = cd.timeZoneId or ""
+    iana = _IB_TZ_MAP.get(tz_id, "UTC")
+    try:
+        tz = ZoneInfo(iana)
+    except Exception:
+        tz = ZoneInfo("UTC")
+
+    now = datetime.now(tz)
+    for seg in (cd.tradingHours or "").split(";"):
+        seg = seg.strip()
+        if not seg or "CLOSED" in seg:
+            continue
+        try:
+            s, e = seg.split("-", 1)
+            start = datetime.strptime(s.strip(), "%Y%m%d:%H%M").replace(tzinfo=tz)
+            end   = datetime.strptime(e.strip(), "%Y%m%d:%H%M").replace(tzinfo=tz)
+            if start <= now <= end:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 # ── Private helpers ────────────────────────────────────────────────────────────

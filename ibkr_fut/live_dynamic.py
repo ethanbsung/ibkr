@@ -35,9 +35,16 @@ MODES
     Connect to IBKR for capital + positions, run optimisation, save
     targets_snapshot.json. No orders placed.
 
---mode execute  (6:05 PM ET)
+--mode execute  (6:05 PM ET, one-shot)
     Load targets_snapshot.json, reconnect to IBKR for current positions,
     run pre-trade checks, place limit orders via passive-aggressive algo.
+
+--mode daemon  (6:05 PM ET, long-running)
+    Like execute but loops every DAEMON_SLEEP_SECS, checking market hours
+    before each order. Defers instruments whose exchange is closed and retries
+    on the next cycle. Picks up a new targets_snapshot.json automatically when
+    the compute phase writes one (next day). Replaces the one-shot execute cron
+    with a single persistent process that covers all time zones.
 
 No --mode (default):
     Run compute then execute in a single session (manual testing / dry-runs).
@@ -52,6 +59,8 @@ Dry-run (default) — print the plan, place nothing:
 Live execution (split cron):
   python3 ibkr_fut/live_dynamic.py --mode compute
   python3 ibkr_fut/live_dynamic.py --mode execute --execute
+Daemon (started by run_execution.sh):
+  python3 ibkr_fut/live_dynamic.py --mode daemon --execute
 """
 
 import argparse
@@ -72,11 +81,14 @@ from ibkr_fut.backtest_dynamic import _build_universe, get_eligible_set
 from ibkr_fut.backtest_ewmac import TARGET_RISK, IDM_CAP
 from ibkr_fut.dynamic_opt import optimise_positions
 from ibkr_fut.volume_collector import load_cache as load_volume_cache
-from ibkr_fut.algo_execution import pre_trade_checks, algo_exec
+from ibkr_fut.algo_execution import pre_trade_checks, algo_exec, is_contract_okay_to_trade
 from paper.dyn_ledger import DynLedger
 
 # ── Tradable-set filter ────────────────────────────────────────────────────────
 FRESH_DAYS = 5   # PST data must be no more than this many calendar days old
+
+# ── Daemon execution ───────────────────────────────────────────────────────────
+DAEMON_SLEEP_SECS = 600   # seconds between daemon cycles (~10 min)
 
 # ── Strategy parameters (match the backtest you validated) ─────────────────────
 DYN_TARGET_RISK = TARGET_RISK   # 0.20 — same as backtest_dynamic / backtest_ewmac
@@ -393,6 +405,18 @@ class _Encoder(json.JSONEncoder):
         return super().default(obj)
 
 
+def _now() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _load_snapshot_any(path: str) -> dict | None:
+    """Load snapshot without enforcing today's date (daemon spans midnight)."""
+    if not os.path.exists(path):
+        return None
+    with open(path) as fh:
+        return json.load(fh)
+
+
 def save_snapshot(path: str, today: str, capital: float,
                   targets: dict, diag: dict) -> None:
     """Atomically write compute-phase results to disk."""
@@ -454,7 +478,8 @@ def save_last_targets(path: str, targets: dict, today: str) -> None:
 # Reconcile + execute
 # ══════════════════════════════════════════════════════════════════════════════
 
-def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool):
+def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
+                          skip_unchanged: bool = False):
     """
     For each instrument with a target or current holding, roll out of old months and
     move the hold-month position to the target. Prints the plan; places orders via
@@ -462,6 +487,12 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool)
     """
     pending = {t.contract.symbol for t in ib.openTrades()}
     placed, skipped = [], []
+    _mkt_open_cache: dict = {}   # conId → bool; one reqContractDetails per contract per cycle
+
+    def _is_open(c) -> bool:
+        if c.conId not in _mkt_open_cache:
+            _mkt_open_cache[c.conId] = is_contract_okay_to_trade(ib, c)
+        return _mkt_open_cache[c.conId]
 
     instruments = sorted(set(targets) | set(held))
     for instr in instruments:
@@ -491,6 +522,20 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool)
         sigma   = d.get("sigma", 0.20)
         sig_px  = (d.get("raw_price") / pm) if d.get("raw_price") else None
 
+        # Build orders: roll-close old months, then move target month to `desired`.
+        roll_closes = [("SELL" if q > 0 else "BUY", abs(q), m)
+                       for m, q in old_months.items()]
+        target_delta = desired - qty_target
+
+        if target_delta == 0 and not roll_closes:
+            if not skip_unchanged:
+                fc_s = f"fcast {fc:+.1f}" if fc is not None else "fcast n/a"
+                ni_s = f"ideal {n_ideal:+.2f}" if n_ideal is not None else ""
+                print(f"\n  {instr:<14} {sym:<6} {target_month}  | held {net_held:+d} → "
+                      f"target {desired:+d}  ({fc_s} {ni_s})")
+                print("    (no change)")
+            continue
+
         fc_s = f"fcast {fc:+.1f}" if fc is not None else "fcast n/a"
         ni_s = f"ideal {n_ideal:+.2f}" if n_ideal is not None else ""
         print(f"\n  {instr:<14} {sym:<6} {target_month}  | held {net_held:+d} → "
@@ -498,15 +543,6 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool)
         if old_months:
             det = "  ".join(f"{m}:{q:+d}" for m, q in sorted(old_months.items()))
             print(f"    ⚠ ROLL — other months: {det}")
-
-        # Build orders: roll-close old months, then move target month to `desired`.
-        roll_closes = [("SELL" if q > 0 else "BUY", abs(q), m)
-                       for m, q in old_months.items()]
-        target_delta = desired - qty_target
-
-        if target_delta == 0 and not roll_closes:
-            print("    (no change)")
-            continue
 
         if target_delta > 0:
             print(f"    ACTION: BUY  {target_delta} {sym} {target_month} [LMT ALGO]")
@@ -528,6 +564,11 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool)
             c = qualify(ib, spec, m)
             if c is None:
                 print(f"    WARNING: could not qualify {sym} {m} — skip roll close")
+                continue
+
+            if not _is_open(c):
+                print(f"    DEFERRED — {sym} {m} market closed")
+                skipped.append(f"{sym} {m} (market closed)")
                 continue
 
             ok, reason, ticker = pre_trade_checks(ib, c, sig_px, sigma, q)
@@ -566,6 +607,9 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool)
             if c is None:
                 print(f"    WARNING: could not qualify {sym} {target_month} — skip")
                 skipped.append(f"{sym} (qualify failed)")
+            elif not _is_open(c):
+                print(f"    DEFERRED — {sym} {target_month} market closed")
+                skipped.append(f"{sym} (market closed)")
             else:
                 ok, reason, ticker = pre_trade_checks(ib, c, sig_px, sigma, q)
                 if not ok:
@@ -621,6 +665,112 @@ def _connect() -> IB | None:
     return None
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Daemon loop (Carver-style: long-running, market-hours-aware)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_daemon(args):
+    """
+    Long-running daemon that cycles every DAEMON_SLEEP_SECS.
+
+    Each cycle:
+      1. Reload targets_snapshot.json if the compute phase wrote a new one.
+         Before switching, flush the daily ledger entry for the prior day.
+      2. Reconnect to IBKR if the connection dropped.
+      3. Get fresh positions and call reconcile_and_execute with skip_unchanged=True
+         (suppresses "(no change)" noise) and market-open checks enabled.
+      4. Sleep DAEMON_SLEEP_SECS; repeat.
+
+    Instruments whose market is closed are printed as DEFERRED and retried next
+    cycle. The daemon runs until killed; run_execution.sh manages the PID file.
+    """
+    ib = _connect()
+    if ib is None:
+        print(f"[{_now()}] ERROR: cannot connect to IBKR — daemon exiting")
+        return
+    ibcfg = load_ib_config()
+
+    ledger              = DynLedger()
+    snapshot_computed_at = None
+    targets = diag = capital = meta = None
+
+    print(f"[{_now()}] Daemon started (sleep={DAEMON_SLEEP_SECS}s, "
+          f"execute={'YES' if args.execute else 'DRY-RUN'})")
+
+    while True:
+        # ── 1. Reconnect if needed (must run before snapshot flush uses ib) ───
+        if ib is None or not ib.isConnected():
+            print(f"[{_now()}] IB disconnected — reconnecting…")
+            ib = _connect()
+            if ib is None:
+                print(f"[{_now()}] Reconnect failed — sleeping 60s…")
+                time.sleep(60)
+                continue
+
+        # ── 2. (Re)load snapshot if compute wrote a new one ───────────────────
+        snap = _load_snapshot_any(SNAPSHOT_PATH)
+        if snap is None:
+            print(f"[{_now()}] No snapshot found — waiting for compute phase…")
+            time.sleep(60)
+            continue
+
+        if snap.get("computed_at") != snapshot_computed_at:
+            if snapshot_computed_at is not None:
+                print(f"[{_now()}] New snapshot detected — flushing daily ledger…")
+                try:
+                    ledger.log_daily(ib,
+                                     n_positions=meta.get("n_held_target") if meta else None,
+                                     gross_leverage=meta.get("gross_lev") if meta else None)
+                except Exception as e:
+                    print(f"[{_now()}] WARNING: log_daily failed: {e}")
+                ledger = DynLedger()
+
+            snapshot_computed_at = snap.get("computed_at")
+            targets = snap["targets"]
+            diag    = snap["diag"]
+            capital = snap["capital"]
+            meta    = diag.get("_meta", {})
+            pst_date = meta.get("date", "unknown")
+            today_str = date.today().isoformat()
+            if pst_date != today_str:
+                print(f"[{_now()}] WARNING: snapshot PST data is from {pst_date}, "
+                      f"not today ({today_str}) — pst_updater may have failed. "
+                      f"Skipping execution until fresh compute runs.")
+                snapshot_computed_at = None   # force reload next cycle
+                time.sleep(60)
+                continue
+            print(f"[{_now()}] Snapshot loaded: {snapshot_computed_at}  "
+                  f"capital ${capital:,.0f}  IDM {meta.get('idm')}  "
+                  f"{meta.get('n_live')} live  target holds {meta.get('n_held_target')}")
+
+        # ── 3. Fetch fresh positions ──────────────────────────────────────────
+        try:
+            held, unknown = get_positions_by_instr(ib, ibcfg)
+        except Exception as e:
+            print(f"[{_now()}] ERROR fetching positions: {e} — sleeping 60s")
+            time.sleep(60)
+            continue
+
+        # ── 4. Execute cycle ──────────────────────────────────────────────────
+        print(f"\n[{_now()}] {'─'*60}")
+        placed, skipped = reconcile_and_execute(
+            ib, ibcfg, targets, held, diag, ledger,
+            execute=args.execute, skip_unchanged=True)
+
+        market_closed = sum(1 for s in skipped if "market closed" in s)
+        other_skips   = len(skipped) - market_closed
+        print(f"[{_now()}] Cycle done: {len(placed)} placed  "
+              f"{market_closed} deferred (market closed)  "
+              f"{other_skips} skipped (other)")
+
+        if args.execute:
+            save_last_targets(LAST_TARGETS_PATH, targets, snap["date"])
+
+        # ── 5. Sleep until next cycle ─────────────────────────────────────────
+        print(f"[{_now()}] Next cycle in {DAEMON_SLEEP_SECS // 60}m…")
+        ib.sleep(DAEMON_SLEEP_SECS)
+
+
 def main():
     ap = argparse.ArgumentParser(description="EWMAC dynamic-optimisation live executor")
     ap.add_argument("--execute", action="store_true",
@@ -629,11 +779,17 @@ def main():
                     help="Override capital (default: live NetLiquidation)")
     ap.add_argument("--target-risk", type=float, default=DYN_TARGET_RISK,
                     help=f"Annual risk target (default {DYN_TARGET_RISK})")
-    ap.add_argument("--mode", choices=["compute", "execute"], default=None,
+    ap.add_argument("--mode", choices=["compute", "execute", "daemon"], default=None,
                     help="compute: optimise + save snapshot.  "
-                         "execute: load snapshot + trade.  "
+                         "execute: load snapshot + trade (one-shot).  "
+                         "daemon: load snapshot + trade in a loop (market-hours aware).  "
                          "Default (omit): run both in sequence.")
     args = ap.parse_args()
+
+    # Daemon mode: hand off entirely to run_daemon().
+    if args.mode == "daemon":
+        run_daemon(args)
+        return
 
     today       = date.today().isoformat()
     mode_str    = "EXECUTE" if args.execute else "DRY-RUN"
