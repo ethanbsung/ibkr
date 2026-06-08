@@ -354,5 +354,14 @@
     "cumulative_realized_pnl": 386.7399999999959,
     "total_cash": 31278.27,
     "gross_position_value": 0.0
+  },
+  {
+    "date": "2026-06-08",
+    "net_liquidation": 107813.77,
+    "unrealized_pnl": 0.0,
+    "realized_pnl": 8037.32,
+    "cumulative_realized_pnl": 8424.059999999996,
+    "total_cash": 107752.32,
+    "gross_position_value": 0.0
   }
 ]
