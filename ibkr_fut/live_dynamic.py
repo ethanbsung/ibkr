@@ -75,9 +75,13 @@ import numpy as np
 import pandas as pd
 from ib_insync import IB, Future, Order
 
-# ib_insync logs every portfolio tick and every reconnect event at INFO level.
-# Our own print() statements cover what matters; suppress the noise.
-logging.getLogger("ib_insync").setLevel(logging.ERROR)
+# ib_insync streams portfolio price ticks every ~3 min at INFO level; filter them
+# out while keeping fill confirmations (execDetails, commissionReport) and errors.
+class _NoPortfolioTicks(logging.Filter):
+    def filter(self, record):
+        return not record.getMessage().startswith("updatePortfolio")
+
+logging.getLogger("ib_insync").addFilter(_NoPortfolioTicks())
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from ibkr_fut.pst_loader import PSTLoader
