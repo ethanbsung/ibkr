@@ -96,7 +96,8 @@ DYN_TARGET_RISK = TARGET_RISK   # 0.20 — same as backtest_dynamic / backtest_e
 # ── IBKR connection ────────────────────────────────────────────────────────────
 IB_HOST         = "127.0.0.1"
 IB_PORT         = 4002
-CLIENT_ID       = 5
+CLIENT_ID       = 5    # daemon / execute mode
+CLIENT_ID_COMPUTE = 6  # compute mode (runs concurrently with daemon)
 CONNECT_TIMEOUT = 5
 MAX_RETRIES     = 3
 RETRY_DELAY     = 10
@@ -646,12 +647,12 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _connect() -> IB | None:
+def _connect(client_id: int = CLIENT_ID) -> IB | None:
     """Connect to IBKR with retries. Returns IB instance or None on failure."""
     ib = IB()
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            ib.connect(IB_HOST, IB_PORT, clientId=CLIENT_ID, timeout=CONNECT_TIMEOUT)
+            ib.connect(IB_HOST, IB_PORT, clientId=client_id, timeout=CONNECT_TIMEOUT)
             ib.sleep(2)
             return ib
         except Exception as e:
@@ -808,7 +809,7 @@ def main():
         print(f"  EWMAC DYNAMIC OPT  [COMPUTE]  |  {today}  |  {mode_str}")
         print("=" * 80)
 
-        ib = _connect()
+        ib = _connect(CLIENT_ID_COMPUTE)
         if ib is None:
             return
         ibcfg = load_ib_config()
