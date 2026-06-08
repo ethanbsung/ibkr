@@ -14,6 +14,6 @@ source "$REPO/venv/bin/activate"
 
 echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') run_execution start (repo=$REPO) ====="
 
-python3 ibkr_fut/live_dynamic.py --mode execute --execute
+python3 ibkr_fut/live_dynamic.py --mode execute  # add --execute when Level 1 data is active
 
 echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') run_execution done ====="
