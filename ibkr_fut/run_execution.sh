@@ -49,7 +49,7 @@ if [ -f "$DAEMON_LOG" ] && [ "$(stat -c%s "$DAEMON_LOG" 2>/dev/null || echo 0)" 
 fi
 
 # ── Start daemon in background (nohup ensures it survives shell exit) ─────────
-nohup env PYTHONUNBUFFERED=1 python3 ibkr_fut/live_dynamic.py --mode daemon --execute >> "$DAEMON_LOG" 2>&1 &
+nohup env PYTHONUNBUFFERED=1 python3 ibkr_fut/live_dynamic.py --mode daemon >> "$DAEMON_LOG" 2>&1 &  # add --execute when market data active
 DAEMON_PID=$!
 echo $DAEMON_PID > "$PIDFILE"
 
