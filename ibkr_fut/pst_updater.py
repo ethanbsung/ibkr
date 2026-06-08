@@ -26,7 +26,7 @@ from ib_insync import IB, Future, Forex, util
 # Config                                                               #
 # ------------------------------------------------------------------ #
 
-_REPO     = os.path.dirname(os.path.abspath(__file__))
+_REPO     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PST_BASE  = os.path.join(_REPO, "Data", "pst", "futures")
 IB_CFG    = os.path.join(_REPO, "Data", "pst", "ib_config")
 IB_HOST   = "127.0.0.1"

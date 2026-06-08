@@ -53,7 +53,8 @@ There are three independent live-trading pipelines, each with its own ledger and
 - **Config:** `paper/portfolio.json` — total capital + per-strategy weights. Editing this file is the only way to reallocate; the underlying ledgers are untouched.
 - **Ledgers:** `paper/ledgers/<strategy_name>/` — `state.json` (resume point), `daily.csv`, `positions.csv`, `trades.csv`.
 
-### 2. Futures EWMAC Dynamic (`ibkr_fut/`)
+### 2. Futures EWMAC Dynamic (`ibkr_fut/`) - THIS IS THE MAIN TRADING SYSTEM AND MAIN FOCUS
+- **Instrument universe** `ibkr_fut/isntrument_universe.py` contains the instruments my system has currently determined are valid to trade. Jumbo universe is not the main universe.
 - **Entry point:** `ibkr_fut/live_dynamic.py` (cron: 6 PM ET weekdays, run via `run_dynamic.sh`)
 - Reads capital from IBKR (port 4002), builds a Carver "Jumbo" universe from PST CSV data, runs joint portfolio optimisation (`dynamic_opt.optimise_positions`), reconciles target vs held, and submits DAY market orders.
 - **Data pipeline:** `ibkr_fut/pst_updater.py` must run before `live_dynamic.py` to pull fresh PST closes.
