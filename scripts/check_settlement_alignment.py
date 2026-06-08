@@ -32,12 +32,9 @@ INSTRUMENTS   = list(UNIVERSE.keys())
 LOOKBACK_DAYS = 21
 THRESHOLD_PCT = 0.10
 
-# Instruments whose PST data is stale / discontinued — skip entirely
-SKIP_INSTRUMENTS = {
-    "BB3M",       # BSBY discontinued, data ends 2024-03-28
-    "MSCIWORLD",  # data ends 2025-12-11, no active IBKR security def
-    "MSCIASIA",   # data ends 2024-12-11, no active IBKR security def
-}
+# Instruments to skip for settlement alignment (no active IBKR contract).
+# BB3M, MSCIWORLD, MSCIASIA were removed from UNIVERSE entirely (dead markets).
+SKIP_INSTRUMENTS: set[str] = set()
 
 # Per-instrument overrides for IBKR contract spec fields missing/wrong in ib_config.
 # Verified by probing qualifyContracts against the live IB Gateway.

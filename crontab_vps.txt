@@ -20,6 +20,9 @@ PATH=/usr/local/bin:/usr/bin:/bin
 0 22 * * 1-5 /home/ethan/ibkr/ibkr_fut/run_dynamic.sh >> /home/ethan/ibkr/ibkr_fut/dynamic_cron.log 2>&1
 5 22 * * 1-5 /home/ethan/ibkr/ibkr_fut/run_execution.sh >> /home/ethan/ibkr/ibkr_fut/execution_cron.log 2>&1
 
+# Data health check — 6:15 PM ET (22:15 UTC EDT) weekdays, after pst_updater completes.
+15 22 * * 1-5 cd /home/ethan/ibkr && source venv/bin/activate && python3 scripts/data_health_check.py >> /home/ethan/ibkr/scripts/data_health.log 2>&1
+
 # Crypto trend paper trading — 6 AM ET (10:00 UTC EDT) daily.
 0 10 * * * /home/ethan/ibkr/paper/run_paper.sh >> /home/ethan/ibkr/paper/paper_cron.log 2>&1
 

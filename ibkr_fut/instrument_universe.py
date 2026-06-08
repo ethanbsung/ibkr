@@ -40,7 +40,7 @@ UNIVERSE: dict[str, str] = {
     "US20":         "Bond",
     "US30":         "Bond",
     "SOFR":         "Bond",    # SOFR 3-month (successor to Eurodollar)
-    "BB3M":         "Bond",    # 3-month T-bill
+    # "BB3M" removed: BSBY rate discontinued 2024-03-28, data will never update
     "FED":          "Bond",    # Fed Funds futures
 
     # ── European Bonds (EUREX) ─────────────────────────────────────────────
@@ -75,8 +75,8 @@ UNIVERSE: dict[str, str] = {
     "SMI":          "Equity",
     "DJSTX-SMALL":  "Equity",
     "EU-DIV30":     "Equity",
-    "ATX":          "Equity",  # Austrian ATX (EUREX)
-    "MSCIWORLD":    "Equity",  # MSCI World Index (EUREX)
+    "ATX":          "Equity",  # Austrian ATX (EUREX) — no data yet, needs bootstrap
+    # "MSCIWORLD" removed: EUREX delisted, no active security def as of 2025-12
     "OMX":          "Equity",  # OMX Helsinki 25 (EUREX)
 
     # ── European Equities (MEFFRV) ────────────────────────────────────────
@@ -99,7 +99,7 @@ UNIVERSE: dict[str, str] = {
     # ── Asian Equities (SGX) ──────────────────────────────────────────────
     "FTSECHINAA":   "Equity",  # FTSE China A50
     "MSCISING":     "Equity",  # MSCI Singapore
-    "MSCIASIA":     "Equity",  # MSCI Asia (EUREX)
+    # "MSCIASIA" removed: EUREX delisted, no active security def as of 2024-12
     "FTSEINDO":     "Equity",  # FTSE Indonesia Index (SGX)
     "FTSEVIET":     "Equity",  # FTSE Vietnam 30 (SGX)
 
