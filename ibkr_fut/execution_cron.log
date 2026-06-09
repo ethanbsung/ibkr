@@ -1,3 +1,7 @@
 ===== 2026-06-08 22:05:02 UTC run_execution start (repo=/home/ethan/ibkr) =====
 2026-06-08 22:05:02: daemon started (PID 204744) → /home/ethan/ibkr/ibkr_fut/daemon_cron.log
 ===== 2026-06-08 22:05:02 UTC run_execution done =====
+===== 2026-06-09 22:15:17 UTC run_execution start (repo=/home/ethan/ibkr) =====
+2026-06-09 22:15:17: stopping previous daemon (PID 208676)
+2026-06-09 22:15:17: daemon started (PID 219879) → /home/ethan/ibkr/ibkr_fut/daemon_cron.log
+===== 2026-06-09 22:15:17 UTC run_execution done =====

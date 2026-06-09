@@ -2263,3 +2263,69 @@ FileNotFoundError: No file for 'BOBL' in adjusted_prices_csv/
 2026-06-09 22:06:08,146 INFO Warning 2158, reqId -1: Sec-def data farm connection is OK:secdefnj
 2026-06-09 22:06:08,147 INFO API connection ready
 2026-06-09 22:06:08,295 INFO Synchronization complete
+2026-06-09 22:16:09,071 INFO Disconnecting from 127.0.0.1:4002, 117 B sent in 8 messages, 17.9 kB received in 380 messages, session time 601 s.
+2026-06-09 22:16:09,072 INFO Disconnecting
+================================================================================
+  EWMAC DYNAMIC OPT  [COMPUTE]  |  2026-06-09  |  DRY-RUN
+================================================================================
+
+  capital $107,830  |  target risk 20%  |  universe 114 instr
+  Instrument selection filter: 60/114 pass
+    contracts=12; vol_risk=0.02M: ['ALUMINIUM']
+    expensive (SR cost): ['BONO', 'CH10', 'CHEESE', 'DJSTX-SMALL', 'EURIBOR', 'FED', 'FTSEINDO', 'FTSEVIET', 'IRON', 'OJ', 'OMX', 'RICE', 'TWD-mini', 'V2X']
+    no price data: ['ATX', 'BTP5']
+    too safe (low vol): ['BOBL', 'BTP3', 'CAD', 'CNH', 'DX', 'GBPEUR', 'JGB', 'KR3', 'SGD', 'SHATZ', 'SOFR', 'US10', 'US2', 'US3', 'US5']
+    vol_risk=0.05M: ['EU-TRAVEL']
+    vol_risk=0.08M: ['BBCOMM']
+    vol_risk=0.11M: ['INR']
+    vol_risk=0.15M: ['OATIES']
+    vol_risk=0.18M: ['NOK', 'R1000']
+    vol_risk=0.24M: ['GAS-LAST']
+    vol_risk=0.26M: ['EU-INSURE']
+    vol_risk=0.27M: ['PLAT', 'SEK']
+    vol_risk=0.31M: ['EU-DIV30']
+    vol_risk=0.34M: ['GAS_US_mini']
+    vol_risk=0.39M: ['EU-AUTO']
+    vol_risk=0.40M: ['IBEX_mini']
+    vol_risk=0.46M: ['EU-UTILS']
+    vol_risk=0.53M: ['EU-HEALTH']
+    vol_risk=0.66M: ['RUBBER']
+    vol_risk=0.69M: ['EU-TECH']
+    vol_risk=0.77M: ['FTSECHINAH']
+    vol_risk=0.83M: ['SILVER']
+    vol_risk=0.89M: ['COPPER']
+    vol_risk=1.13M: ['EU-OIL']
+
+  TRADABLE SET — 59 instruments (instrument_selection filters · fresh PST data ≤ 5d):
+    AEX             AUD             BITCOIN         BRENT-LAST      BTP             
+    BUND            BUXL            CAC             CHF             COCOA           
+    COFFEE          CORN            COTTON2         CRUDE_W_mini    DAX             
+    DOW_mini        ETHEREUM        EU-BASIC        EUR             EURO600         
+    EUROSTX         FEEDCOW         FTSECHINAA      FTSETAIWAN      GASOILINE       
+    GBP             GOLD_micro      HEATOIL         JPY             KOSDAQ          
+    KOSPI           KR10            LEANHOG         LIVECOW         MSCISING        
+    MUMMY           MXP             NASDAQ_micro    NIKKEI          NIKKEI400       
+    NZD             OAT             PALLAD          REDWHEAT        RUSSELL_mini    
+    SMI             SOYBEAN         SOYMEAL         SOYOIL          SP400           
+    SP500_micro     SUGAR11         TOPIX           US10U           US20            
+    US30            VIX             WHEAT           YENEUR          
+
+  Excluded (55):
+    data error (No file for 'ATX' in multiple_prices_csv/): ['ATX']
+    data error (No file for 'BTP5' in multiple_prices_csv/): ['BTP5']
+    filtered (cost/vol/history): ['ALUMINIUM', 'BBCOMM', 'BOBL', 'BONO', 'BTP3', 'CAD', 'CH10', 'CHEESE', 'CNH', 'COPPER', 'DJSTX-SMALL', 'DX', 'EU-AUTO', 'EU-DIV30', 'EU-HEALTH', 'EU-INSURE', 'EU-OIL', 'EU-TECH', 'EU-TRAVEL', 'EU-UTILS', 'EURIBOR', 'FED', 'FTSECHINAH', 'FTSEINDO', 'FTSEVIET', 'GAS-LAST', 'GAS_US_mini', 'GBPEUR', 'IBEX_mini', 'INR', 'IRON', 'JGB', 'KR3', 'NOK', 'OATIES', 'OJ', 'OMX', 'PLAT', 'R1000', 'RICE', 'RUBBER', 'SEK', 'SGD', 'SHATZ', 'SILVER', 'SOFR', 'TWD-mini', 'US10', 'US2', 'US3', 'US5', 'V2X']
+    stale (2026-06-01, 8d old): ['BRE']
+
+  Building universe from PST data…
+  96 instruments with valid signals (lookback 3000d)
+  computing correlation matrix + handcraft weights...
+  building covariance estimator...
+  57/96 instruments tradable (rest held at min=max=current)
+
+  Current positions: flat
+
+  Optimisation as of 2026-06-09  |  IDM 2.5  |  95 live  |  target holds 2  |  gross lev 1.68x
+
+  Snapshot saved → /home/ethan/ibkr/ibkr_fut/targets_snapshot.json
+
+  Compute done. Run --mode execute --execute to place orders.

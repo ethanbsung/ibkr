@@ -1833,3 +1833,31 @@ Make sure IB Gateway / TWS is running on port 4002.
     ACTION: SELL 1 TN 202609 [LMT ALGO]
 [2026-06-09T21:58:02Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
 [2026-06-09T21:58:02Z] Next cycle in 10m…
+
+[2026-06-09T22:08:05Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T22:08:09Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T22:08:09Z] Next cycle in 10m…
+2026-06-09 22:15:17,432 ERROR Peer closed connection.
+[2026-06-09T22:15:17Z] IB disconnected — reconnecting…
+2026-06-09 22:15:17,438 INFO Connecting to 127.0.0.1:4002 with clientId 5...
+2026-06-09 22:15:17,439 INFO Disconnecting
+2026-06-09 22:15:17,439 ERROR API connection failed: ConnectionRefusedError(111, "Connect call failed ('127.0.0.1', 4002)")
+2026-06-09 22:15:17,439 ERROR Make sure API port on TWS/IBG is open
+WARNING: IBKR connect 1/3 failed ([Errno 111] Connect call failed ('127.0.0.1', 4002)) — retry in 10s…
+API connection failed: ConnectionRefusedError(111, "Connect call failed ('127.0.0.1', 4002)")
+Make sure API port on TWS/IBG is open
+WARNING: IBKR connect 1/3 failed ([Errno 111] Connect call failed ('127.0.0.1', 4002)) — retry in 10s…
+API connection failed: ConnectionRefusedError(111, "Connect call failed ('127.0.0.1', 4002)")
+Make sure API port on TWS/IBG is open
+WARNING: IBKR connect 2/3 failed ([Errno 111] Connect call failed ('127.0.0.1', 4002)) — retry in 10s…
+API connection failed: ConnectionRefusedError(111, "Connect call failed ('127.0.0.1', 4002)")
+Make sure API port on TWS/IBG is open
+ERROR: could not connect to IBKR after 3 attempts — [Errno 111] Connect call failed ('127.0.0.1', 4002)
+Make sure IB Gateway / TWS is running on port 4002.
+[2026-06-09T22:15:43Z] ERROR: cannot connect to IBKR — daemon exiting
