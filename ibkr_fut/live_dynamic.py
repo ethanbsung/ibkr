@@ -983,10 +983,12 @@ def run_daemon(args):
         print(f"[{_now()}] Remove ibkr_fut/risk_halt.txt to resume trading — daemon exiting")
         sys.exit(1)
 
+    # Initial connect may land in the gateway's nightly restart window — don't
+    # exit, fall through and let the loop's reconnect logic retry forever.
     ib = _connect()
     if ib is None:
-        print(f"[{_now()}] ERROR: cannot connect to IBKR — daemon exiting")
-        return
+        print(f"[{_now()}] WARNING: initial IBKR connect failed — "
+              f"daemon will keep retrying every cycle")
     ibcfg = load_ib_config()
 
     ledger              = DynLedger()
