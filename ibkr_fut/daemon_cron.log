@@ -365,3 +365,118 @@ WARNING: IBKR connect 2/3 failed ([Errno 111] Connect call failed ('127.0.0.1', 
 ERROR: could not connect to IBKR after 3 attempts — [Errno 111] Connect call failed ('127.0.0.1', 4002)
 Make sure IB Gateway / TWS is running on port 4002.
 [2026-06-08T23:46:46Z] Reconnect failed — sleeping 60s…
+[2026-06-08T23:47:46Z] IB disconnected — reconnecting…
+2026-06-08 23:47:46,041 INFO Connecting to 127.0.0.1:4002 with clientId 5...
+2026-06-08 23:47:46,042 INFO Connected
+2026-06-08 23:47:46,165 INFO Logged on to server version 176
+2026-06-08 23:47:46,310 INFO Warning 2104, reqId -1: Market data farm connection is OK:usfarm
+2026-06-08 23:47:46,310 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:ushmds
+2026-06-08 23:47:46,310 INFO Warning 2158, reqId -1: Sec-def data farm connection is OK:secdefnj
+2026-06-08 23:47:46,310 INFO API connection ready
+2026-06-08 23:47:46,337 INFO position: Position(account='DUA295747', contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', multiplier='2', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, avgCost=0.0)
+2026-06-08 23:47:46,378 INFO position: Position(account='DUA295747', contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', multiplier='5', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, avgCost=0.0)
+2026-06-08 23:47:47,023 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7410.3510742, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-08 23:47:47,034 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29420.5996094, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-08 23:47:47,323 INFO execDetails Execution(execId='0000e1a7.6a39b7fb.01.01', time=datetime.datetime(2026, 6, 8, 19, 33, 54, tzinfo=datetime.timezone.utc), acctNumber='DUA295747', exchange='CME', side='BOT', shares=3.0, price=29460.5, permId=973543714, clientId=99, orderId=4, liquidation=0, cumQty=3.0, avgPrice=29460.5, orderRef='', evRule='', evMultiplier=0.0, modelCode='', lastLiquidity=1)
+2026-06-08 23:47:47,362 INFO execDetails Execution(execId='0000e1a7.6a39b7fc.01.01', time=datetime.datetime(2026, 6, 8, 19, 33, 54, tzinfo=datetime.timezone.utc), acctNumber='DUA295747', exchange='CME', side='BOT', shares=4.0, price=7417.5, permId=973543715, clientId=99, orderId=6, liquidation=0, cumQty=4.0, avgPrice=7417.5, orderRef='', evRule='', evMultiplier=0.0, modelCode='', lastLiquidity=1)
+2026-06-08 23:47:47,362 INFO commissionReport: CommissionReport(execId='0000e1a7.6a39b7fb.01.01', commission=1.86, currency='USD', realizedPNL=4882.28, yield_=0.0, yieldRedemptionDate=0)
+2026-06-08 23:47:47,362 INFO commissionReport: CommissionReport(execId='0000e1a7.6a39b7fc.01.01', commission=2.48, currency='USD', realizedPNL=3155.04, yield_=0.0, yieldRedemptionDate=0)
+2026-06-08 23:47:47,363 INFO Synchronization complete
+
+[2026-06-08T23:47:49Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-08T23:47:49Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-08T23:47:49Z] Next cycle in 10m…
+2026-06-08 23:48:56,268 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7408.5, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-08 23:48:56,269 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29413.83984375, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-08 23:51:56,263 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7407.9199219, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-08 23:51:56,263 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29412.1503906, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-08 23:53:36,588 INFO Warning 2107, reqId -1: HMDS data farm connection is inactive but should be available upon demand.ushmds
+2026-06-08 23:54:56,264 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7405.2871094, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-08 23:54:56,265 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29397.1503906, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+
+[2026-06-08T23:57:49Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-08T23:57:49Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-08T23:57:49Z] Next cycle in 10m…
+2026-06-08 23:57:56,268 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7408.1513672, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-08 23:57:56,268 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29414.5, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-09 00:00:56,277 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7410.25, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:00:56,277 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29433.9003906, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-09 00:03:56,274 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7403.75, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:03:56,277 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29393.80078125, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-09 00:06:56,273 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7398.4326172, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:06:56,273 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29364.5, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+
+[2026-06-09T00:07:49Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T00:07:49Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T00:07:49Z] Next cycle in 10m…
+2026-06-09 00:09:56,277 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7395.5, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:09:56,277 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29346.0996094, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-09 00:12:56,279 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7399.3510742, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:12:56,279 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29369.3339844, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-09 00:15:56,282 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7395.1899414, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:15:56,285 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29349.9003906, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+
+[2026-06-09T00:17:49Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T00:17:49Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T00:17:49Z] Next cycle in 10m…
+2026-06-09 00:18:56,281 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7397.75, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:18:56,281 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29365.5, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-09 00:21:56,284 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7394.89990235, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:21:56,285 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29340.8613281, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-09 00:22:29,624 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:ushmds
+2026-06-09 00:22:36,674 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:euhmds
+2026-06-09 00:22:46,034 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:apachmds
+2026-06-09 00:24:56,288 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7396.32958985, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:24:56,289 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29344.890625, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+
+[2026-06-09T00:27:49Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T00:27:49Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T00:27:49Z] Next cycle in 10m…
+2026-06-09 00:27:56,290 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7397.5, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:27:56,290 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29354.75, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-09 00:30:56,291 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7396.4550781, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:30:56,292 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29347.5, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-09 00:33:56,293 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7391.4199219, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:33:56,294 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29315.6503906, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+2026-06-09 00:36:56,295 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561194, symbol='MES', lastTradeDateOrContractMonth='20260618', right='0', multiplier='5', primaryExchange='CME', currency='USD', localSymbol='MESM6', tradingClass='MES'), position=0.0, marketPrice=7392.86083985, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=3155.04, account='DUA295747')
+2026-06-09 00:36:56,295 INFO updatePortfolio: PortfolioItem(contract=Future(conId=770561201, symbol='MNQ', lastTradeDateOrContractMonth='20260618', right='0', multiplier='2', primaryExchange='CME', currency='USD', localSymbol='MNQM6', tradingClass='MNQ'), position=0.0, marketPrice=29318.5996094, marketValue=0.0, averageCost=0.0, unrealizedPNL=0.0, realizedPNL=4882.28, account='DUA295747')
+
+[2026-06-09T00:37:50Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T00:37:50Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T00:37:50Z] Next cycle in 10m…
