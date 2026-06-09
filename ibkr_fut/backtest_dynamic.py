@@ -640,6 +640,8 @@ def run_snapshot(
     capital: float,
     target_risk: float = TARGET_RISK,
     apply_filter: bool = True,
+    use_costs: bool = False,
+    use_buffering: bool = False,
 ) -> None:
     """
     Print today's ideal and integer positions for a given capital level.
@@ -714,8 +716,8 @@ def run_snapshot(
         cost_per_contract=cpc,
         capital=capital,
         target_risk=target_risk,
-        use_costs=False,   # no prior positions, skip cost penalty for snapshot
-        use_buffering=False,
+        use_costs=use_costs,
+        use_buffering=use_buffering,
         tradable=tradable_mask,
     )
 
@@ -807,6 +809,8 @@ if __name__ == "__main__":
                         help="Print position history over the last 10 years at --capital")
     parser.add_argument("--rolling", action="store_true",
                         help="Use rolling (compounded) capital for position sizing")
+    parser.add_argument("--costs", action="store_true",
+                        help="Enable cost penalty + buffering in snapshot (matches live system)")
     parser.add_argument("--no-costs", action="store_true", help="Disable the cost penalty")
     parser.add_argument("--no-buffering", action="store_true", help="Disable buffering")
     args = parser.parse_args()
@@ -819,7 +823,8 @@ if __name__ == "__main__":
 
     if args.snapshot:
         cap = args.capital or 100_000
-        run_snapshot(instruments, cap, apply_filter=args.filter)
+        run_snapshot(instruments, cap, apply_filter=args.filter,
+                     use_costs=args.costs, use_buffering=args.costs)
     elif args.history:
         cap = args.capital or 100_000
         print(f"Loading {len(instruments)} instruments {label} ...")
