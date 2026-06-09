@@ -1453,3 +1453,141 @@ def test_positions_exact_exchange_match_beats_ambiguity(mock_spec):
 
     assert held == {"BETA": {"202609": -3}}
     assert unknown == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Group 9 — watchdog (heartbeat staleness, halt-file guard, alert suppression)
+# ══════════════════════════════════════════════════════════════════════════════
+
+from pathlib import Path
+
+from ibkr_fut import watchdog
+from ibkr_fut.watchdog import (ALERT_SUPPRESS_SECS, STALE_AFTER_SECS,
+                               check_and_act, heartbeat_age_secs, should_alert)
+
+
+@pytest.fixture
+def wd_dir(tmp_path, monkeypatch):
+    """Point every watchdog path at a temp dir; mock Discord + restart."""
+    monkeypatch.setattr(watchdog, "HEARTBEAT_PATH", tmp_path / "daemon_heartbeat.txt")
+    monkeypatch.setattr(watchdog, "HALT_FILE", tmp_path / "risk_halt.txt")
+    monkeypatch.setattr(watchdog, "ALERT_MARKER", tmp_path / "watchdog_last_alert")
+    discord = MagicMock()
+    monkeypatch.setattr(watchdog, "_send_discord", discord)
+    restart = MagicMock(return_value=True)
+    monkeypatch.setattr(watchdog, "restart_daemon", restart)
+    return tmp_path, discord, restart
+
+
+def _touch_at(path: Path, ts: float):
+    path.write_text("hb\n")
+    os.utime(path, (ts, ts))
+
+
+def test_watchdog_fresh_heartbeat_noop(wd_dir):
+    tmp, discord, restart = wd_dir
+    now = 1_000_000.0
+    _touch_at(watchdog.HEARTBEAT_PATH, now - 60)       # 1 min old
+
+    assert check_and_act(now=now) == "fresh"
+    discord.assert_not_called()
+    restart.assert_not_called()
+
+
+def test_watchdog_stale_heartbeat_restarts(wd_dir):
+    tmp, discord, restart = wd_dir
+    now = 1_000_000.0
+    _touch_at(watchdog.HEARTBEAT_PATH, now - STALE_AFTER_SECS - 60)
+
+    assert check_and_act(now=now) == "restarted"
+    restart.assert_called_once()
+    discord.assert_called_once()
+    assert watchdog.ALERT_MARKER.exists()              # suppression marker set
+
+
+def test_watchdog_missing_heartbeat_restarts(wd_dir):
+    # First deployment / file deleted: treated like stale → alert + restart.
+    tmp, discord, restart = wd_dir
+    assert heartbeat_age_secs(now=1_000_000.0) is None
+
+    assert check_and_act(now=1_000_000.0) == "restarted"
+    restart.assert_called_once()
+    discord.assert_called_once()
+    assert "MISSING" in discord.call_args[0][0]
+
+
+def test_watchdog_halt_file_blocks_restart(wd_dir):
+    # CRITICAL: never resurrect a daemon past the kill switch.
+    tmp, discord, restart = wd_dir
+    now = 1_000_000.0
+    _touch_at(watchdog.HEARTBEAT_PATH, now - STALE_AFTER_SECS - 60)
+    watchdog.HALT_FILE.write_text("circuit breaker tripped\n")
+
+    assert check_and_act(now=now) == "halt_no_restart"
+    restart.assert_not_called()
+    discord.assert_called_once()                       # still alerts
+    assert "risk_halt.txt" in discord.call_args[0][0]
+
+
+def test_watchdog_restart_failure_reported(wd_dir):
+    tmp, discord, restart = wd_dir
+    restart.return_value = False
+
+    assert check_and_act(now=1_000_000.0) == "restart_failed"
+    restart.assert_called_once()
+
+
+def test_watchdog_alert_suppressed_but_restart_retried(wd_dir):
+    # Within the 2 h window: no second Discord ping, but restart still attempted.
+    tmp, discord, restart = wd_dir
+    now = 1_000_000.0
+    _touch_at(watchdog.ALERT_MARKER, now - 600)        # alerted 10 min ago
+    _touch_at(watchdog.HEARTBEAT_PATH, now - STALE_AFTER_SECS - 60)
+
+    assert check_and_act(now=now) == "restarted"
+    discord.assert_not_called()
+    restart.assert_called_once()
+
+
+def test_watchdog_alert_resumes_after_window(wd_dir):
+    tmp, discord, restart = wd_dir
+    now = 1_000_000.0
+    _touch_at(watchdog.ALERT_MARKER, now - ALERT_SUPPRESS_SECS - 60)
+    _touch_at(watchdog.HEARTBEAT_PATH, now - STALE_AFTER_SECS - 60)
+
+    assert should_alert(now=now)
+    assert check_and_act(now=now) == "restarted"
+    discord.assert_called_once()
+
+
+def test_watchdog_halt_alert_also_suppressed(wd_dir):
+    tmp, discord, restart = wd_dir
+    now = 1_000_000.0
+    watchdog.HALT_FILE.write_text("halt\n")
+    _touch_at(watchdog.ALERT_MARKER, now - 600)
+
+    assert check_and_act(now=now) == "halt_no_restart"
+    discord.assert_not_called()
+    restart.assert_not_called()
+
+
+def test_watchdog_boundary_just_under_threshold_is_fresh(wd_dir):
+    tmp, discord, restart = wd_dir
+    now = 1_000_000.0
+    _touch_at(watchdog.HEARTBEAT_PATH, now - (STALE_AFTER_SECS - 1))
+
+    assert check_and_act(now=now) == "fresh"
+    restart.assert_not_called()
+
+
+def test_touch_heartbeat_writes_and_never_raises(tmp_path, monkeypatch):
+    # The daemon-side helper: writes a UTC timestamp; swallows write errors.
+    import ibkr_fut.live_dynamic as ld
+    hb = tmp_path / "daemon_heartbeat.txt"
+    monkeypatch.setattr(ld, "HEARTBEAT_PATH", str(hb))
+    ld._touch_heartbeat()
+    assert hb.exists() and hb.read_text().strip()
+
+    monkeypatch.setattr(ld, "HEARTBEAT_PATH",
+                        str(tmp_path / "no_such_dir" / "hb.txt"))
+    ld._touch_heartbeat()                              # must not raise

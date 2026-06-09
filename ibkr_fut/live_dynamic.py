@@ -127,6 +127,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IB_CONFIG_PATH    = os.path.join(_REPO_ROOT, "Data/pst/ib_config/ib_config_futures.csv")
 SNAPSHOT_PATH     = os.path.join(_REPO_ROOT, "ibkr_fut", "targets_snapshot.json")
 LAST_TARGETS_PATH = os.path.join(_REPO_ROOT, "ibkr_fut", "last_targets.json")
+HEARTBEAT_PATH    = os.path.join(_REPO_ROOT, "ibkr_fut", "daemon_heartbeat.txt")
 
 pst = PSTLoader()
 
@@ -962,6 +963,19 @@ def _connect(client_id: int = CLIENT_ID) -> IB | None:
 # Daemon loop (Carver-style: long-running, market-hours-aware)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _touch_heartbeat():
+    """
+    Liveness signal for ibkr_fut/watchdog.py: write the current UTC timestamp
+    to HEARTBEAT_PATH once per daemon cycle. Crash-proof by design — a failed
+    heartbeat write must never kill the daemon.
+    """
+    try:
+        with open(HEARTBEAT_PATH, "w") as f:
+            f.write(datetime.now(timezone.utc).isoformat() + "\n")
+    except Exception as e:
+        print(f"[{_now()}] WARNING: heartbeat write failed: {e}")
+
+
 def run_daemon(args):
     """
     Long-running daemon that cycles every DAEMON_SLEEP_SECS.
@@ -999,6 +1013,11 @@ def run_daemon(args):
           f"execute={'YES' if args.execute else 'DRY-RUN'})")
 
     while True:
+        # ── Heartbeat: every cycle, including the early-continue paths below
+        #    (no snapshot yet / reconnect failure / stale PST) — the daemon is
+        #    alive in all of those states and the watchdog must not restart it.
+        _touch_heartbeat()
+
         # ── 0. Live kill switch: touch ibkr_fut/risk_halt.txt to stop trading ─
         ok, reason = check_halt_file()
         if not ok:
