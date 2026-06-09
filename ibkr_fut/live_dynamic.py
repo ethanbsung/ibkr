@@ -999,6 +999,14 @@ def run_daemon(args):
           f"execute={'YES' if args.execute else 'DRY-RUN'})")
 
     while True:
+        # ── 0. Live kill switch: touch ibkr_fut/risk_halt.txt to stop trading ─
+        ok, reason = check_halt_file()
+        if not ok:
+            print(f"[{_now()}] [RISK] halt file detected — {reason}")
+            print(f"[{_now()}] Daemon exiting; remove ibkr_fut/risk_halt.txt "
+                  f"and restart to resume trading")
+            sys.exit(1)
+
         # ── 1. Reconnect if needed (must run before snapshot flush uses ib) ───
         if ib is None or not ib.isConnected():
             print(f"[{_now()}] IB disconnected — reconnecting…")
