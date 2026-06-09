@@ -374,8 +374,7 @@ def section_daemon_summary() -> tuple[list[str], list[str]]:
 
         if error_re.search(line) and not any(b in line for b in _BENIGN):
             errors += 1
-            s = line.strip()
-            error_lines.append(s[:120] + ("…" if len(s) > 120 else ""))
+            error_lines.append(line.strip())
 
     mode = "DRY-RUN" if is_dry else "LIVE"
     lines.append(
