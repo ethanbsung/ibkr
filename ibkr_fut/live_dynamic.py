@@ -66,10 +66,11 @@ Daemon (started by run_execution.sh):
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -89,7 +90,6 @@ from ibkr_fut.instrument_universe import UNIVERSE
 from ibkr_fut.backtest_dynamic import _build_universe, get_eligible_set
 from ibkr_fut.backtest_ewmac import TARGET_RISK, IDM_CAP
 from ibkr_fut.dynamic_opt import optimise_positions
-from ibkr_fut.volume_collector import load_cache as load_volume_cache
 from ibkr_fut.algo_execution import pre_trade_checks, algo_exec, is_contract_okay_to_trade
 from ibkr_fut.risk_check import (check_halt_file, check_gross_leverage,
                                  check_order_vol, check_daily_loss)
@@ -103,8 +103,11 @@ DAEMON_SLEEP_SECS = 600   # seconds between daemon cycles (~10 min)
 
 # ── Contract rolling windows ───────────────────────────────────────────────────
 PASSIVE_ROLL_DAYS = 10   # days before roll date: start routing rebalance orders to new month
-SPREAD_ROLL_DAYS  = 3    # days before roll date: force-roll residual via BAG spread order
-SPREAD_PASSIVE_SECS = 60 # seconds to work the spread limit before falling back to MKT
+SPREAD_ROLL_DAYS  = 3    # days before roll date: roll residual via BAG spread order
+FORCE_ROLL_DAYS   = 1    # ≤ this many days to roll date: position MUST leave the
+                         # expiring month — a failed spread limit escalates to MKT
+SPREAD_PASSIVE_SECS = 60 # seconds to work the spread limit before cancelling
+SPREAD_CANCEL_CONFIRM_SECS = 30  # max wait for cancel-ack before abandoning MKT escalation
 
 # ── Strategy parameters (match the backtest you validated) ─────────────────────
 DYN_TARGET_RISK = TARGET_RISK   # 0.20 — same as backtest_dynamic / backtest_ewmac
@@ -163,8 +166,7 @@ def ib_spec(ibcfg: pd.DataFrame, instr: str) -> dict | None:
 # Tradable-set selection — the optimiser's menu
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_tradable_set(capital: float, ibcfg: pd.DataFrame,
-                       verbose: bool = True) -> tuple[set, list]:
+def build_tradable_set(verbose: bool = True) -> tuple[set, list]:
     """
     Decide which Jumbo instruments the optimiser may actually trade today.
 
@@ -176,8 +178,8 @@ def build_tradable_set(capital: float, ibcfg: pd.DataFrame,
     """
     today = pd.Timestamp(date.today())
 
-    # Step 1: instrument_selection filters (cost, too-safe, history).
-    volume_cache = load_volume_cache()
+    # Step 1: instrument_selection filters (cost, too-safe, history; volume
+    # when cached — get_eligible_set loads the volume cache itself).
     eligible = get_eligible_set(UNIVERSE)
 
     # Step 2: freshness check — PST data must be recent enough to trade on.
@@ -350,13 +352,16 @@ def get_positions_by_instr(ib, ibcfg: pd.DataFrame) -> tuple[dict, list]:
     Return ({instr: {YYYYMM: qty}}, unknown) for all held futures.
     Maps IBKR (symbol, exchange) back to a Jumbo PST instrument name.
     """
-    # (symbol, exchange) -> instr, restricted to Jumbo
-    rev = {}
+    # (symbol, exchange) -> instr, restricted to Jumbo. Symbol-only fallback is
+    # used only when exactly one universe instrument carries that IB symbol —
+    # an ambiguous symbol must not silently claim someone else's position.
+    rev, sym_only = {}, {}
     for instr in UNIVERSE:
         spec = ib_spec(ibcfg, instr)
         if spec:
             rev[(spec["symbol"], spec["exchange"])] = instr
-            rev.setdefault((spec["symbol"],), instr)   # symbol-only fallback
+            sym = spec["symbol"]
+            sym_only[sym] = None if sym in sym_only else instr
 
     held, unknown = {}, []
     for pos in ib.positions():
@@ -367,12 +372,13 @@ def get_positions_by_instr(ib, ibcfg: pd.DataFrame) -> tuple[dict, list]:
         if qty == 0:
             continue
         instr = rev.get((c.symbol, c.primaryExchange)) or rev.get((c.symbol, c.exchange)) \
-            or rev.get((c.symbol,))
+            or sym_only.get(c.symbol)
         if instr is None:
             unknown.append((c.symbol, c.exchange, qty))
             continue
         month = (c.lastTradeDateOrContractMonth or "")[:6]
-        held.setdefault(instr, {})[month] = held[instr].get(month, 0) + qty
+        by_month = held.setdefault(instr, {})
+        by_month[month] = by_month.get(month, 0) + qty
     return held, unknown
 
 
@@ -441,7 +447,7 @@ class _Encoder(json.JSONEncoder):
 
 
 def _now() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _load_snapshot_any(path: str) -> dict | None:
@@ -457,7 +463,7 @@ def save_snapshot(path: str, today: str, capital: float,
     """Atomically write compute-phase results to disk."""
     payload = {
         "date":        today,
-        "computed_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "computed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "capital":     capital,
         "targets":     targets,
         "diag":        diag,
@@ -513,17 +519,42 @@ def save_last_targets(path: str, targets: dict, today: str) -> None:
 # Spread roll execution
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _spread_px_ok(px) -> bool:
+    """True if px is a usable calendar-spread quote. Unlike outright prices,
+    spread quotes are legitimately zero or negative; reject only missing values
+    and IB's no-quote sentinels (-1, large negatives)."""
+    if px is None:
+        return False
+    try:
+        f = float(px)
+    except (TypeError, ValueError):
+        return False
+    return not math.isnan(f) and f != -1.0 and f > -1e8
+
+
 def spread_roll_exec(ib, spec: dict, from_month: str, to_month: str, qty: int,
-                     is_long: bool):
+                     is_long: bool, force: bool = False):
     """
     Roll qty contracts from from_month to to_month via a single IBKR BAG calendar
     spread order. Direction depends on position sign:
       is_long=True  → SELL from_month / BUY  to_month  (rolling a long)
       is_long=False → BUY  from_month / SELL to_month  (rolling a short)
 
-    Tries a passive limit at the spread mid-price for SPREAD_PASSIVE_SECS, then
-    cancels and falls back to a market order. Returns (status, filled_qty, avg_price).
-    status is one of: "Filled", "PartiallyFilled", "Unfilled", "Failed".
+    Works a passive limit at the spread's offside price (bid when buying the
+    spread, ask when selling — never paying the spread) for SPREAD_PASSIVE_SECS,
+    then cancels.
+
+    force=False (early in the spread window): a failed/timed-out limit is simply
+    cancelled — the remainder stays in the expiring month and is retried on the
+    next cycle/day.
+    force=True (≤ FORCE_ROLL_DAYS before the roll date): the position MUST leave
+    the expiring month, so after the cancel is CONFIRMED the unfilled remainder
+    is escalated to a market order. Without a confirmed cancel no market order
+    is placed (a still-live limit could double-fill). If no spread quote is
+    available, force goes straight to market; non-force skips.
+
+    Returns (status, filled_qty, avg_price). filled_qty counts fills across the
+    limit and any escalation market order.
     """
     sym      = spec["symbol"]
     exchange = spec["exchange"]
@@ -556,17 +587,21 @@ def spread_roll_exec(ib, spec: dict, from_month: str, to_month: str, qty: int,
     bid, ask = ticker.bid, ticker.ask
     ib.cancelMktData(spread_contract)
 
-    valid_quote = (bid is not None and ask is not None
-                   and bid > -1e8 and ask > -1e8
-                   and bid != 0 and ask != 0)
+    valid_quote = (_spread_px_ok(bid) and _spread_px_ok(ask) and bid <= ask)
     if valid_quote:
-        mid = round((bid + ask) / 2, 4)
-        order = LimitOrder(bag_action, qty, mid, tif="DAY")
-        price_str = f"lmt {mid:.4f}  (bid {bid:.4f} / ask {ask:.4f})"
-    else:
+        # Offside limit, same as algo_exec: bid when buying the spread, ask when
+        # selling — don't pay the spread. Unfilled non-force rolls retry next
+        # daemon cycle; the force path guarantees completion at expiry.
+        limit_px = round(bid if bag_action == "BUY" else ask, 4)
+        order = LimitOrder(bag_action, qty, limit_px, tif="DAY")
+        price_str = f"lmt {limit_px:.4f}  (bid {bid:.4f} / ask {ask:.4f})"
+    elif force:
         order = MarketOrder(bag_action, qty, tif="DAY")
-        mid = 0.0
-        price_str = "MKT (no spread quote)"
+        price_str = "MKT (no spread quote — forced roll)"
+    else:
+        print(f"    SPREAD SKIP: no spread quote for {sym} {from_month}/{to_month} "
+              f"— retry next cycle")
+        return "Unfilled", 0, 0.0
 
     print(f"    SPREAD ROLL {qty} {sym} {from_month}→{to_month}  {price_str}")
     trade = ib.placeOrder(spread_contract, order)
@@ -577,19 +612,30 @@ def spread_roll_exec(ib, spec: dict, from_month: str, to_month: str, qty: int,
 
     limit_filled = 0   # fills kept on the limit when we escalate to market
     if not trade.isDone():
-        # Limit timed out — cancel and escalate to market
+        # Limit timed out — cancel, then (force only) escalate the remainder.
         ib.cancelOrder(trade.order)
-        ib.sleep(2)
-        if not trade.isDone():
-            # Use trade.filled() (sourced from execDetails) rather than
-            # trade.orderStatus.filled (sourced from orderStatus messages) to
-            # avoid over-sizing when a partial fill arrived before the cancel-ack.
-            remaining = qty - int(trade.filled())
-            if remaining > 0:
-                limit_filled = int(trade.filled())
-                mkt = MarketOrder(bag_action, remaining, tif="DAY")
-                trade = ib.placeOrder(spread_contract, mkt)
-                ib.sleep(10)
+        cancel_deadline = time.time() + SPREAD_CANCEL_CONFIRM_SECS
+        while time.time() < cancel_deadline and not trade.isDone():
+            ib.sleep(1)
+
+        if force:
+            if not trade.isDone():
+                # Never place a market order while the limit may still be live.
+                print(f"    SPREAD WARN: cancel unconfirmed for {sym} "
+                      f"{from_month}/{to_month} — NOT escalating to MKT "
+                      f"(double-fill risk); manual check required")
+            else:
+                # Use trade.filled() (sourced from execDetails) rather than
+                # trade.orderStatus.filled (sourced from orderStatus messages) to
+                # avoid over-sizing when a partial fill arrived before the cancel-ack.
+                remaining = qty - int(trade.filled())
+                if remaining > 0:
+                    limit_filled = int(trade.filled())
+                    print(f"    SPREAD ESCALATE → MKT {remaining} {sym} "
+                          f"{from_month}→{to_month}  (forced roll, expiry imminent)")
+                    mkt = MarketOrder(bag_action, remaining, tif="DAY")
+                    trade = ib.placeOrder(spread_contract, mkt)
+                    ib.sleep(10)
 
     status  = trade.orderStatus.status
     filled  = int(trade.orderStatus.filled) + limit_filled
@@ -699,7 +745,8 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                     else:
                         sp_status, sp_filled, _ = spread_roll_exec(
                             ib, spec, current_month, next_month, abs(qty_to_roll),
-                            is_long=qty_to_roll > 0)
+                            is_long=qty_to_roll > 0,
+                            force=days_to_roll <= FORCE_ROLL_DAYS)
                         # Credit fills whatever the final status — a cancelled
                         # limit can still carry partial fills, and ignoring them
                         # would mis-size this cycle's rebalance orders.
@@ -709,8 +756,10 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                             qty_current -= direction * sp_filled
                         # Any remainder stays in current_month; closed directly via algo_exec
                 else:
+                    force_tag = ("  [FORCE — MKT fallback]"
+                                 if days_to_roll <= FORCE_ROLL_DAYS else "")
                     print(f"    [DRY-RUN] SPREAD ROLL {abs(qty_to_roll)} {sym} "
-                          f"{current_month}→{next_month}")
+                          f"{current_month}→{next_month}{force_tag}")
 
         # ── Determine order routing and delta ─────────────────────────────────
         # rebalance_orders: [(month, signed_delta)]. During a roll window a
@@ -1095,7 +1144,7 @@ def main():
         print(f"\n  capital ${capital:,.0f}  |  target risk {args.target_risk:.0%}  |  "
               f"universe {len(UNIVERSE)} instr")
 
-        tradable_set, _ = build_tradable_set(capital, ibcfg)
+        tradable_set, _ = build_tradable_set()
         if not tradable_set:
             print("ERROR: no tradable instruments at this capital — aborting.")
             ib.disconnect()

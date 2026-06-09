@@ -79,7 +79,9 @@ For each instrument in `targets ∪ held`:
      the next month; *reductions* come out of the expiring month first.
    - **Spread window** (0 ≤ days_to_roll ≤ 3): the portion of the expiring-month
      position that must survive is force-rolled via a BAG calendar-spread order
-     (`spread_roll_exec`): passive limit at spread mid for 60 s, then market.
+     (`spread_roll_exec`): passive limit at the spread's offside price (ask when
+     selling the spread / bid when buying) for 60 s per cycle, retried each
+     daemon cycle; escalates to market only when forced (≤ 1 day to roll).
      Contracts being closed close directly in the expiring month (1 crossing, not 2).
    - **Old months** (anything outside the expected set): closed outright.
 4. **Risk gate**: `check_order_vol` on the net *target* (|qty|·mult·price·fx·σ
@@ -128,82 +130,48 @@ the risk gates inside `reconcile_and_execute`, the daemon loop, and
 
 ---
 
-## 8. Issues found in review
+### Weaknesses / design notes (status as of 2026-06-09)
 
-### Bugs
+6. ~~**Symbol-only position fallback can mismap**~~ **FIXED.** The symbol-only
+   fallback now resolves only when exactly one universe instrument carries that
+   IB symbol; ambiguous symbols on an unmatched exchange are reported as
+   unknown positions instead of being silently claimed.
 
-1. **Roll-window reductions can over-sell the expiring month**
-   (`live_dynamic.py:700-713`). During a passive/spread window, a negative
-   `target_delta` is routed entirely to `current_month` whenever
-   `qty_current != 0`, without capping at what that month holds. Example:
-   `qty_current=+1`, `qty_next=+2`, target `0` → delta −3 is all sent to the
-   expiring month, leaving it −2 and the next month +2. The reduction needs to be
-   split across months (close the expiring leg up to `qty_current`, the rest from
-   `next_month`).
+7. ~~**Spread quote validation is fragile**~~ **FIXED.** `_spread_px_ok()`
+   accepts legitimately zero/negative calendar-spread quotes, rejects NaN/None,
+   IB's `-1` no-quote sentinel, and large-negative sentinels, and requires
+   `bid <= ask`.
 
-2. **Partial spread-roll fills lost when the limit is cancelled**
-   (`live_dynamic.py:688-694` + `spread_roll_exec`). ib_insync reports a
-   partially-filled-then-cancelled order with status `"Cancelled"` and
-   `filled > 0`. The caller only credits fills when status is
-   `"Filled"`/`"PartiallyFilled"`, so the cycle's local `qty_current`/`qty_next`
-   accounting ignores contracts that actually rolled, and the subsequent
-   rebalance order in the *same* cycle is sized off stale numbers. (The next
-   daemon cycle self-corrects from fresh positions, but the mis-sized order may
-   already be live.) Fix: act on `filled > 0` regardless of status. Related: when
-   the market-order fallback fires, `trade` is reassigned, so the returned
-   `filled` counts only the market order's fills, dropping any limit-leg partials
-   from the reported total.
+8. **Daemon restarted after midnight refuses the snapshot** — DEFERRED
+   (deliberate safety tradeoff). A correct fix needs trading-calendar awareness
+   (weekends/holidays make "today" the wrong comparison). Runbook note: after a
+   late-night daemon restart, overnight (Eurex) execution is skipped until the
+   next 6 PM compute.
 
-3. **Spread roll bypasses the market-hours and pre-trade checks**
-   (`live_dynamic.py:687`). `spread_roll_exec` is called before `_is_open` and
-   `pre_trade_checks`; only outright orders get those gates. A BAG order can be
-   submitted to a closed exchange (rejected or queued) and has no price-sanity
-   check beyond its own quote-validity test.
+9. **`run_execution.sh` currently runs the daemon in dry-run** — DEFERRED by
+   design: `--execute` is the operator's go-live gate, pending market-data
+   activation.
 
-4. **Risk-gate skip also blocks old-month roll closes**
-   (`live_dynamic.py:771-776`). The comment claims "position-reducing
-   rolls/closes are never blocked", but on a `check_order_vol` breach the
-   `continue` skips the `roll_closes` loop too, stranding risk-*reducing* closes
-   in expired months. The gate should only block the rebalance order.
-
-5. **Zero-quantity market fallback possible in `spread_roll_exec`**
-   (`live_dynamic.py:586`). If the limit fully filled but `isDone()` lags, the
-   fallback places a `MarketOrder(..., qty - filled = 0)`, which IB rejects.
-   Guard with `if qty - int(trade.filled()) > 0`.
-
-### Weaknesses / design notes (not necessarily bugs)
-
-6. **Symbol-only position fallback can mismap** (`live_dynamic.py:359`).
-   `rev.setdefault((spec["symbol"],), instr)` means if two universe instruments
-   share an IB symbol on different exchanges, the first in `UNIVERSE` iteration
-   order silently claims an unmatched position.
-
-7. **Spread quote validation is fragile** (`live_dynamic.py:559-561`).
-   `bid != 0 and ask != 0` rejects legitimately zero-priced calendar spreads
-   (spread prices near zero/negative are normal), forcing a market order; and
-   `bid > -1e8` would admit IB's `-1` "no quote" sentinel if it ever arrives
-   un-NaN'd, producing a nonsense mid.
-
-8. **Daemon restarted after midnight refuses the snapshot**
-   (`live_dynamic.py:957-965`). The `pst_date != today` guard is evaluated on
-   (re)load, so a daemon restart at e.g. 2 AM ET skips all overnight (Eurex)
-   execution until the next 6 PM compute. Deliberate safety tradeoff, but worth
-   knowing during incident recovery.
-
-9. **`run_execution.sh` currently runs the daemon in dry-run** — `--execute` is
-   commented out pending market-data activation. No live orders are being placed
-   by the daemon path today.
-
-10. **`datetime.utcnow()` is deprecated** (`live_dynamic.py:444,460`) — emits
-    DeprecationWarnings under Python 3.12+; use
+10. ~~**`datetime.utcnow()` is deprecated**~~ **FIXED** — now
     `datetime.now(timezone.utc)`.
 
-11. **`build_tradable_set(capital, …)` never uses `capital`** — cosmetic; drop
-    the parameter or apply the intended capital-based filter.
-    
+11. ~~**`build_tradable_set(capital, ibcfg, …)` dead parameters**~~ **FIXED** —
+    signature is now `build_tradable_set(verbose=True)`; the dead local volume
+    cache load was removed too (`get_eligible_set` loads it itself).
 
-### Test gaps worth closing
+12. **`get_positions_by_instr` KeyError on any held position** — **FIXED**
+    (found by the new mapping tests). The original
+    `held.setdefault(instr, {})[month] = held[instr].get(month, 0) + qty`
+    evaluated the right-hand `held[instr]` *before* `setdefault` ran, raising
+    `KeyError` for every first position of an instrument. In daemon mode this
+    surfaced only as a swallowed "ERROR fetching positions" retry loop; in
+    compute mode it would crash. Position reconciliation could never have
+    worked with a non-flat account.
 
-- Passive/spread roll-window routing (would have caught issue 1).
-- `spread_roll_exec` status handling (would have caught issues 2 and 5).
-- The `check_order_vol` gate path inside `reconcile_and_execute` (issue 4).
+### Test gaps (Group 7 added 2026-06-09; 86 tests passing)
+
+Now covered: passive/spread roll-window routing (long and short), spread-roll
+fill crediting and force/no-force escalation semantics, zero-qty and
+unconfirmed-cancel guards, no-quote handling, the `check_order_vol` gate path,
+and `get_positions_by_instr` symbol mapping. Still uncovered: the daemon loop
+and `is_contract_okay_to_trade` parsing.

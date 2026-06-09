@@ -34,6 +34,7 @@ from ibkr_fut.algo_execution import (
 )
 from ibkr_fut.live_dynamic import (
     check_last_targets,
+    get_positions_by_instr,
     load_snapshot,
     reconcile_and_execute,
     save_last_targets,
@@ -1004,10 +1005,30 @@ def test_rne_spread_roll_credits_fills_any_status(
 
     mock_roll.assert_called_once()
     assert mock_roll.call_args.args[4] == 2          # rolled qty
+    assert mock_roll.call_args.kwargs["force"] is False   # d=2 > FORCE_ROLL_DAYS
     assert _exec_orders(mock_exec) == [("202609", "SELL", 1)]
     out = capsys.readouterr().out
     assert "cur=202609:+1" in out                    # fills credited to legs
     assert "nxt=202612:+2" in out
+
+
+@patch("ibkr_fut.live_dynamic.spread_roll_exec")
+@_roll_patches
+def test_rne_spread_roll_forced_when_expiry_imminent(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol,
+    mock_roll
+):
+    # On the last/second-last day (days_to_roll ≤ FORCE_ROLL_DAYS) the spread
+    # roll is called with force=True so a failed limit escalates to market.
+    mock_hold.return_value = ("202609", "202612", 1)
+    mock_roll.return_value = ("Filled", 2, 0.5)
+    held = {"ES": {"202609": 2}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 2}, held, _MOCK_DIAG,
+                          MagicMock(), execute=True)
+
+    mock_roll.assert_called_once()
+    assert mock_roll.call_args.kwargs["force"] is True
 
 
 @patch("ibkr_fut.live_dynamic.spread_roll_exec")
@@ -1056,25 +1077,36 @@ def _spread_ib(ticker_bid=0.5, ticker_ask=0.6):
     return ib
 
 
+def _spread_trade(filled_on_limit, status="Cancelled", confirm_cancel=True,
+                  ib=None):
+    """Limit-trade mock: not done while working; done once cancelled (if
+    confirm_cancel). Wire ib.cancelOrder to flip the done flag."""
+    trade = MagicMock()
+    done = {"v": False}
+    trade.isDone.side_effect = lambda: done["v"]
+    trade.filled.return_value = filled_on_limit
+    trade.orderStatus.status = status
+    trade.orderStatus.filled = filled_on_limit
+    trade.orderStatus.avgFillPrice = 0.55
+    if confirm_cancel and ib is not None:
+        ib.cancelOrder.side_effect = lambda o: done.update(v=True)
+    return trade
+
+
 @patch("ibkr_fut.live_dynamic.qualify")
 @patch("ibkr_fut.live_dynamic.time")
-def test_spread_roll_no_zero_qty_market_fallback(mock_time, mock_qual):
-    # Limit fully filled but isDone() lags the cancel: must NOT place a
-    # zero-quantity market order, and must report the limit's fills.
-    mock_time.time.side_effect = [0.0] + [100.0] * 50   # instantly past deadline
+def test_spread_roll_force_no_zero_qty_market_order(mock_time, mock_qual):
+    # Limit fully filled before the cancel-ack: forced roll must NOT place a
+    # zero-quantity market order, and reports the limit's fills.
+    mock_time.time.side_effect = [0.0] + [100.0] * 50   # instantly past deadlines
     mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
                              MagicMock(conId=2, currency="USD")]
     ib = _spread_ib()
-    trade = MagicMock()
-    trade.isDone.return_value = False
-    trade.filled.return_value = 5
-    trade.orderStatus.status = "Cancelled"
-    trade.orderStatus.filled = 5
-    trade.orderStatus.avgFillPrice = 0.55
+    trade = _spread_trade(filled_on_limit=5, ib=ib)
     ib.placeOrder.return_value = trade
 
     status, filled, _ = spread_roll_exec(ib, _MOCK_SPEC, "202609", "202612",
-                                         5, is_long=True)
+                                         5, is_long=True, force=True)
 
     assert ib.placeOrder.call_count == 1   # limit only, no 0-qty market order
     assert filled == 5
@@ -1082,16 +1114,14 @@ def test_spread_roll_no_zero_qty_market_fallback(mock_time, mock_qual):
 
 @patch("ibkr_fut.live_dynamic.qualify")
 @patch("ibkr_fut.live_dynamic.time")
-def test_spread_roll_market_fallback_accumulates_fills(mock_time, mock_qual):
-    # 2 filled on the limit before cancel, 3 on the fallback market order:
-    # the market order is sized to the remainder and total filled is 5.
+def test_spread_roll_force_escalates_remainder_to_market(mock_time, mock_qual):
+    # Forced roll: 2 filled on the limit before the confirmed cancel, the
+    # remaining 3 go out as a market order; total filled is 5.
     mock_time.time.side_effect = [0.0] + [100.0] * 50
     mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
                              MagicMock(conId=2, currency="USD")]
     ib = _spread_ib()
-    limit_trade = MagicMock()
-    limit_trade.isDone.return_value = False
-    limit_trade.filled.return_value = 2
+    limit_trade = _spread_trade(filled_on_limit=2, ib=ib)
     mkt_trade = MagicMock()
     mkt_trade.orderStatus.status = "Filled"
     mkt_trade.orderStatus.filled = 3
@@ -1099,9 +1129,230 @@ def test_spread_roll_market_fallback_accumulates_fills(mock_time, mock_qual):
     ib.placeOrder.side_effect = [limit_trade, mkt_trade]
 
     status, filled, _ = spread_roll_exec(ib, _MOCK_SPEC, "202609", "202612",
-                                         5, is_long=True)
+                                         5, is_long=True, force=True)
 
     assert filled == 5
     assert status == "Filled"
     mkt_order = ib.placeOrder.call_args_list[1].args[1]
     assert mkt_order.totalQuantity == 3   # remainder only
+    assert mkt_order.orderType == "MKT"
+
+
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_no_force_no_market_escalation(mock_time, mock_qual):
+    # Early in the spread window (force=False): a timed-out limit is cancelled
+    # and the remainder is left for the next cycle — never a market order.
+    mock_time.time.side_effect = [0.0] + [100.0] * 50
+    mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
+                             MagicMock(conId=2, currency="USD")]
+    ib = _spread_ib()
+    trade = _spread_trade(filled_on_limit=2, ib=ib)
+    ib.placeOrder.return_value = trade
+
+    status, filled, _ = spread_roll_exec(ib, _MOCK_SPEC, "202609", "202612",
+                                         5, is_long=True, force=False)
+
+    assert ib.placeOrder.call_count == 1
+    assert filled == 2
+    assert status == "Cancelled"
+
+
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_force_unconfirmed_cancel_no_market(mock_time, mock_qual, capsys):
+    # Cancel never confirms: even a forced roll must not market-order on top of
+    # a possibly-live limit. Advancing clock so the cancel-wait loop times out.
+    clock = {"t": 0.0}
+    def _tick():
+        clock["t"] += 20.0
+        return clock["t"]
+    mock_time.time.side_effect = _tick
+    mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
+                             MagicMock(conId=2, currency="USD")]
+    ib = _spread_ib()
+    trade = _spread_trade(filled_on_limit=2, confirm_cancel=False, ib=ib)
+    ib.placeOrder.return_value = trade
+
+    status, filled, _ = spread_roll_exec(ib, _MOCK_SPEC, "202609", "202612",
+                                         5, is_long=True, force=True)
+
+    assert ib.placeOrder.call_count == 1
+    assert filled == 2
+    assert "NOT escalating" in capsys.readouterr().out
+
+
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_no_quote_skips_unless_forced(mock_time, mock_qual):
+    mock_time.time.side_effect = [0.0] + [100.0] * 50
+    mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
+                             MagicMock(conId=2, currency="USD")]
+    ib = _spread_ib(float("nan"), float("nan"))   # no spread quote
+
+    status, filled, _ = spread_roll_exec(ib, _MOCK_SPEC, "202609", "202612",
+                                         5, is_long=True, force=False)
+
+    assert status == "Unfilled"
+    assert filled == 0
+    ib.placeOrder.assert_not_called()
+
+
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_no_quote_forced_goes_market(mock_time, mock_qual):
+    mock_time.time.side_effect = [0.0] + [100.0] * 50
+    mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
+                             MagicMock(conId=2, currency="USD")]
+    ib = _spread_ib(float("nan"), float("nan"))
+    trade = MagicMock()
+    trade.isDone.return_value = True   # market order fills immediately
+    trade.orderStatus.status = "Filled"
+    trade.orderStatus.filled = 5
+    trade.orderStatus.avgFillPrice = 0.60
+    ib.placeOrder.return_value = trade
+
+    status, filled, _ = spread_roll_exec(ib, _MOCK_SPEC, "202609", "202612",
+                                         5, is_long=True, force=True)
+
+    assert status == "Filled"
+    assert filled == 5
+    order = ib.placeOrder.call_args.args[1]
+    assert order.orderType == "MKT"
+
+
+def _filled_spread_trade(avg_price):
+    trade = MagicMock()
+    trade.isDone.return_value = True
+    trade.orderStatus.status = "Filled"
+    trade.orderStatus.filled = 5
+    trade.orderStatus.avgFillPrice = avg_price
+    return trade
+
+
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_long_sells_at_offside_ask(mock_time, mock_qual):
+    # Calendar spreads legitimately trade at zero/negative prices, and rolling a
+    # long SELLs the spread: the passive limit sits at the ask (offside), so we
+    # never pay the spread.
+    mock_time.time.side_effect = [0.0] + [100.0] * 50
+    mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
+                             MagicMock(conId=2, currency="USD")]
+    ib = _spread_ib(-0.6, -0.4)
+    ib.placeOrder.return_value = _filled_spread_trade(-0.4)
+
+    spread_roll_exec(ib, _MOCK_SPEC, "202609", "202612", 5,
+                     is_long=True, force=False)
+
+    order = ib.placeOrder.call_args.args[1]
+    assert order.orderType == "LMT"
+    assert order.action == "SELL"
+    assert order.lmtPrice == -0.4
+
+
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_short_buys_at_offside_bid(mock_time, mock_qual):
+    # Rolling a short BUYs the spread: passive limit at the bid.
+    mock_time.time.side_effect = [0.0] + [100.0] * 50
+    mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
+                             MagicMock(conId=2, currency="USD")]
+    ib = _spread_ib(-0.6, -0.4)
+    ib.placeOrder.return_value = _filled_spread_trade(-0.6)
+
+    spread_roll_exec(ib, _MOCK_SPEC, "202609", "202612", 5,
+                     is_long=False, force=False)
+
+    order = ib.placeOrder.call_args.args[1]
+    assert order.orderType == "LMT"
+    assert order.action == "BUY"
+    assert order.lmtPrice == -0.6
+
+
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_minus_one_sentinel_is_no_quote(mock_time, mock_qual):
+    # IB's -1 "no quote" sentinel must not be mistaken for a price.
+    mock_time.time.side_effect = [0.0] + [100.0] * 50
+    mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
+                             MagicMock(conId=2, currency="USD")]
+    ib = _spread_ib(-1.0, -1.0)
+
+    status, filled, _ = spread_roll_exec(ib, _MOCK_SPEC, "202609", "202612",
+                                         5, is_long=True, force=False)
+
+    assert status == "Unfilled"
+    ib.placeOrder.assert_not_called()
+
+
+# ── get_positions_by_instr symbol mapping ─────────────────────────────────────
+
+def _pos(symbol, exchange, qty, month="20260918"):
+    p = MagicMock()
+    p.contract.secType = "FUT"
+    p.contract.symbol = symbol
+    p.contract.exchange = exchange
+    p.contract.primaryExchange = ""
+    p.contract.lastTradeDateOrContractMonth = month
+    p.position = qty
+    return p
+
+
+def _spec_for(symbol, exchange):
+    return {"symbol": symbol, "exchange": exchange, "currency": "USD",
+            "multiplier": 5.0, "trading_class": "", "price_magnifier": 1.0}
+
+
+@patch("ibkr_fut.live_dynamic.ib_spec")
+@patch("ibkr_fut.live_dynamic.UNIVERSE", {"ALPHA": "equity", "BETA": "bond"})
+def test_positions_symbol_fallback_unique(mock_spec):
+    # Exchange doesn't match the config, but only one instrument carries the
+    # symbol → symbol-only fallback maps it.
+    mock_spec.side_effect = lambda cfg, instr: {
+        "ALPHA": _spec_for("MES", "CME"),
+        "BETA":  _spec_for("ZB", "CBOT"),
+    }[instr]
+    ib = MagicMock()
+    ib.positions.return_value = [_pos("MES", "GLOBEX", 2)]
+
+    held, unknown = get_positions_by_instr(ib, MagicMock())
+
+    assert held == {"ALPHA": {"202609": 2}}
+    assert unknown == []
+
+
+@patch("ibkr_fut.live_dynamic.ib_spec")
+@patch("ibkr_fut.live_dynamic.UNIVERSE", {"ALPHA": "equity", "BETA": "bond"})
+def test_positions_symbol_fallback_ambiguous_goes_unknown(mock_spec):
+    # Two instruments share the IB symbol on different exchanges: a position on
+    # an unmatched exchange must be reported unknown, not silently claimed by
+    # whichever instrument came first.
+    mock_spec.side_effect = lambda cfg, instr: {
+        "ALPHA": _spec_for("FUT", "EUREX"),
+        "BETA":  _spec_for("FUT", "LIFFE"),
+    }[instr]
+    ib = MagicMock()
+    ib.positions.return_value = [_pos("FUT", "SGX", 1)]
+
+    held, unknown = get_positions_by_instr(ib, MagicMock())
+
+    assert held == {}
+    assert unknown == [("FUT", "SGX", 1)]
+
+
+@patch("ibkr_fut.live_dynamic.ib_spec")
+@patch("ibkr_fut.live_dynamic.UNIVERSE", {"ALPHA": "equity", "BETA": "bond"})
+def test_positions_exact_exchange_match_beats_ambiguity(mock_spec):
+    # A (symbol, exchange) match still resolves even when the symbol is shared.
+    mock_spec.side_effect = lambda cfg, instr: {
+        "ALPHA": _spec_for("FUT", "EUREX"),
+        "BETA":  _spec_for("FUT", "LIFFE"),
+    }[instr]
+    ib = MagicMock()
+    ib.positions.return_value = [_pos("FUT", "LIFFE", -3)]
+
+    held, unknown = get_positions_by_instr(ib, MagicMock())
+
+    assert held == {"BETA": {"202609": -3}}
+    assert unknown == []
