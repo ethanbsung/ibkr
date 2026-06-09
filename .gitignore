@@ -60,6 +60,7 @@ ES/positions.json
 portfolio_state.json
 ibkr_fut/targets_snapshot.json
 ibkr_fut/last_targets.json
+ibkr_fut/risk_halt.txt
 
 trading_strategies_20250707_170759.csv
 trading_strategies_20250707_170759.json

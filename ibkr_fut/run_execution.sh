@@ -21,6 +21,15 @@ echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') run_execution start (repo=$REPO) ===
 
 PIDFILE=/tmp/live_dynamic_daemon.pid
 DAEMON_LOG="$REPO/ibkr_fut/daemon_cron.log"
+HALT_FILE="$REPO/ibkr_fut/risk_halt.txt"
+
+# ── Risk circuit breaker: refuse to start while halt file exists ──────────────
+if [ -f "$HALT_FILE" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S'): [RISK] halt file present — refusing to start daemon"
+    echo "  $(cat "$HALT_FILE")"
+    echo "  Remove $HALT_FILE to resume trading."
+    exit 1
+fi
 
 # ── Stop existing daemon before starting a fresh one ──────────────────────────
 if [ -f "$PIDFILE" ]; then

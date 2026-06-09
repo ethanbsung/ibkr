@@ -91,6 +91,8 @@ from ibkr_fut.backtest_ewmac import TARGET_RISK, IDM_CAP
 from ibkr_fut.dynamic_opt import optimise_positions
 from ibkr_fut.volume_collector import load_cache as load_volume_cache
 from ibkr_fut.algo_execution import pre_trade_checks, algo_exec, is_contract_okay_to_trade
+from ibkr_fut.risk_check import (check_halt_file, check_gross_leverage,
+                                 check_order_vol, check_daily_loss)
 from paper.dyn_ledger import DynLedger
 
 # ── Tradable-set filter ────────────────────────────────────────────────────────
@@ -310,7 +312,8 @@ def compute_targets(uni: dict, capital: float, current_positions: dict,
                 "n_ideal":   float(N_unrounded[k]),
                 "raw_price": float(rl[k]),
                 "mult":      float(ml[k]),
-                "sigma":     float(sl[k]),   # annualised vol fraction; used for price-divergence check
+                "fx":        float(fl[k]),    # local→USD; USD notional = mult*price*fx
+                "sigma":     float(sl[k]),    # annualised vol fraction; used for price-divergence check
             }
 
     # Held instruments that aren't live today: hold them (don't blind-trade).
@@ -490,7 +493,7 @@ def save_last_targets(path: str, targets: dict, today: str) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
-                          skip_unchanged: bool = False):
+                          skip_unchanged: bool = False, capital: float = 0.0):
     """
     For each instrument with a target or current holding, roll out of old months and
     move the hold-month position to the target. Prints the plan; places orders via
@@ -531,7 +534,10 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
         fc      = d.get("forecast")
         n_ideal = d.get("n_ideal")
         sigma   = d.get("sigma", 0.20)
-        sig_px  = (d.get("raw_price") / pm) if d.get("raw_price") else None
+        raw_px  = d.get("raw_price")
+        fx      = d.get("fx", 1.0)
+        dmult   = d.get("mult")
+        sig_px  = (raw_px / pm) if raw_px else None
 
         # Build orders: roll-close old months, then move target month to `desired`.
         roll_closes = [("SELL" if q > 0 else "BUY", abs(q), m)
@@ -576,6 +582,18 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
             print(f"    SKIPPED — open order already exists for {sym}")
             skipped.append(sym)
             continue
+
+        # ── Risk gate: reject pathologically-sized TARGET positions ───────────
+        # Sanity check on the net target (not order delta), on the same USD basis
+        # as sizing (mult*price*fx). Evaluating the target — not each order —
+        # means position-reducing rolls/closes are never blocked, and a misconfig
+        # (blown-up forecast, wrong multiplier) halts only that instrument.
+        if desired != 0 and raw_px and dmult:
+            ok, reason = check_order_vol(desired, dmult, raw_px, fx, sigma, capital)
+            if not ok:
+                print(f"    [RISK] SKIP {sym}: target {desired:+d} — {reason}")
+                skipped.append(f"{sym} (risk: {reason})")
+                continue
 
         # ── Execute roll closes first ─────────────────────────────────────────
         for act, q, m in roll_closes:
@@ -704,6 +722,12 @@ def run_daemon(args):
     Instruments whose market is closed are printed as DEFERRED and retried next
     cycle. The daemon runs until killed; run_execution.sh manages the PID file.
     """
+    ok, reason = check_halt_file()
+    if not ok:
+        print(f"[{_now()}] [RISK] halt file present — {reason}")
+        print(f"[{_now()}] Remove ibkr_fut/risk_halt.txt to resume trading — daemon exiting")
+        sys.exit(1)
+
     ib = _connect()
     if ib is None:
         print(f"[{_now()}] ERROR: cannot connect to IBKR — daemon exiting")
@@ -771,11 +795,27 @@ def run_daemon(args):
             time.sleep(60)
             continue
 
-        # ── 4. Execute cycle ──────────────────────────────────────────────────
+        # ── 4. Risk gates ─────────────────────────────────────────────────────
+        if args.execute:
+            ok, reason = check_gross_leverage(meta.get("gross_lev", 0.0))
+            if not ok:
+                print(f"[{_now()}] [RISK] leverage breach — {reason} — skipping cycle")
+                try:
+                    ib.sleep(DAEMON_SLEEP_SECS)   # pump IB event loop, not plain time.sleep
+                except Exception:
+                    ib = None
+                continue
+
+            ok, reason = check_daily_loss(ib, capital)
+            if not ok:
+                print(f"[{_now()}] [RISK] CIRCUIT BREAKER — {reason} — halting daemon")
+                sys.exit(1)
+
+        # ── 5. Execute cycle ──────────────────────────────────────────────────
         print(f"\n[{_now()}] {'─'*60}")
         placed, skipped, dry_run = reconcile_and_execute(
             ib, ibcfg, targets, held, diag, ledger,
-            execute=args.execute, skip_unchanged=True)
+            execute=args.execute, skip_unchanged=True, capital=capital)
 
         market_closed = sum(1 for s in skipped if "market closed" in s)
         other_skips   = len(skipped) - market_closed
@@ -790,7 +830,7 @@ def run_daemon(args):
         if args.execute:
             save_last_targets(LAST_TARGETS_PATH, targets, snap["date"])
 
-        # ── 5. Sleep until next cycle ─────────────────────────────────────────
+        # ── 6. Sleep until next cycle ─────────────────────────────────────────
         print(f"[{_now()}] Next cycle in {DAEMON_SLEEP_SECS // 60}m…")
         try:
             ib.sleep(DAEMON_SLEEP_SECS)
@@ -931,7 +971,8 @@ def main():
         ledger = DynLedger()
         print("\n" + "-" * 80)
         placed, skipped, dry_run = reconcile_and_execute(
-            ib, ibcfg, targets, held, diag, ledger, execute=args.execute)
+            ib, ibcfg, targets, held, diag, ledger, execute=args.execute,
+            capital=capital)
 
         save_last_targets(LAST_TARGETS_PATH, targets, today)
 
