@@ -1639,3 +1639,177 @@ Make sure IB Gateway / TWS is running on port 4002.
     ACTION: SELL 1 TN 202609 [LMT ALGO]
 [2026-06-09T18:48:00Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
 [2026-06-09T18:48:00Z] Next cycle in 10m…
+
+[2026-06-09T18:58:00Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T18:58:00Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T18:58:00Z] Next cycle in 10m…
+
+[2026-06-09T19:08:00Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T19:08:00Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T19:08:00Z] Next cycle in 10m…
+
+[2026-06-09T19:18:01Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T19:18:01Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T19:18:01Z] Next cycle in 10m…
+
+[2026-06-09T19:28:01Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T19:28:01Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T19:28:01Z] Next cycle in 10m…
+
+[2026-06-09T19:38:01Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T19:38:01Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T19:38:01Z] Next cycle in 10m…
+
+[2026-06-09T19:48:01Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T19:48:01Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T19:48:01Z] Next cycle in 10m…
+
+[2026-06-09T19:58:01Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T19:58:01Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T19:58:01Z] Next cycle in 10m…
+
+[2026-06-09T20:08:01Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T20:08:01Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T20:08:01Z] Next cycle in 10m…
+
+[2026-06-09T20:18:01Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T20:18:01Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T20:18:01Z] Next cycle in 10m…
+
+[2026-06-09T20:28:01Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T20:28:01Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T20:28:01Z] Next cycle in 10m…
+2026-06-09 20:31:32,927 INFO Warning 2105, reqId -1: HMDS data farm connection is broken:apachmds
+2026-06-09 20:31:34,314 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:apachmds
+2026-06-09 20:32:17,954 INFO Warning 2105, reqId -1: HMDS data farm connection is broken:apachmds
+2026-06-09 20:32:19,384 INFO Warning 2106, reqId -1: HMDS data farm connection is OK:apachmds
+
+[2026-06-09T20:38:01Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T20:38:01Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T20:38:01Z] Next cycle in 10m…
+
+[2026-06-09T20:48:02Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T20:48:02Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T20:48:02Z] Next cycle in 10m…
+
+[2026-06-09T20:58:02Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T20:58:02Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T20:58:02Z] Next cycle in 10m…
+
+[2026-06-09T21:08:02Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T21:08:02Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T21:08:02Z] Next cycle in 10m…
+
+[2026-06-09T21:18:02Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T21:18:02Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T21:18:02Z] Next cycle in 10m…
+
+[2026-06-09T21:28:02Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T21:28:02Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T21:28:02Z] Next cycle in 10m…
+
+[2026-06-09T21:38:02Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T21:38:02Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T21:38:02Z] Next cycle in 10m…

@@ -232,3 +232,78 @@ Querying Alpaca asset info for 71 symbols…
 
 Non-shortable (16): ['BWX', 'EIDO', 'EWG', 'EWH', 'EWI', 'EWQ', 'EWU', 'FXE', 'FXY', 'HYD', 'IYT', 'MUB', 'USO', 'VTEB', 'XBI', 'XRT']
 Saved → Data/etf/etf_shortability.json
+Querying Alpaca asset info for 71 symbols…
+  AMLP    shortable=True  etb=True
+  BITO    shortable=True  etb=True
+  BNDX    shortable=True  etb=True
+  BWX     shortable=False  etb=False  ← NOT SHORTABLE
+  CALF    shortable=True  etb=True
+  COWZ    shortable=True  etb=True
+  DBA     shortable=True  etb=True
+  ECH     shortable=True  etb=True
+  EIDO    shortable=False  etb=False  ← NOT SHORTABLE
+  EWA     shortable=True  etb=True
+  EWC     shortable=True  etb=True
+  EWG     shortable=False  etb=False  ← NOT SHORTABLE
+  EWH     shortable=False  etb=False  ← NOT SHORTABLE
+  EWI     shortable=False  etb=False  ← NOT SHORTABLE
+  EWJ     shortable=True  etb=True
+  EWL     shortable=True  etb=True
+  EWP     shortable=True  etb=True
+  EWQ     shortable=False  etb=False  ← NOT SHORTABLE
+  EWT     shortable=True  etb=True
+  EWU     shortable=False  etb=False  ← NOT SHORTABLE
+  EWW     shortable=True  etb=True
+  EWY     shortable=True  etb=True
+  EWZ     shortable=True  etb=True
+  FLOT    shortable=True  etb=True
+  FXE     shortable=False  etb=False  ← NOT SHORTABLE
+  FXI     shortable=True  etb=True
+  FXY     shortable=True  etb=True
+  GLD     shortable=True  etb=True
+  HDV     shortable=True  etb=True
+  HYD     shortable=False  etb=False  ← NOT SHORTABLE
+  IAGG    shortable=False  etb=False  ← NOT SHORTABLE
+  IBB     shortable=True  etb=True
+  IEF     shortable=True  etb=True
+  INDA    shortable=True  etb=True
+  ITA     shortable=True  etb=True
+  IWM     shortable=True  etb=True
+  IYT     shortable=False  etb=False  ← NOT SHORTABLE
+  KRE     shortable=True  etb=True
+  LQD     shortable=True  etb=True
+  MTUM    shortable=True  etb=True
+  MUB     shortable=False  etb=False  ← NOT SHORTABLE
+  OIH     shortable=True  etb=True
+  PDBC    shortable=True  etb=True
+  QQQ     shortable=True  etb=True
+  SLV     shortable=True  etb=True
+  SMH     shortable=True  etb=True
+  SPY     shortable=True  etb=True
+  TIP     shortable=True  etb=True
+  TLT     shortable=True  etb=True
+  UNG     shortable=True  etb=True
+  USMV    shortable=True  etb=True
+  USO     shortable=False  etb=False  ← NOT SHORTABLE
+  UUP     shortable=True  etb=True
+  UVXY    shortable=False  etb=False  ← NOT SHORTABLE
+  VCIT    shortable=True  etb=True
+  VLUE    shortable=True  etb=True
+  VTEB    shortable=False  etb=False  ← NOT SHORTABLE
+  VTV     shortable=True  etb=True
+  XBI     shortable=False  etb=False  ← NOT SHORTABLE
+  XHB     shortable=True  etb=True
+  XLB     shortable=True  etb=True
+  XLC     shortable=True  etb=True
+  XLE     shortable=True  etb=True
+  XLF     shortable=True  etb=True
+  XLI     shortable=True  etb=True
+  XLP     shortable=True  etb=True
+  XLU     shortable=True  etb=True
+  XLV     shortable=True  etb=True
+  XLY     shortable=True  etb=True
+  XOP     shortable=True  etb=True
+  XRT     shortable=False  etb=False  ← NOT SHORTABLE
+
+Non-shortable (17): ['BWX', 'EIDO', 'EWG', 'EWH', 'EWI', 'EWQ', 'EWU', 'FXE', 'HYD', 'IAGG', 'IYT', 'MUB', 'USO', 'UVXY', 'VTEB', 'XBI', 'XRT']
+Saved → Data/etf/etf_shortability.json

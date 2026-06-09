@@ -618,3 +618,139 @@ OSError: ALPACA_API_KEY and ALPACA_SECRET_KEY must be set in .env
     2026-06-08  SPY     sell    -0.2799 sh @ $  739.25  slip -2.6 bps  spread 0.4 bps
 
   Done. Ledger: Data/live/trading.db
+  Shortability: 17 non-shortable symbols loaded: ['BWX', 'EIDO', 'EWG', 'EWH', 'EWI', 'EWQ', 'EWU', 'FXE', 'HYD', 'IAGG', 'IYT', 'MUB', 'USO', 'UVXY', 'VTEB', 'XBI', 'XRT']
+
+====================================================================
+  ETF LIVE TRADING  2026-06-09  LIVE
+  Alpaca equity: $5,022.51
+  Strategies: ['ewmac']
+====================================================================
+
+── EWMAC  capital=$5,023 ──
+  Fetching live prices for 71 tickers…
+  Got prices for 71/71 tickers
+  Generating signals…
+  Signals: 71 non-zero  (47 long, 24 short)
+  Gross long  $   +5,270.04
+  Gross short $   -4,272.73
+  Gross total $    9,542.77  (1.90x equity)
+  ⚠ Leverage cap applied: positions scaled to 56.8% (cap 1.9x)
+  Closing 6 names dropped from universe: ['BIL', 'SGOV', 'SHY', 'VCSH', 'VGSH', 'VTIP']
+
+  Executing orders …
+  SKIP BWX: not shortable on Alpaca (signal=-343)
+  SKIP EIDO: not shortable on Alpaca (signal=-27)
+  SKIP EWG: not shortable on Alpaca (signal=-5)
+  SKIP EWH: not shortable on Alpaca (signal=-33)
+  SKIP FXE: not shortable on Alpaca (signal=-387)
+  SKIP UVXY: not shortable on Alpaca (signal=-194)
+  CLOSE SHY: removed from universe, unwinding +0.0563 sh
+  CLOSE VTIP: removed from universe, unwinding +0.0000 sh
+  CLOSE VGSH: removed from universe, unwinding +0.0603 sh
+  CLOSE SGOV: removed from universe, unwinding +0.9391 sh
+  CLOSE BIL: removed from universe, unwinding +0.0033 sh
+  CLOSE VCSH: removed from universe, unwinding +0.0000 sh
+  SUBMIT AMLP   sell $5.52
+  SUBMIT BITO   sell 6 sh
+  SUBMIT COWZ   sell $24.90
+  SUBMIT DBA    sell 3 sh
+  SUBMIT EWJ    sell $10.29
+  SUBMIT FLOT   buy  $47.24
+  SUBMIT FXY    sell 3 sh
+  SUBMIT GLD    sell 1 sh
+  SUBMIT HDV    buy  $19.41
+  SUBMIT IAGG   buy  $32.42
+  SUBMIT IEF    buy  1 sh
+  SUBMIT LQD    buy  $51.71
+  SUBMIT MTUM   sell $14.41
+  SUBMIT PDBC   sell $81.07
+  SUBMIT QQQ    sell $50.24
+  SUBMIT SLV    sell 1 sh
+  SUBMIT SPY    sell $50.98
+  ERROR submit TLT sell: {"available":"0.541794396","code":40310000,"existing_qty":"0.541794396","held_for_orders":"0","message":"insufficient qty available for order (requested: 1, available: 0.541794396)","symbol":"TLT"}
+  ERROR submit UNG sell: {"available":"0.600207195","code":40310000,"existing_qty":"0.600207195","held_for_orders":"0","message":"insufficient qty available for order (requested: 5, available: 0.600207195)","symbol":"UNG"}
+  SUBMIT USMV   sell $12.68
+  SUBMIT USO    sell $28.94
+  SUBMIT VCIT   sell $48.86
+  SUBMIT VLUE   sell $16.22
+  SUBMIT VTEB   buy  $69.15
+  SUBMIT XHB    buy  $7.39
+  SUBMIT XLB    sell $9.70
+  SUBMIT XLE    sell $5.03
+  SUBMIT XLI    buy  $7.34
+  SUBMIT XLP    buy  $9.95
+  SUBMIT XLV    buy  $6.71
+  SUBMIT XOP    sell $5.23
+  Placed 29 orders
+  FILL AMLP   sell   -0.1057 sh  @ $   52.23  ($5.52)
+  FILL BITO   sell   -6.0000 sh  @ $    8.43  (6 sh)
+  FILL COWZ   sell   -0.3915 sh  @ $   63.60  ($24.90)
+  FILL DBA    sell   -3.0000 sh  @ $   26.28  (3 sh)
+  FILL EWJ    sell   -0.1131 sh  @ $   90.95  ($10.29)
+  FILL FLOT   buy     0.9270 sh  @ $   50.95  ($47.24)
+  FILL FXY    sell   -3.0000 sh  @ $   57.21  (3 sh)
+  FILL GLD    sell   -1.0000 sh  @ $  390.89  (1 sh)
+  FILL HDV    buy     0.7050 sh  @ $   27.52  ($19.41)
+  FILL IAGG   buy     0.6463 sh  @ $   50.15  ($32.42)
+  FILL IEF    buy     1.0000 sh  @ $   93.79  (1 sh)
+  FILL LQD    buy     0.4768 sh  @ $  108.43  ($51.71)
+  FILL MTUM   sell   -0.0464 sh  @ $  310.69  ($14.41)
+  FILL PDBC   sell   -4.6586 sh  @ $   17.40  ($81.07)
+  FILL QQQ    sell   -0.0711 sh  @ $  706.32  ($50.24)
+  FILL SLV    sell   -1.0000 sh  @ $   59.00  (1 sh)
+  FILL SPY    sell   -0.0692 sh  @ $  736.33  ($50.98)
+  FILL USMV   sell   -0.1328 sh  @ $   95.48  ($12.68)
+  FILL USO    sell   -0.2197 sh  @ $  131.74  ($28.94)
+  FILL VCIT   sell   -0.5951 sh  @ $   82.10  ($48.86)
+  FILL VLUE   sell   -0.0837 sh  @ $  193.78  ($16.22)
+  FILL VTEB   buy     1.3730 sh  @ $   50.36  ($69.15)
+  FILL XHB    buy     0.0691 sh  @ $  106.82  ($7.39)
+  FILL XLB    sell   -0.1913 sh  @ $   50.71  ($9.70)
+  FILL XLE    sell   -0.0877 sh  @ $   57.34  ($5.03)
+  FILL XLI    buy     0.0418 sh  @ $  175.53  ($7.34)
+  FILL XLP    buy     0.1182 sh  @ $   84.11  ($9.95)
+  FILL XLV    buy     0.0433 sh  @ $  154.59  ($6.71)
+  FILL XOP    sell   -0.0319 sh  @ $  163.96  ($5.23)
+  Placed 29 orders
+  Paper book updated: paper/ledgers/etf_ewmac
+
+====================================================================
+  LIVE LEDGER  —  EWMAC  (last 30 days)
+====================================================================
+  P&L summary (last 5 days):
+    Equity P&L          $    +22.51  [authoritative]
+    MTM P&L (diag)      $     +3.78
+    Spread cost (diag)  $    151.21
+    Realized vol              6.7%  (annualized, from equity)
+    Alpaca equity (NAV)  $5,022.51  [authoritative]
+
+  Current positions (top 15 by value):
+    UUP        31.4058 sh  @ $   28.01  = $    879.83  daily P&L $   -0.40
+    HYD        16.1132 sh  @ $   51.33  = $    827.17  daily P&L $   +0.89
+    VTEB       11.3777 sh  @ $   50.35  = $    572.93  daily P&L $   +0.50
+    FLOT        9.2284 sh  @ $   50.94  = $    470.14  daily P&L $   +0.08
+    MUB         4.2811 sh  @ $  107.05  = $    458.29  daily P&L $   +0.43
+    VTV         1.0177 sh  @ $  213.26  = $    217.03  daily P&L $   +0.69
+    IAGG        3.7682 sh  @ $   50.15  = $    188.97  daily P&L $   +0.23
+    SPY         0.2444 sh  @ $  736.29  = $    179.97  daily P&L $   -0.87
+    PDBC        7.1607 sh  @ $   17.40  = $    124.60  daily P&L $   -2.37
+    HDV         4.2374 sh  @ $   27.51  = $    116.57  daily P&L $   +0.42
+    QQQ         0.1617 sh  @ $  706.58  = $    114.26  daily P&L $   -2.16
+    IWM         0.3931 sh  @ $  284.70  = $    111.92  daily P&L $   +0.21
+    USO         0.8317 sh  @ $  131.73  = $    109.55  daily P&L $   -3.71
+    BNDX        2.0629 sh  @ $   47.99  = $     99.01  daily P&L $   +0.09
+    SGOV        0.9391 sh  @ $  100.47  = $     94.35  daily P&L $   +0.00
+
+  Recent fills:
+    2026-06-09  XOP     sell    -0.0319 sh @ $  163.96  slip +6.3 bps  spread 3.7 bps
+    2026-06-09  XLV     buy      0.0433 sh @ $  154.59  slip +5.4 bps  spread 1.3 bps
+    2026-06-09  XLP     buy      0.1182 sh @ $   84.11  slip -1.4 bps  spread 1.2 bps
+    2026-06-09  XLI     buy      0.0418 sh @ $  175.53  slip +4.9 bps  spread 1.1 bps
+    2026-06-09  XLE     sell    -0.0877 sh @ $   57.34  slip +1.4 bps  spread 1.7 bps
+    2026-06-09  XLB     sell    -0.1913 sh @ $   50.71  slip -1.4 bps  spread 2.0 bps
+    2026-06-09  XHB     buy      0.0691 sh @ $  106.82  slip +2.2 bps  spread 8.4 bps
+    2026-06-09  VTEB    buy      1.3730 sh @ $   50.36  slip +0.6 bps  spread 2.0 bps
+    2026-06-09  VLUE    sell    -0.0837 sh @ $  193.78  slip -0.5 bps  spread 3.1 bps
+    2026-06-09  VCIT    sell    -0.5951 sh @ $   82.10  slip +0.4 bps  spread 1.2 bps
+
+  Done. Ledger: Data/live/trading.db
