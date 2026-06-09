@@ -399,7 +399,8 @@ def send_discord(text: str) -> None:
         data = json.dumps({"content": f"```\n{chunk}\n```"}).encode()
         req  = urllib.request.Request(
             DISCORD_WEBHOOK_URL, data=data,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "DiscordBot (private, 1.0)"},
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             if resp.status not in (200, 204):
