@@ -1,0 +1,35 @@
+[Trading] ⚠ Tue 2026-06-09  (7 warnings)
+
+
+CRON HEALTH
+  pst_updater     ✓  2026-06-08 22:45 UTC
+  compute         ✓  2026-06-08 22:58 UTC
+  daemon          ✓  2026-06-09 04:27 UTC  (32 cycles in 24h)
+  etf_daily       ✓  2026-06-08 19:55 UTC
+  crypto_paper    ✓  2026-06-08 15:46 UTC
+
+DATA HEALTH
+  Prices: 112/114 current  (0 stale  2 missing)
+  ⚠  MISSING adj   ATX
+  ⚠  MISSING adj   BTP5
+  ⚠  MISSING RC    ATX
+  ⚠  MISSING RC    BTP5
+
+FUTURES POSITIONS
+  Snapshot: 2026-06-08  [source: live]
+  Target:   KR10=-1  US10U=-1
+  Held:     KR10=+0  ← MISMATCH  US10U=+0  ← MISMATCH
+
+P&L SUMMARY (last 5 trading days)
+  Strategy                Today    5d cumul    NAV / equity
+  ------------------------------------------------------------
+  ibkr_dynamic       (no history)
+  etf_ewmac              -0.49%      +0.29%  NAV 1.0029
+  crypto_trend           +0.00%      -0.09%  NAV 0.9991
+  crypto_carry           -0.23%      -0.17%  NAV 0.9936
+
+DAEMON LOG (last 24 h)
+  36 cycles (LIVE)  ·  0 placed  ·  0 deferred  ·  1 errors
+    2026-06-08 23:08:54,335 ERROR Error 200, reqId 3: No security definition has been found for the request, contract: Futur
+
+Send error: HTTP Error 403: Forbidden
