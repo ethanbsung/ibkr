@@ -2,7 +2,7 @@
 """
 scripts/daily_report.py
 
-Daily monitoring report for the trading system. Emails a summary covering:
+Daily monitoring report for the trading system. Sends a Telegram message covering:
   - Cron health (did each pipeline run in the expected window?)
   - PST data health (staleness, carry, roll calendars)
   - Futures positions (targets vs live IBKR, with CSV fallback)
@@ -10,17 +10,16 @@ Daily monitoring report for the trading system. Emails a summary covering:
   - Daemon log summary (cycles, orders placed, errors)
 
 Schedule: 7 AM ET (11:00 UTC) weekdays.
-Delivery: Gmail SMTP — set GMAIL_USER, GMAIL_APP_PASSWORD, REPORT_TO in .env.
+Delivery: Telegram bot — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env.
 """
 
 import importlib.util
 import json
 import os
 import re
-import smtplib
 import sys
+import urllib.request
 from datetime import datetime, timedelta, timezone
-from email.mime.text import MIMEText
 from pathlib import Path
 
 import pandas as pd
@@ -31,12 +30,17 @@ HERE = Path(__file__).parent
 REPO = HERE.parent
 sys.path.insert(0, str(REPO))
 
-# Load .env using the repo's own loader (no python-dotenv dependency)
-from etf.live._env import load_dotenv
-load_dotenv(str(REPO / ".env"))
-GMAIL_USER         = os.environ.get("GMAIL_USER", "")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
-REPORT_TO          = os.environ.get("REPORT_TO", GMAIL_USER)
+# Load .env (KEY=VALUE lines) into os.environ without overwriting existing vars
+_env_path = REPO / ".env"
+if _env_path.exists():
+    for _line in _env_path.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            if not os.environ.get(_k.strip()):
+                os.environ[_k.strip()] = _v.strip().strip('"').strip("'")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 UTC = timezone.utc
 
@@ -334,9 +338,12 @@ def section_daemon_summary() -> tuple[list[str], list[str]]:
         r"\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z\] Cycle done \(DRY-RUN\): (\d+) checked"
     )
     ts_re    = re.compile(r"\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z\]")
-    # Only count actual ERROR/CRITICAL lines; exclude routine ib_insync reconnect noise
+    # Exclude routine noise: reconnects, mkt data sub errors, brief gateway outage
+    # Error 354 = no mkt data subscription; Error 300 = cascade cancel after 354
     _BENIGN = ("Peer closed connection", "Disconnecting", "Connection lost",
-               "Not connected", "socket", "ConnectionRefusedError")
+               "Not connected", "ConnectionRefusedError", "TimeoutError",
+               "Make sure API port", "could not connect to IBKR after",
+               "Error 354,", "Error 300,")
     error_re = re.compile(r"\b(ERROR|CRITICAL)\b")
 
     cycles = placed = deferred = errors = 0
@@ -368,7 +375,7 @@ def section_daemon_summary() -> tuple[list[str], list[str]]:
 
         if error_re.search(line) and not any(b in line for b in _BENIGN):
             errors += 1
-            error_lines.append(line.strip()[-120:])
+            error_lines.append(line.strip()[:120])
 
     mode = "DRY-RUN" if is_dry else "LIVE"
     lines.append(
@@ -384,16 +391,16 @@ def section_daemon_summary() -> tuple[list[str], list[str]]:
     return lines, warnings
 
 
-# ── Email ─────────────────────────────────────────────────────────────────────
+# ── Telegram ──────────────────────────────────────────────────────────────────
 
-def send_email(subject: str, body: str) -> None:
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"]    = GMAIL_USER
-    msg["To"]      = REPORT_TO
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
-        s.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        s.send_message(msg)
+def send_telegram(text: str) -> None:
+    url  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": text}).encode()
+    req  = urllib.request.Request(url, data=data,
+                                  headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"Telegram API returned {resp.status}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -421,25 +428,25 @@ def main():
         all_lines.extend(sec_lines)
         all_warnings.extend(sec_warns)
 
-    body    = "\n".join(all_lines) + "\n"
-    status  = "⚠" if all_warnings else "✓"
-    subject = f"[Trading] {status} Daily Report  {day_str}"
+    status = "⚠" if all_warnings else "✓"
+    header = f"[Trading] {status} {day_str}"
     if all_warnings:
-        subject += f"  ({len(all_warnings)} warning{'s' if len(all_warnings) != 1 else ''})"
+        header += f"  ({len(all_warnings)} warning{'s' if len(all_warnings) != 1 else ''})"
+    body = header + "\n\n" + "\n".join(all_lines[1:])  # skip duplicate date line
 
     print(body)
 
-    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        print("[report] GMAIL_USER / GMAIL_APP_PASSWORD not set — email skipped")
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[report] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — skipped")
         return
 
     try:
-        send_email(subject, body)
-        print(f"[report] Email sent → {REPORT_TO}")
+        send_telegram(body)
+        print("[report] Telegram message sent")
     except Exception as e:
         fallback = HERE / "daily_report_fallback.txt"
-        fallback.write_text(f"Subject: {subject}\n\n{body}\n\nSend error: {e}\n")
-        print(f"[report] Email failed ({e}) — written to {fallback}")
+        fallback.write_text(body + f"\n\nSend error: {e}\n")
+        print(f"[report] Telegram failed ({e}) — written to {fallback}")
         sys.exit(1)
 
 
