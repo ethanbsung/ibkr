@@ -73,7 +73,7 @@ from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
-from ib_insync import IB, Future, Order
+from ib_insync import IB, Future, Order, Bag, ComboLeg, LimitOrder, MarketOrder
 
 # ib_insync streams portfolio price ticks every ~3 min at INFO level; filter them
 # out while keeping fill confirmations (execDetails, commissionReport) and errors.
@@ -100,6 +100,11 @@ FRESH_DAYS = 5   # PST data must be no more than this many calendar days old
 
 # ── Daemon execution ───────────────────────────────────────────────────────────
 DAEMON_SLEEP_SECS = 600   # seconds between daemon cycles (~10 min)
+
+# ── Contract rolling windows ───────────────────────────────────────────────────
+PASSIVE_ROLL_DAYS = 10   # days before roll date: start routing rebalance orders to new month
+SPREAD_ROLL_DAYS  = 3    # days before roll date: force-roll residual via BAG spread order
+SPREAD_PASSIVE_SECS = 60 # seconds to work the spread limit before falling back to MKT
 
 # ── Strategy parameters (match the backtest you validated) ─────────────────────
 DYN_TARGET_RISK = TARGET_RISK   # 0.20 — same as backtest_dynamic / backtest_ewmac
@@ -371,16 +376,32 @@ def get_positions_by_instr(ib, ibcfg: pd.DataFrame) -> tuple[dict, list]:
     return held, unknown
 
 
-def hold_contract_month(instr: str) -> str | None:
-    """Contract month (YYYYMM) to hold today, from the maintained roll calendar."""
+def get_roll_info(instr: str) -> tuple[str | None, str | None, int]:
+    """
+    Returns (current_month, next_month, days_to_roll).
+
+    current_month : YYYYMM to hold today
+    next_month    : YYYYMM to roll into at the upcoming roll date (None if no future roll)
+    days_to_roll  : calendar days until the roll date (DATE_TIME row); 9999 if no upcoming roll
+
+    Roll calendar row semantics: DATE_TIME is the last day to hold current_contract.
+    The day after DATE_TIME, the following row's current_contract becomes active.
+    """
     try:
         rc = pst.roll_calendar(instr)
     except FileNotFoundError:
-        return None
+        return None, None, 9999
     today = pd.Timestamp(date.today())
     fut = rc[rc.index.normalize() >= today]
-    row = fut.iloc[0] if not fut.empty else rc.iloc[-1]
-    return str(int(row["current_contract"]))[:6]
+    if fut.empty:
+        row = rc.iloc[-1]
+        return str(int(row["current_contract"]))[:6], None, 9999
+    row = fut.iloc[0]
+    current = str(int(row["current_contract"]))[:6]
+    nxt_raw = row.get("next_contract")
+    nxt     = str(int(nxt_raw))[:6] if pd.notna(nxt_raw) else None
+    days    = (row.name.normalize() - today).days
+    return current, nxt, days
 
 
 def qualify(ib, spec: dict, month: str):
@@ -489,6 +510,95 @@ def save_last_targets(path: str, targets: dict, today: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Spread roll execution
+# ══════════════════════════════════════════════════════════════════════════════
+
+def spread_roll_exec(ib, spec: dict, from_month: str, to_month: str, qty: int,
+                     is_long: bool):
+    """
+    Roll qty contracts from from_month to to_month via a single IBKR BAG calendar
+    spread order. Direction depends on position sign:
+      is_long=True  → SELL from_month / BUY  to_month  (rolling a long)
+      is_long=False → BUY  from_month / SELL to_month  (rolling a short)
+
+    Tries a passive limit at the spread mid-price for SPREAD_PASSIVE_SECS, then
+    cancels and falls back to a market order. Returns (status, filled_qty, avg_price).
+    status is one of: "Filled", "PartiallyFilled", "Unfilled", "Failed".
+    """
+    sym      = spec["symbol"]
+    exchange = spec["exchange"]
+
+    # Direction: a long position is rolled by SELLing the spread (sell near, buy far);
+    # a short position requires the opposite (buy near, sell far).
+    bag_action  = "SELL" if is_long else "BUY"
+    from_action = "SELL" if is_long else "BUY"
+    to_action   = "BUY"  if is_long else "SELL"
+
+    c_from = qualify(ib, spec, from_month)
+    c_to   = qualify(ib, spec, to_month)
+    if c_from is None or c_to is None:
+        print(f"    SPREAD FAIL: could not qualify {sym} {from_month}/{to_month}")
+        return "Failed", 0, 0.0
+
+    spread_contract = Bag(
+        symbol=sym,
+        currency=c_from.currency,
+        exchange=exchange,
+        comboLegs=[
+            ComboLeg(conId=c_from.conId, ratio=1, action=from_action, exchange=exchange),
+            ComboLeg(conId=c_to.conId,   ratio=1, action=to_action,   exchange=exchange),
+        ],
+    )
+
+    # Request spread market data (bid/ask on the calendar spread itself)
+    ticker = ib.reqMktData(spread_contract, "", False, False)
+    ib.sleep(5)
+    bid, ask = ticker.bid, ticker.ask
+    ib.cancelMktData(spread_contract)
+
+    valid_quote = (bid is not None and ask is not None
+                   and bid > -1e8 and ask > -1e8
+                   and bid != 0 and ask != 0)
+    if valid_quote:
+        mid = round((bid + ask) / 2, 4)
+        order = LimitOrder(bag_action, qty, mid, tif="DAY")
+        price_str = f"lmt {mid:.4f}  (bid {bid:.4f} / ask {ask:.4f})"
+    else:
+        order = MarketOrder(bag_action, qty, tif="DAY")
+        mid = 0.0
+        price_str = "MKT (no spread quote)"
+
+    print(f"    SPREAD ROLL {qty} {sym} {from_month}→{to_month}  {price_str}")
+    trade = ib.placeOrder(spread_contract, order)
+
+    deadline = time.time() + SPREAD_PASSIVE_SECS
+    while time.time() < deadline and not trade.isDone():
+        ib.sleep(1)
+
+    limit_filled = 0   # fills kept on the limit when we escalate to market
+    if not trade.isDone():
+        # Limit timed out — cancel and escalate to market
+        ib.cancelOrder(trade.order)
+        ib.sleep(2)
+        if not trade.isDone():
+            # Use trade.filled() (sourced from execDetails) rather than
+            # trade.orderStatus.filled (sourced from orderStatus messages) to
+            # avoid over-sizing when a partial fill arrived before the cancel-ack.
+            remaining = qty - int(trade.filled())
+            if remaining > 0:
+                limit_filled = int(trade.filled())
+                mkt = MarketOrder(bag_action, remaining, tif="DAY")
+                trade = ib.placeOrder(spread_contract, mkt)
+                ib.sleep(10)
+
+    status  = trade.orderStatus.status
+    filled  = int(trade.orderStatus.filled) + limit_filled
+    avg_px  = trade.orderStatus.avgFillPrice or 0.0
+    print(f"    SPREAD → {status}  filled {filled}/{qty}  avg {avg_px:.4f}")
+    return status, filled, avg_px
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Reconcile + execute
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -518,16 +628,39 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
         pm  = spec["price_magnifier"]
         ibmult = 1.0   # updated from qualified contract below
 
-        target_month = hold_contract_month(instr)
-        if target_month is None:
+        # ── Determine roll phase ──────────────────────────────────────────────
+        current_month, next_month, days_to_roll = get_roll_info(instr)
+        if current_month is None:
             print(f"  {instr} ({sym}): no roll calendar — skipping")
             continue
 
+        # Guard all order placement (spread roll AND rebalance) behind the pending
+        # check. Placing a spread BAG order while a prior-cycle limit is still live
+        # would create conflicting orders on the same leg.
+        if execute and sym in pending:
+            print(f"  {instr} ({sym}): SKIPPED — pending order exists for {sym}")
+            skipped.append(sym)
+            continue
+
+        in_passive = (next_month is not None
+                      and SPREAD_ROLL_DAYS < days_to_roll <= PASSIVE_ROLL_DAYS)
+        in_spread  = (next_month is not None
+                      and 0 <= days_to_roll <= SPREAD_ROLL_DAYS)
+
+        # Months expected in the portfolio during a roll window (not "old")
+        expected_months = {current_month}
+        if in_passive or in_spread:
+            expected_months.add(next_month)
+
         pos_by_month = held.get(instr, {})
-        qty_target   = pos_by_month.get(target_month, 0)
+        qty_current  = pos_by_month.get(current_month, 0)
+        # Only track qty_next during a roll window; outside it next_month is not in
+        # expected_months and would also appear in old_months, double-counting net_held.
+        qty_next     = (pos_by_month.get(next_month, 0)
+                        if (next_month and (in_passive or in_spread)) else 0)
         old_months   = {m: q for m, q in pos_by_month.items()
-                        if m != target_month and q != 0}
-        net_held     = qty_target + sum(old_months.values())
+                        if m not in expected_months and q != 0}
+        net_held     = qty_current + qty_next + sum(old_months.values())
         desired      = int(targets.get(instr, net_held))
 
         d = diag.get(instr, {})
@@ -539,61 +672,134 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
         dmult   = d.get("mult")
         sig_px  = (raw_px / pm) if raw_px else None
 
-        # Build orders: roll-close old months, then move target month to `desired`.
+        # ── SPREAD PHASE: roll only the portion that must survive into next month ──
+        # Passive rolling (routing rebalance orders to the right leg) is always
+        # preferred. The spread roll only moves contracts that would otherwise be
+        # stranded in the expiring month. Contracts being closed can close directly
+        # in current_month — that is cheaper (1 crossing vs 2).
+        #
+        # qty_to_roll = how much of qty_current actually needs to move:
+        #   = desired position in next_month, minus what is already there,
+        #     capped to what we actually hold in current_month.
+        if in_spread and qty_current != 0:
+            if qty_current > 0:
+                qty_to_roll = max(0, min(qty_current, desired - qty_next))
+            else:
+                qty_to_roll = min(0, max(qty_current, desired - qty_next))
+
+            if qty_to_roll != 0:
+                if execute:
+                    c_near = qualify(ib, spec, current_month)
+                    if c_near is None:
+                        print(f"    WARNING: could not qualify {sym} {current_month} "
+                              f"— skip spread roll")
+                    elif not _is_open(c_near):
+                        print(f"    DEFERRED — {sym} spread roll, market closed")
+                        skipped.append(f"{sym} roll (market closed)")
+                    else:
+                        sp_status, sp_filled, _ = spread_roll_exec(
+                            ib, spec, current_month, next_month, abs(qty_to_roll),
+                            is_long=qty_to_roll > 0)
+                        # Credit fills whatever the final status — a cancelled
+                        # limit can still carry partial fills, and ignoring them
+                        # would mis-size this cycle's rebalance orders.
+                        if sp_filled > 0:
+                            direction = 1 if qty_to_roll > 0 else -1
+                            qty_next    += direction * sp_filled
+                            qty_current -= direction * sp_filled
+                        # Any remainder stays in current_month; closed directly via algo_exec
+                else:
+                    print(f"    [DRY-RUN] SPREAD ROLL {abs(qty_to_roll)} {sym} "
+                          f"{current_month}→{next_month}")
+
+        # ── Determine order routing and delta ─────────────────────────────────
+        # rebalance_orders: [(month, signed_delta)]. During a roll window a
+        # position-reducing delta closes the expiring leg first but never past
+        # zero — the remainder comes out of the incoming month. Adds always go
+        # to the incoming month.
+        rebalance_orders: list[tuple[str, int]] = []
+        if in_passive or in_spread:
+            total_held   = qty_current + qty_next
+            target_delta = desired - total_held
+            if target_delta != 0:
+                if qty_current != 0 and target_delta * qty_current < 0:
+                    take = min(abs(target_delta), abs(qty_current))
+                    from_current = take if target_delta > 0 else -take
+                    rebalance_orders.append((current_month, from_current))
+                    rest = target_delta - from_current
+                    if rest != 0:
+                        rebalance_orders.append((next_month, rest))
+                else:
+                    rebalance_orders.append((next_month, target_delta))
+        else:
+            target_delta = desired - qty_current
+            if target_delta != 0:
+                rebalance_orders.append((current_month, target_delta))
+
         roll_closes = [("SELL" if q > 0 else "BUY", abs(q), m)
                        for m, q in old_months.items()]
-        target_delta = desired - qty_target
 
-        if target_delta == 0 and not roll_closes:
+        if not rebalance_orders and not roll_closes:
             if not skip_unchanged:
-                fc_s = f"fcast {fc:+.1f}" if fc is not None else "fcast n/a"
-                ni_s = f"ideal {n_ideal:+.2f}" if n_ideal is not None else ""
-                print(f"\n  {instr:<14} {sym:<6} {target_month}  | held {net_held:+d} → "
-                      f"target {desired:+d}  ({fc_s} {ni_s})")
-                print("    (no change)")
+                if in_passive or in_spread:
+                    roll_tag = (f"PASSIVE d={days_to_roll}" if in_passive
+                                else f"SPREAD d={days_to_roll}")
+                    print(f"\n  {instr:<14} {sym:<6} [{roll_tag}] "
+                          f"cur={current_month}:{qty_current:+d}  "
+                          f"nxt={next_month}:{qty_next:+d}  (no change)")
+                else:
+                    fc_s = f"fcast {fc:+.1f}" if fc is not None else "fcast n/a"
+                    ni_s = f"ideal {n_ideal:+.2f}" if n_ideal is not None else ""
+                    print(f"\n  {instr:<14} {sym:<6} {current_month}  | held {net_held:+d} → "
+                          f"target {desired:+d}  ({fc_s} {ni_s})")
+                    print("    (no change)")
             continue
 
         fc_s = f"fcast {fc:+.1f}" if fc is not None else "fcast n/a"
         ni_s = f"ideal {n_ideal:+.2f}" if n_ideal is not None else ""
-        print(f"\n  {instr:<14} {sym:<6} {target_month}  | held {net_held:+d} → "
-              f"target {desired:+d}  ({fc_s} {ni_s})")
+        if in_passive or in_spread:
+            roll_tag = (f"PASSIVE d={days_to_roll}" if in_passive
+                        else f"SPREAD d={days_to_roll}")
+            print(f"\n  {instr:<14} {sym:<6} [{roll_tag}] "
+                  f"cur={current_month}:{qty_current:+d}  nxt={next_month}:{qty_next:+d} "
+                  f"→ target {desired:+d}  ({fc_s} {ni_s})")
+        else:
+            print(f"\n  {instr:<14} {sym:<6} {current_month}  | held {net_held:+d} → "
+                  f"target {desired:+d}  ({fc_s} {ni_s})")
         if old_months:
             det = "  ".join(f"{m}:{q:+d}" for m, q in sorted(old_months.items()))
             print(f"    ⚠ ROLL — other months: {det}")
 
-        if target_delta > 0:
-            print(f"    ACTION: BUY  {target_delta} {sym} {target_month} [LMT ALGO]")
-        elif target_delta < 0:
-            print(f"    ACTION: SELL {-target_delta} {sym} {target_month} [LMT ALGO]")
+        for om, delta in rebalance_orders:
+            act_label = "BUY " if delta > 0 else "SELL"
+            print(f"    ACTION: {act_label} {abs(delta)} {sym} {om} [LMT ALGO]")
         for act, q, m in roll_closes:
             print(f"    ACTION: {act} {q} {sym} {m} [ROLL CLOSE LMT ALGO]")
 
         if not execute:
-            c = qualify(ib, spec, target_month)
+            qm = rebalance_orders[0][0] if rebalance_orders else current_month
+            c = qualify(ib, spec, qm)
             if c:
                 print(f"    qualify OK → {c.localSymbol}  conId={c.conId}  "
                       f"mult={c.multiplier}  {c.currency}")
             else:
-                print(f"    WARNING: could not qualify {sym} {target_month}")
+                print(f"    WARNING: could not qualify {sym} {qm}")
             dry_run.append(sym)
-            continue
-
-        if sym in pending:
-            print(f"    SKIPPED — open order already exists for {sym}")
-            skipped.append(sym)
             continue
 
         # ── Risk gate: reject pathologically-sized TARGET positions ───────────
         # Sanity check on the net target (not order delta), on the same USD basis
-        # as sizing (mult*price*fx). Evaluating the target — not each order —
-        # means position-reducing rolls/closes are never blocked, and a misconfig
-        # (blown-up forecast, wrong multiplier) halts only that instrument.
+        # as sizing (mult*price*fx). A breach blocks only the rebalance orders —
+        # old-month roll closes are risk-reducing and always execute — so a
+        # misconfig (blown-up forecast, wrong multiplier) halts only that
+        # instrument's new trading.
+        risk_ok = True
         if desired != 0 and raw_px and dmult:
             ok, reason = check_order_vol(desired, dmult, raw_px, fx, sigma, capital)
             if not ok:
-                print(f"    [RISK] SKIP {sym}: target {desired:+d} — {reason}")
+                print(f"    [RISK] SKIP {sym} rebalance: target {desired:+d} — {reason}")
                 skipped.append(f"{sym} (risk: {reason})")
-                continue
+                risk_ok = False
 
         # ── Execute roll closes first ─────────────────────────────────────────
         for act, q, m in roll_closes:
@@ -636,22 +842,22 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
 
             placed.append((f"ROLL {act} {q} {sym} {m}", result.status, result.order_id))
 
-        # ── Execute target-month move ─────────────────────────────────────────
-        if target_delta != 0:
-            act = "BUY" if target_delta > 0 else "SELL"
-            q   = abs(target_delta)
-            c   = qualify(ib, spec, target_month)
+        # ── Execute rebalance orders (blocked on a risk-gate breach) ──────────
+        for om, delta in (rebalance_orders if risk_ok else []):
+            act = "BUY" if delta > 0 else "SELL"
+            q   = abs(delta)
+            c   = qualify(ib, spec, om)
             if c is None:
-                print(f"    WARNING: could not qualify {sym} {target_month} — skip")
+                print(f"    WARNING: could not qualify {sym} {om} — skip")
                 skipped.append(f"{sym} (qualify failed)")
             elif not _is_open(c):
-                print(f"    DEFERRED — {sym} {target_month} market closed")
+                print(f"    DEFERRED — {sym} {om} market closed")
                 skipped.append(f"{sym} (market closed)")
             else:
                 ibmult = float(c.multiplier) if c.multiplier else 1.0
                 ok, reason, ticker = pre_trade_checks(ib, c, sig_px, sigma, q)
                 if not ok:
-                    print(f"    SKIP pre-trade [{sym} {target_month}]: {reason}")
+                    print(f"    SKIP pre-trade [{sym} {om}]: {reason}")
                     skipped.append(f"{sym} (pre-trade: {reason})")
                 else:
                     result = algo_exec(ib, c, act, q, ticker)
@@ -659,11 +865,11 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
 
                     fp   = result.avg_price or sig_px or 0.0
                     aggr = "AGGRESSIVE" if result.was_aggressive else "passive"
-                    print(f"    ORDER {act} {q} {sym} {target_month} → {result.status}  "
+                    print(f"    ORDER {act} {q} {sym} {om} → {result.status}  "
                           f"fill {fp:.4f}  comm ${result.commission:.2f}  [{aggr}]")
 
                     if result.status in ("Filled", "PartiallyFilled") and result.avg_price > 0:
-                        ledger.log_fill(symbol=sym, contract=target_month, action=act,
+                        ledger.log_fill(symbol=sym, contract=om, action=act,
                                         qty=result.filled_qty, multiplier=ibmult,
                                         signal_price=(sig_px or result.avg_price),
                                         fill_price=result.avg_price,
@@ -674,7 +880,7 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                     if result.status in ("Unfilled", "Cancelled"):
                         print(f"    WARN: {result.status} — no fill logged for {sym}")
 
-                    placed.append((f"{act} {q} {sym} {target_month}",
+                    placed.append((f"{act} {q} {sym} {om}",
                                    result.status, result.order_id))
 
     return placed, skipped, dry_run

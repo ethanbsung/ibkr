@@ -38,6 +38,7 @@ from ibkr_fut.live_dynamic import (
     reconcile_and_execute,
     save_last_targets,
     save_snapshot,
+    spread_roll_exec,
 )
 
 
@@ -611,7 +612,7 @@ def test_save_last_targets_content():
 #   @patch(algo_exec)       → mock_exec  (5th)
 #   @patch(pre_trade_checks)→ mock_ptc   (4th)
 #   @patch(qualify)         → mock_qual  (3rd)
-#   @patch(hold_contract_month)→ mock_hold (2nd)
+#   @patch(get_roll_info)       → mock_hold (2nd)
 #   @patch(ib_spec)         → mock_spec  (1st)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -640,17 +641,17 @@ def _default_fill_result(**kwargs):
 @patch("ibkr_fut.live_dynamic.algo_exec")
 @patch("ibkr_fut.live_dynamic.pre_trade_checks")
 @patch("ibkr_fut.live_dynamic.qualify")
-@patch("ibkr_fut.live_dynamic.hold_contract_month")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
 @patch("ibkr_fut.live_dynamic.ib_spec")
 def test_rne_dry_run_no_pre_trade_check(
     mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec
 ):
     mock_spec.return_value = _MOCK_SPEC
-    mock_hold.return_value = "202609"
+    mock_hold.return_value = ("202609", None, 9999)
     ib = _rne_ib()
     ledger = MagicMock()
 
-    placed, skipped = reconcile_and_execute(
+    placed, skipped, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, ledger, execute=False
     )
 
@@ -662,13 +663,13 @@ def test_rne_dry_run_no_pre_trade_check(
 @patch("ibkr_fut.live_dynamic.algo_exec")
 @patch("ibkr_fut.live_dynamic.pre_trade_checks")
 @patch("ibkr_fut.live_dynamic.qualify")
-@patch("ibkr_fut.live_dynamic.hold_contract_month")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
 @patch("ibkr_fut.live_dynamic.ib_spec")
 def test_rne_dry_run_prints_action(
     mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, capsys
 ):
     mock_spec.return_value = _MOCK_SPEC
-    mock_hold.return_value = "202609"
+    mock_hold.return_value = ("202609", None, 9999)
     ib = _rne_ib()
 
     reconcile_and_execute(
@@ -683,16 +684,16 @@ def test_rne_dry_run_prints_action(
 @patch("ibkr_fut.live_dynamic.algo_exec")
 @patch("ibkr_fut.live_dynamic.pre_trade_checks")
 @patch("ibkr_fut.live_dynamic.qualify")
-@patch("ibkr_fut.live_dynamic.hold_contract_month")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
 @patch("ibkr_fut.live_dynamic.ib_spec")
 def test_rne_pending_order_skipped(
     mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec
 ):
     mock_spec.return_value = _MOCK_SPEC  # symbol = "MES"
-    mock_hold.return_value = "202609"
+    mock_hold.return_value = ("202609", None, 9999)
     ib = _rne_ib(pending_symbols=["MES"])
 
-    placed, skipped = reconcile_and_execute(
+    placed, skipped, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -700,21 +701,23 @@ def test_rne_pending_order_skipped(
     mock_ptc.assert_not_called()
 
 
+@patch("ibkr_fut.live_dynamic.is_contract_okay_to_trade")
 @patch("ibkr_fut.live_dynamic.algo_exec")
 @patch("ibkr_fut.live_dynamic.pre_trade_checks")
 @patch("ibkr_fut.live_dynamic.qualify")
-@patch("ibkr_fut.live_dynamic.hold_contract_month")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
 @patch("ibkr_fut.live_dynamic.ib_spec")
 def test_rne_pre_trade_fail_skips_algo(
-    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_is_open
 ):
     mock_spec.return_value = _MOCK_SPEC
-    mock_hold.return_value = "202609"
+    mock_hold.return_value = ("202609", None, 9999)
     mock_qual.return_value = MagicMock()
     mock_ptc.return_value = (False, "no valid bid/ask", None)
+    mock_is_open.return_value = True   # market open → don't defer
     ib = _rne_ib()
 
-    placed, skipped = reconcile_and_execute(
+    placed, skipped, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -722,18 +725,20 @@ def test_rne_pre_trade_fail_skips_algo(
     assert any("pre-trade" in str(s) for s in skipped)
 
 
+@patch("ibkr_fut.live_dynamic.is_contract_okay_to_trade")
 @patch("ibkr_fut.live_dynamic.algo_exec")
 @patch("ibkr_fut.live_dynamic.pre_trade_checks")
 @patch("ibkr_fut.live_dynamic.qualify")
-@patch("ibkr_fut.live_dynamic.hold_contract_month")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
 @patch("ibkr_fut.live_dynamic.ib_spec")
 def test_rne_filled_logs_to_ledger(
-    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_is_open
 ):
     mock_spec.return_value = _MOCK_SPEC
-    mock_hold.return_value = "202609"
+    mock_hold.return_value = ("202609", None, 9999)
     mock_qual.return_value = MagicMock()
     mock_ptc.return_value = (True, "", MagicMock())
+    mock_is_open.return_value = True   # market open → don't defer
     mock_exec.return_value = _default_fill_result(filled_qty=1, avg_price=5210.0, status="Filled")
     ib = _rne_ib()
     ledger = MagicMock()
@@ -748,18 +753,20 @@ def test_rne_filled_logs_to_ledger(
     assert kwargs["qty"] == 1
 
 
+@patch("ibkr_fut.live_dynamic.is_contract_okay_to_trade")
 @patch("ibkr_fut.live_dynamic.algo_exec")
 @patch("ibkr_fut.live_dynamic.pre_trade_checks")
 @patch("ibkr_fut.live_dynamic.qualify")
-@patch("ibkr_fut.live_dynamic.hold_contract_month")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
 @patch("ibkr_fut.live_dynamic.ib_spec")
 def test_rne_partial_logs_filled_qty(
-    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, capsys
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_is_open, capsys
 ):
     mock_spec.return_value = _MOCK_SPEC
-    mock_hold.return_value = "202609"
+    mock_hold.return_value = ("202609", None, 9999)
     mock_qual.return_value = MagicMock()
     mock_ptc.return_value = (True, "", MagicMock())
+    mock_is_open.return_value = True   # market open → don't defer
     mock_exec.return_value = _default_fill_result(
         filled_qty=1, avg_price=5200.0, status="PartiallyFilled"
     )
@@ -777,18 +784,20 @@ def test_rne_partial_logs_filled_qty(
     assert "partial fill" in out
 
 
+@patch("ibkr_fut.live_dynamic.is_contract_okay_to_trade")
 @patch("ibkr_fut.live_dynamic.algo_exec")
 @patch("ibkr_fut.live_dynamic.pre_trade_checks")
 @patch("ibkr_fut.live_dynamic.qualify")
-@patch("ibkr_fut.live_dynamic.hold_contract_month")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
 @patch("ibkr_fut.live_dynamic.ib_spec")
 def test_rne_unfilled_no_ledger(
-    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, capsys
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_is_open, capsys
 ):
     mock_spec.return_value = _MOCK_SPEC
-    mock_hold.return_value = "202609"
+    mock_hold.return_value = ("202609", None, 9999)
     mock_qual.return_value = MagicMock()
     mock_ptc.return_value = (True, "", MagicMock())
+    mock_is_open.return_value = True   # market open → don't defer
     mock_exec.return_value = _default_fill_result(
         filled_qty=0, avg_price=0.0, status="Unfilled"
     )
@@ -807,13 +816,13 @@ def test_rne_unfilled_no_ledger(
 @patch("ibkr_fut.live_dynamic.algo_exec")
 @patch("ibkr_fut.live_dynamic.pre_trade_checks")
 @patch("ibkr_fut.live_dynamic.qualify")
-@patch("ibkr_fut.live_dynamic.hold_contract_month")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
 @patch("ibkr_fut.live_dynamic.ib_spec")
 def test_rne_cancelled_no_ledger(
     mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec
 ):
     mock_spec.return_value = _MOCK_SPEC
-    mock_hold.return_value = "202609"
+    mock_hold.return_value = ("202609", None, 9999)
     mock_qual.return_value = MagicMock()
     mock_ptc.return_value = (True, "", MagicMock())
     mock_exec.return_value = _default_fill_result(
@@ -832,7 +841,7 @@ def test_rne_cancelled_no_ledger(
 @patch("ibkr_fut.live_dynamic.algo_exec")
 @patch("ibkr_fut.live_dynamic.pre_trade_checks")
 @patch("ibkr_fut.live_dynamic.qualify")
-@patch("ibkr_fut.live_dynamic.hold_contract_month")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
 @patch("ibkr_fut.live_dynamic.ib_spec")
 def test_rne_no_ib_config_skips(
     mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec
@@ -840,7 +849,7 @@ def test_rne_no_ib_config_skips(
     mock_spec.return_value = None  # no IB config → skip
     ib = _rne_ib()
 
-    placed, skipped = reconcile_and_execute(
+    placed, skipped, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -853,16 +862,16 @@ def test_rne_no_ib_config_skips(
 @patch("ibkr_fut.live_dynamic.algo_exec")
 @patch("ibkr_fut.live_dynamic.pre_trade_checks")
 @patch("ibkr_fut.live_dynamic.qualify")
-@patch("ibkr_fut.live_dynamic.hold_contract_month")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
 @patch("ibkr_fut.live_dynamic.ib_spec")
 def test_rne_no_roll_calendar_skips(
     mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec
 ):
     mock_spec.return_value = _MOCK_SPEC
-    mock_hold.return_value = None  # no roll calendar → skip
+    mock_hold.return_value = (None, None, 9999)  # no roll calendar → skip
     ib = _rne_ib()
 
-    placed, skipped = reconcile_and_execute(
+    placed, skipped, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -870,3 +879,229 @@ def test_rne_no_roll_calendar_skips(
     assert skipped == []
     mock_ptc.assert_not_called()
     mock_exec.assert_not_called()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Group 7 — Roll-window routing and spread rolls
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _qual_by_month(ib, spec, month):
+    """qualify() stand-in returning a distinct contract mock per month."""
+    c = MagicMock()
+    c.month = month
+    c.conId = int(month)
+    c.multiplier = "5"
+    return c
+
+
+def _exec_orders(mock_exec):
+    """[(month, action, qty)] for each algo_exec call."""
+    return [(c.args[1].month, c.args[2], c.args[3])
+            for c in mock_exec.call_args_list]
+
+
+def _roll_patches(fn):
+    """Common patch stack for roll-window reconcile tests.
+
+    First-applied patch = innermost = first test parameter, so test signatures
+    read: mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open,
+    mock_vol (any extra @patch stacked above appends after these).
+    """
+    fn = patch("ibkr_fut.live_dynamic.ib_spec", return_value=_MOCK_SPEC)(fn)
+    fn = patch("ibkr_fut.live_dynamic.get_roll_info")(fn)
+    fn = patch("ibkr_fut.live_dynamic.qualify", side_effect=_qual_by_month)(fn)
+    fn = patch("ibkr_fut.live_dynamic.pre_trade_checks",
+               return_value=(True, "", MagicMock()))(fn)
+    fn = patch("ibkr_fut.live_dynamic.algo_exec")(fn)
+    fn = patch("ibkr_fut.live_dynamic.is_contract_okay_to_trade",
+               return_value=True)(fn)
+    fn = patch("ibkr_fut.live_dynamic.check_order_vol",
+               return_value=(True, ""))(fn)
+    return fn
+
+
+@_roll_patches
+def test_rne_passive_reduce_splits_across_months(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    # Long 1 expiring + 2 next, target 0: close the expiring leg (1) and take
+    # the remaining 2 out of the incoming month — never short the expiring month.
+    mock_hold.return_value = ("202609", "202612", 7)   # passive window
+    mock_exec.return_value = _default_fill_result()
+    held = {"ES": {"202609": 1, "202612": 2}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 0}, held, _MOCK_DIAG,
+                          MagicMock(), execute=True)
+
+    orders = _exec_orders(mock_exec)
+    assert ("202609", "SELL", 1) in orders
+    assert ("202612", "SELL", 2) in orders
+    assert len(orders) == 2
+
+
+@_roll_patches
+def test_rne_passive_reduce_short_splits_across_months(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    # Symmetric short case: -1 expiring / -2 next, target 0 → BUY 1 expiring,
+    # BUY 2 incoming.
+    mock_hold.return_value = ("202609", "202612", 7)
+    mock_exec.return_value = _default_fill_result()
+    held = {"ES": {"202609": -1, "202612": -2}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 0}, held, _MOCK_DIAG,
+                          MagicMock(), execute=True)
+
+    orders = _exec_orders(mock_exec)
+    assert ("202609", "BUY", 1) in orders
+    assert ("202612", "BUY", 2) in orders
+    assert len(orders) == 2
+
+
+@_roll_patches
+def test_rne_passive_add_routes_to_next_month(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    mock_hold.return_value = ("202609", "202612", 7)
+    mock_exec.return_value = _default_fill_result()
+    held = {"ES": {"202609": 1}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 3}, held, _MOCK_DIAG,
+                          MagicMock(), execute=True)
+
+    assert _exec_orders(mock_exec) == [("202612", "BUY", 2)]
+
+
+@_roll_patches
+def test_rne_no_roll_window_routes_current_month(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    held = {"ES": {"202609": 1}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 3}, held, _MOCK_DIAG,
+                          MagicMock(), execute=True)
+
+    assert _exec_orders(mock_exec) == [("202609", "BUY", 2)]
+
+
+@patch("ibkr_fut.live_dynamic.spread_roll_exec")
+@_roll_patches
+def test_rne_spread_roll_credits_fills_any_status(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol,
+    mock_roll, capsys
+):
+    # A cancelled spread limit with partial fills must still be credited to the
+    # month legs; the residual close is then sized off the true expiring holding.
+    mock_hold.return_value = ("202609", "202612", 2)   # spread window
+    mock_exec.return_value = _default_fill_result()
+    mock_roll.return_value = ("Cancelled", 2, 0.0)
+    held = {"ES": {"202609": 3}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 2}, held, _MOCK_DIAG,
+                          MagicMock(), execute=True)
+
+    mock_roll.assert_called_once()
+    assert mock_roll.call_args.args[4] == 2          # rolled qty
+    assert _exec_orders(mock_exec) == [("202609", "SELL", 1)]
+    out = capsys.readouterr().out
+    assert "cur=202609:+1" in out                    # fills credited to legs
+    assert "nxt=202612:+2" in out
+
+
+@patch("ibkr_fut.live_dynamic.spread_roll_exec")
+@_roll_patches
+def test_rne_spread_roll_deferred_when_market_closed(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol,
+    mock_roll
+):
+    mock_open.return_value = False                   # exchange closed
+    mock_hold.return_value = ("202609", "202612", 2)
+    held = {"ES": {"202609": 2}}
+
+    placed, skipped, _ = reconcile_and_execute(
+        _rne_ib(), MagicMock(), {"ES": 2}, held, _MOCK_DIAG,
+        MagicMock(), execute=True)
+
+    mock_roll.assert_not_called()
+    assert any("roll (market closed)" in s for s in skipped)
+
+
+@_roll_patches
+def test_rne_risk_gate_blocks_rebalance_not_roll_close(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    # Pathological target trips the vol gate: the rebalance order is skipped but
+    # the risk-reducing old-month close still executes.
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    mock_vol.return_value = (False, "too big")
+    held = {"ES": {"202603": 2}}                     # stranded old month
+
+    placed, skipped, _ = reconcile_and_execute(
+        _rne_ib(), MagicMock(), {"ES": 100}, held, _MOCK_DIAG,
+        MagicMock(), execute=True, capital=100_000.0)
+
+    assert _exec_orders(mock_exec) == [("202603", "SELL", 2)]
+    assert any("risk" in s for s in skipped)
+
+
+# ── spread_roll_exec unit tests ───────────────────────────────────────────────
+
+def _spread_ib(ticker_bid=0.5, ticker_ask=0.6):
+    ib = MagicMock()
+    ib.reqMktData.return_value = _ticker(ticker_bid, ticker_ask)
+    ib.sleep.return_value = None
+    return ib
+
+
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_no_zero_qty_market_fallback(mock_time, mock_qual):
+    # Limit fully filled but isDone() lags the cancel: must NOT place a
+    # zero-quantity market order, and must report the limit's fills.
+    mock_time.time.side_effect = [0.0] + [100.0] * 50   # instantly past deadline
+    mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
+                             MagicMock(conId=2, currency="USD")]
+    ib = _spread_ib()
+    trade = MagicMock()
+    trade.isDone.return_value = False
+    trade.filled.return_value = 5
+    trade.orderStatus.status = "Cancelled"
+    trade.orderStatus.filled = 5
+    trade.orderStatus.avgFillPrice = 0.55
+    ib.placeOrder.return_value = trade
+
+    status, filled, _ = spread_roll_exec(ib, _MOCK_SPEC, "202609", "202612",
+                                         5, is_long=True)
+
+    assert ib.placeOrder.call_count == 1   # limit only, no 0-qty market order
+    assert filled == 5
+
+
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_market_fallback_accumulates_fills(mock_time, mock_qual):
+    # 2 filled on the limit before cancel, 3 on the fallback market order:
+    # the market order is sized to the remainder and total filled is 5.
+    mock_time.time.side_effect = [0.0] + [100.0] * 50
+    mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
+                             MagicMock(conId=2, currency="USD")]
+    ib = _spread_ib()
+    limit_trade = MagicMock()
+    limit_trade.isDone.return_value = False
+    limit_trade.filled.return_value = 2
+    mkt_trade = MagicMock()
+    mkt_trade.orderStatus.status = "Filled"
+    mkt_trade.orderStatus.filled = 3
+    mkt_trade.orderStatus.avgFillPrice = 0.60
+    ib.placeOrder.side_effect = [limit_trade, mkt_trade]
+
+    status, filled, _ = spread_roll_exec(ib, _MOCK_SPEC, "202609", "202612",
+                                         5, is_long=True)
+
+    assert filled == 5
+    assert status == "Filled"
+    mkt_order = ib.placeOrder.call_args_list[1].args[1]
+    assert mkt_order.totalQuantity == 3   # remainder only
