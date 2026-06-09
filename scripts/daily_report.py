@@ -10,7 +10,7 @@ Daily monitoring report for the trading system. Sends a Telegram message coverin
   - Daemon log summary (cycles, orders placed, errors)
 
 Schedule: 7 AM ET (11:00 UTC) weekdays.
-Delivery: Telegram bot — set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env.
+Delivery: Discord webhook — set DISCORD_WEBHOOK_URL in .env.
 """
 
 import importlib.util
@@ -39,8 +39,7 @@ if _env_path.exists():
             _k, _v = _line.split("=", 1)
             if not os.environ.get(_k.strip()):
                 os.environ[_k.strip()] = _v.strip().strip('"').strip("'")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 UTC = timezone.utc
 
@@ -391,16 +390,20 @@ def section_daemon_summary() -> tuple[list[str], list[str]]:
     return lines, warnings
 
 
-# ── Telegram ──────────────────────────────────────────────────────────────────
+# ── Discord ───────────────────────────────────────────────────────────────────
 
-def send_telegram(text: str) -> None:
-    url  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": text}).encode()
-    req  = urllib.request.Request(url, data=data,
-                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"Telegram API returned {resp.status}")
+def send_discord(text: str) -> None:
+    # Discord has a 2000-char message limit; split into chunks if needed
+    chunks = [text[i:i+1990] for i in range(0, len(text), 1990)]
+    for chunk in chunks:
+        data = json.dumps({"content": f"```\n{chunk}\n```"}).encode()
+        req  = urllib.request.Request(
+            DISCORD_WEBHOOK_URL, data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status not in (200, 204):
+                raise RuntimeError(f"Discord webhook returned {resp.status}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -436,17 +439,17 @@ def main():
 
     print(body)
 
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[report] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — skipped")
+    if not DISCORD_WEBHOOK_URL:
+        print("[report] DISCORD_WEBHOOK_URL not set — skipped")
         return
 
     try:
-        send_telegram(body)
-        print("[report] Telegram message sent")
+        send_discord(body)
+        print("[report] Discord message sent")
     except Exception as e:
         fallback = HERE / "daily_report_fallback.txt"
         fallback.write_text(body + f"\n\nSend error: {e}\n")
-        print(f"[report] Telegram failed ({e}) — written to {fallback}")
+        print(f"[report] Discord failed ({e}) — written to {fallback}")
         sys.exit(1)
 
 
