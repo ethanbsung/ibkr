@@ -497,7 +497,7 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
     the passive-aggressive limit order algorithm when execute=True.
     """
     pending = {t.contract.symbol for t in ib.openTrades()}
-    placed, skipped = [], []
+    placed, skipped, dry_run = [], [], []
     _mkt_open_cache: dict = {}   # conId → bool; one reqContractDetails per contract per cycle
 
     def _is_open(c) -> bool:
@@ -563,6 +563,13 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
             print(f"    ACTION: {act} {q} {sym} {m} [ROLL CLOSE LMT ALGO]")
 
         if not execute:
+            c = qualify(ib, spec, target_month)
+            if c:
+                print(f"    qualify OK → {c.localSymbol}  conId={c.conId}  "
+                      f"mult={c.multiplier}  {c.currency}")
+            else:
+                print(f"    WARNING: could not qualify {sym} {target_month}")
+            dry_run.append(sym)
             continue
 
         if sym in pending:
@@ -652,7 +659,7 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                     placed.append((f"{act} {q} {sym} {target_month}",
                                    result.status, result.order_id))
 
-    return placed, skipped
+    return placed, skipped, dry_run
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -766,15 +773,19 @@ def run_daemon(args):
 
         # ── 4. Execute cycle ──────────────────────────────────────────────────
         print(f"\n[{_now()}] {'─'*60}")
-        placed, skipped = reconcile_and_execute(
+        placed, skipped, dry_run = reconcile_and_execute(
             ib, ibcfg, targets, held, diag, ledger,
             execute=args.execute, skip_unchanged=True)
 
         market_closed = sum(1 for s in skipped if "market closed" in s)
         other_skips   = len(skipped) - market_closed
-        print(f"[{_now()}] Cycle done: {len(placed)} placed  "
-              f"{market_closed} deferred (market closed)  "
-              f"{other_skips} skipped (other)")
+        if args.execute:
+            print(f"[{_now()}] Cycle done: {len(placed)} placed  "
+                  f"{market_closed} deferred (market closed)  "
+                  f"{other_skips} skipped (other)")
+        else:
+            print(f"[{_now()}] Cycle done (DRY-RUN): {len(dry_run)} checked  "
+                  f"{other_skips} skipped")
 
         if args.execute:
             save_last_targets(LAST_TARGETS_PATH, targets, snap["date"])
@@ -919,7 +930,7 @@ def main():
 
         ledger = DynLedger()
         print("\n" + "-" * 80)
-        placed, skipped = reconcile_and_execute(
+        placed, skipped, dry_run = reconcile_and_execute(
             ib, ibcfg, targets, held, diag, ledger, execute=args.execute)
 
         save_last_targets(LAST_TARGETS_PATH, targets, today)
