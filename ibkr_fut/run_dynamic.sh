@@ -22,6 +22,12 @@ python3 ibkr_fut/pst_updater.py $UNIVERSE_INSTRUMENTS --fx || echo "WARN: pst_up
 # 2. Refresh volume cache weekly (stale after 7 days; used by instrument_selection filter).
 python3 ibkr_fut/volume_collector.py --max-age 7 || echo "WARN: volume_collector nonzero; proceeding with existing cache"
 
-# 3. Run the EWMAC dynamic-optimisation executor — compute phase only.
-#    Order execution is handled separately by run_execution.sh at 6:05 PM ET.
+# 3. Execution-path preflight: contract qualification, market hours, live market
+#    data (open markets only). Failures alert via Discord but do NOT block
+#    compute — broken instruments fail safe (skipped) at order time.
+python3 ibkr_fut/preflight_check.py || echo "WARN: preflight reported failures (alerted); proceeding"
+
+# 4. Run the EWMAC dynamic-optimisation executor — compute phase only.
+#    Order execution is handled by the daemon (run_execution.sh), which picks up
+#    the new snapshot automatically.
 python3 ibkr_fut/live_dynamic.py --mode compute

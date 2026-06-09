@@ -1341,6 +1341,103 @@ def test_positions_symbol_fallback_ambiguous_goes_unknown(mock_spec):
     assert unknown == [("FUT", "SGX", 1)]
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Group 8 — preflight_check
+# ══════════════════════════════════════════════════════════════════════════════
+
+from ibkr_fut.preflight_check import check_contracts, check_market_data
+
+
+def _cd(tz="US/Central", hours="20260609:1700-20260610:1600"):
+    cd = MagicMock()
+    cd.timeZoneId = tz
+    cd.tradingHours = hours
+    return cd
+
+
+@patch("ibkr_fut.preflight_check.is_contract_okay_to_trade", return_value=True)
+@patch("ibkr_fut.preflight_check.qualify")
+@patch("ibkr_fut.preflight_check.get_roll_info")
+@patch("ibkr_fut.preflight_check.ib_spec")
+def test_preflight_all_clear(mock_spec, mock_roll, mock_qual, mock_open):
+    mock_spec.return_value = _MOCK_SPEC
+    mock_roll.return_value = ("202609", "202612", 200)  # far from roll
+    mock_qual.return_value = MagicMock(conId=1)
+    ib = MagicMock()
+    ib.reqContractDetails.return_value = [_cd()]
+
+    failures, open_now = check_contracts(ib, MagicMock(), {"ES": "equity"})
+
+    assert failures == []
+    assert [i for i, _ in open_now] == ["ES"]
+    mock_qual.assert_called_once()           # front month only outside roll window
+
+
+@patch("ibkr_fut.preflight_check.is_contract_okay_to_trade", return_value=False)
+@patch("ibkr_fut.preflight_check.qualify")
+@patch("ibkr_fut.preflight_check.get_roll_info")
+@patch("ibkr_fut.preflight_check.ib_spec")
+def test_preflight_qualify_failure_reported(mock_spec, mock_roll, mock_qual, mock_open):
+    mock_spec.return_value = _MOCK_SPEC
+    mock_roll.return_value = ("202609", None, 9999)
+    mock_qual.return_value = None            # ambiguous / unknown contract
+    ib = MagicMock()
+
+    failures, open_now = check_contracts(ib, MagicMock(), {"ES": "equity"})
+
+    assert [(i, s) for i, s, _ in failures] == [("ES", "QUALIFY")]
+    assert open_now == []
+
+
+@patch("ibkr_fut.preflight_check.is_contract_okay_to_trade", return_value=False)
+@patch("ibkr_fut.preflight_check.qualify")
+@patch("ibkr_fut.preflight_check.get_roll_info")
+@patch("ibkr_fut.preflight_check.ib_spec")
+def test_preflight_checks_next_month_in_roll_window(mock_spec, mock_roll,
+                                                    mock_qual, mock_open):
+    mock_spec.return_value = _MOCK_SPEC
+    mock_roll.return_value = ("202609", "202612", 7)   # inside passive window
+    mock_qual.return_value = MagicMock(conId=1)
+    ib = MagicMock()
+    ib.reqContractDetails.return_value = [_cd()]
+
+    failures, _ = check_contracts(ib, MagicMock(), {"ES": "equity"})
+
+    assert failures == []
+    months = [c.args[2] for c in mock_qual.call_args_list]
+    assert months == ["202609", "202612"]
+
+
+@patch("ibkr_fut.preflight_check.is_contract_okay_to_trade", return_value=True)
+@patch("ibkr_fut.preflight_check.qualify")
+@patch("ibkr_fut.preflight_check.get_roll_info")
+@patch("ibkr_fut.preflight_check.ib_spec")
+def test_preflight_unmapped_tz_and_empty_hours(mock_spec, mock_roll,
+                                               mock_qual, mock_open):
+    mock_spec.return_value = _MOCK_SPEC
+    mock_roll.return_value = ("202609", None, 9999)
+    mock_qual.return_value = MagicMock(conId=1)
+    ib = MagicMock()
+    ib.reqContractDetails.return_value = [_cd(tz="Mars/Olympus", hours="")]
+
+    failures, open_now = check_contracts(ib, MagicMock(), {"ES": "equity"})
+
+    stages = [s for _, s, _ in failures]
+    assert stages == ["HOURS", "HOURS"]      # unmapped tz + empty hours
+    assert open_now == []                    # empty hours → never reaches md
+
+
+def test_preflight_market_data_failure():
+    ib = MagicMock()
+    ib.reqMktData.side_effect = [_ticker(100.0, 100.25),       # good
+                                 _ticker(float("nan"), -1.0)]  # no subscription
+    failures = check_market_data(ib, [("GOOD", MagicMock(conId=1)),
+                                      ("BAD", MagicMock(conId=2))])
+
+    assert [(i, s) for i, s, _ in failures] == [("BAD", "MKTDATA")]
+    assert ib.cancelMktData.call_count == 2
+
+
 @patch("ibkr_fut.live_dynamic.ib_spec")
 @patch("ibkr_fut.live_dynamic.UNIVERSE", {"ALPHA": "equity", "BETA": "bond"})
 def test_positions_exact_exchange_match_beats_ambiguity(mock_spec):
