@@ -1813,3 +1813,23 @@ Make sure IB Gateway / TWS is running on port 4002.
     ACTION: SELL 1 TN 202609 [LMT ALGO]
 [2026-06-09T21:38:02Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
 [2026-06-09T21:38:02Z] Next cycle in 10m…
+
+[2026-06-09T21:48:02Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T21:48:02Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T21:48:02Z] Next cycle in 10m…
+
+[2026-06-09T21:58:02Z] ────────────────────────────────────────────────────────────
+
+  KR10           FLKTB  202606  | held +0 → target -1  (fcast -16.6 ideal -0.29)
+    ACTION: SELL 1 FLKTB 202606 [LMT ALGO]
+
+  US10U          TN     202609  | held +0 → target -1  (fcast -7.9 ideal -0.20)
+    ACTION: SELL 1 TN 202609 [LMT ALGO]
+[2026-06-09T21:58:02Z] Cycle done: 0 placed  0 deferred (market closed)  0 skipped (other)
+[2026-06-09T21:58:02Z] Next cycle in 10m…
