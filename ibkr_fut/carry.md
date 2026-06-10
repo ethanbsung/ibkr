@@ -46,3 +46,7 @@ For SP500, prior to 2000 there is a 'blocky' forecast because of sparse historic
 
 Carver prefers to trade a fixed month for seasonal commodities, where it's possible to do so
 
+
+Actual content from book:
+
+
