@@ -35,6 +35,14 @@ class PSTLoader:
     def __init__(self, base_path: str = PST_BASE):
         self.base = base_path
         self._meta_cache = None
+        # Per-process read cache for price panels. PST CSVs are static within a
+        # single process (pst_updater runs as a separate cron job), so caching is
+        # safe and removes the repeated parses when _pst_spec, compute_corr_matrix,
+        # and the carry/EWMAC builders each re-read the same instrument. The live
+        # daemon never reads these files in its loop, so staleness detection (a
+        # one-shot read in the compute phase) is unaffected. Callers must not mutate
+        # the returned objects in place (none do — they slice/reindex, which copy).
+        self._price_cache: dict[tuple, object] = {}
 
     # ------------------------------------------------------------------ #
     # Instrument list                                                       #
@@ -58,10 +66,16 @@ class PSTLoader:
         Returns a pd.Series indexed by datetime, named 'price'.
         Negative prices are expected for older data due to Panama back-adjustment.
         """
+        key = ("adj", instrument, freq)
+        cached = self._price_cache.get(key)
+        if cached is not None:
+            return cached
         fp = self._path("adjusted_prices_csv", instrument)
         series = pd.read_csv(fp, parse_dates=["DATETIME"], index_col="DATETIME")["price"]
         series.index = pd.DatetimeIndex(series.index)
-        return self._resample(series, freq)
+        out = self._resample(series, freq)
+        self._price_cache[key] = out
+        return out
 
     def multiple_prices(self, instrument: str, freq: str = "daily") -> pd.DataFrame:
         """
@@ -79,6 +93,10 @@ class PSTLoader:
 
         freq: "daily" or "1h"
         """
+        key = ("mp", instrument, freq)
+        cached = self._price_cache.get(key)
+        if cached is not None:
+            return cached
         fp = self._path("multiple_prices_csv", instrument)
         df = pd.read_csv(fp, parse_dates=["DATETIME"], index_col="DATETIME")
         df.index = pd.DatetimeIndex(df.index)
@@ -88,6 +106,7 @@ class PSTLoader:
             prices_daily = df[price_cols].resample("D").last()
             contracts_daily = df[contract_cols].resample("D").last()
             df = pd.concat([prices_daily, contracts_daily], axis=1).dropna(how="all")
+        self._price_cache[key] = df
         return df
 
     def roll_calendar(self, instrument: str) -> pd.DataFrame:

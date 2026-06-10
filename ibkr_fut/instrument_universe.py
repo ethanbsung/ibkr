@@ -51,7 +51,6 @@ UNIVERSE: dict[str, str] = {
     "OAT":          "Bond",    # French OAT
     "BTP3":         "Bond",    # Italian 3yr BTP
     "BTP":          "Bond",    # Italian 10yr BTP
-    "BTP5":         "Bond",    # Italian 5yr BTP (not in JUMBO, but EUREX-available)
     "BONO":         "Bond",    # Spanish Bono
     "CH10":         "Bond",    # Swiss 10yr Conf (EUREX)
     "EURIBOR":      "Bond",    # 3-month Euribor (EUREX — likely fails vol floor)
@@ -75,7 +74,6 @@ UNIVERSE: dict[str, str] = {
     "SMI":          "Equity",
     "DJSTX-SMALL":  "Equity",
     "EU-DIV30":     "Equity",
-    "ATX":          "Equity",  # Austrian ATX (EUREX) — no data yet, needs bootstrap
     # "MSCIWORLD" removed: EUREX delisted, no active security def as of 2025-12
     "OMX":          "Equity",  # OMX Helsinki 25 (EUREX)
 
