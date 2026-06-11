@@ -251,7 +251,13 @@ def update_prices(
     ib_cfg: pd.Series,
     roll_cfg: pd.Series,
 ) -> None:
-    """Update adjusted_prices_csv and multiple_prices_csv (PRICE column only)."""
+    """Update adjusted_prices_csv and multiple_prices_csv.
+
+    Writes every multiple_prices column inline for each new bar — PRICE/PRICE_CONTRACT
+    plus CARRY/CARRY_CONTRACT and FORWARD/FORWARD_CONTRACT (the carry contract is fetched
+    per segment, see below). So carry stays fresh on every run without --carry; the
+    --carry pass (update_carry) is only a legacy backstop that backfills rows left NaN.
+    """
 
     adj_fp   = f"{PST_BASE}/adjusted_prices_csv/{instrument}.csv"
     multi_fp = f"{PST_BASE}/multiple_prices_csv/{instrument}.csv"

@@ -13,11 +13,12 @@ Carver's monthly subscriptions (~£15/month total):
 
 Free (fee waivers):
   US + EU Bond Quotes   — CME, CBOT (bonds), EUREX (bonds)
-  Physical Metals/Comms — COMEX, NYMEX, CBOT (ags), NYBOT
+  Physical Metals/Comms — COMEX, NYMEX, CBOT (ags)
   IDEAL FX              — CME FX futures
 
 NOT included (would cost $100+/month):
   ICE / ICEEU / ICEEUSOFT / IPE  — excluded
+  NYBOT (ICE Futures U.S.)       — excluded; removed COCOA, COFFEE, COTTON2, DX, OJ, SUGAR11
   HKFE                           — excluded (Hong Kong, separate subscription)
   LMEOTC                         — excluded (LME OTC metals)
   CDE                            — excluded (Canadian)
@@ -119,7 +120,7 @@ UNIVERSE: dict[str, str] = {
     "FTSETAIWAN":   "Equity",  # FTSE Taiwan (SGX)
 
     # ── Volatility (CFE / EUREX) ──────────────────────────────────────────
-    "VIX":          "Vol",     # CBOE VIX (CFE)
+    # "VIX": "Vol",  # CBOE VIX (CFE) — requires CFE Enhanced $4.50/month; re-enable when live
     "V2X":          "Vol",     # Eurostoxx VIX (EUREX)
 
     # ── FX majors (CME — free via IDEAL FX waiver) ────────────────────────
@@ -141,7 +142,6 @@ UNIVERSE: dict[str, str] = {
     "INR":          "FX",      # Indian Rupee
     "MXP":          "FX",      # Mexican Peso
     "SGD":          "FX",      # Singapore Dollar (CME)
-    "DX":           "FX",      # US Dollar Index (NYBOT)
     "TWD-mini":     "FX",      # Taiwan Dollar mini (SGX)
 
     # ── Metals (COMEX — free via Physical Metals waiver) ──────────────────
@@ -179,11 +179,6 @@ UNIVERSE: dict[str, str] = {
     "FEEDCOW":      "Ags",
     "BBCOMM":       "Ags",     # Bloomberg Commodity Index
     "CHEESE":       "Ags",
-    "COFFEE":       "Ags",     # Arabica coffee (NYBOT)
-    "COCOA":        "Ags",     # Cocoa NY (NYBOT)
-    "SUGAR11":      "Ags",     # Sugar No. 11 (NYBOT)
-    "COTTON2":      "Ags",     # Cotton No. 2 (NYBOT)
-    "OJ":           "Ags",     # Orange juice (NYBOT)
     "RUBBER":       "Ags",     # TSR 20 rubber (SGX)
 }
 

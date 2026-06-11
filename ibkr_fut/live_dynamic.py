@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-live_dynamic.py — EWMAC + dynamic portfolio optimisation, live on IBKR.
+live_dynamic.py — Combined carry+trend (50/50) + dynamic portfolio optimisation, live on IBKR.
 
 Replaces the IBS strategy (ibkr_fut/live_signals.py). Once per day this script:
 
@@ -8,8 +8,8 @@ Replaces the IBS strategy (ibkr_fut/live_signals.py). Once per day this script:
      and current futures positions.
   2. Builds the dynamic-optimisation universe over Carver's full Jumbo (ibkr_fut/
      jumbo.py) from the PST CSVs — the same validated pipeline the backtest uses
-     (backtest_dynamic._build_universe → ewmac forecasts, blended vol, weekly-EWMA
-     covariance, handcraft weights, live-universe IDM).
+     (backtest_dynamic._build_universe → combined carry+trend forecasts, blended vol,
+     weekly-EWMA covariance, handcraft weights, live-universe IDM).
   3. Runs ONE joint daily optimisation (dynamic_opt.optimise_positions) seeded with
      the *actual* held positions, restricted to a TRADABLE subset. The optimiser
      chooses which instruments to hold; everything else in the Jumbo is locked at
@@ -89,6 +89,10 @@ from ibkr_fut.pst_loader import PSTLoader
 from ibkr_fut.instrument_universe import UNIVERSE
 from ibkr_fut.backtest_dynamic import _build_universe, get_eligible_set
 from ibkr_fut.backtest_ewmac import TARGET_RISK, IDM_CAP
+from ibkr_fut.carry_trend_signals import (
+    carry_trend_instrument_signals,
+    TREND_WEIGHT as COMBINED_TREND_WEIGHT,
+)
 from ibkr_fut.dynamic_opt import optimise_positions
 from ibkr_fut.algo_execution import pre_trade_checks, algo_exec, is_contract_okay_to_trade
 from ibkr_fut.risk_check import (check_halt_file, check_gross_leverage,
@@ -110,7 +114,14 @@ SPREAD_PASSIVE_SECS = 60 # seconds to work the spread limit before cancelling
 SPREAD_CANCEL_CONFIRM_SECS = 30  # max wait for cancel-ack before abandoning MKT escalation
 
 # ── Strategy parameters (match the backtest you validated) ─────────────────────
-DYN_TARGET_RISK = TARGET_RISK   # 0.20 — same as backtest_dynamic / backtest_ewmac
+DYN_TARGET_RISK = TARGET_RISK   # 0.25 — same as backtest_dynamic / backtest_ewmac
+
+
+# Combined carry+trend forecast (Carver "Strategy 11"), the live forecast. Matches the
+# signal_fn(spec, mp) contract _build_universe expects — identical to _combined_signal in
+# backtest_carry_trend_dynamic.py, so live sizes off the same forecast the backtest validates.
+def _combined_signal(spec, mp):
+    return carry_trend_instrument_signals(spec, mp, COMBINED_TREND_WEIGHT)
 
 # ── IBKR connection ────────────────────────────────────────────────────────────
 IB_HOST         = "127.0.0.1"
@@ -120,7 +131,7 @@ CLIENT_ID_COMPUTE = 6  # compute mode (runs concurrently with daemon)
 CONNECT_TIMEOUT = 5
 MAX_RETRIES     = 3
 RETRY_DELAY     = 10
-FALLBACK_CAPITAL = 100_000.0
+FALLBACK_CAPITAL = 250_000.0
 
 # Repo-relative so the same checkout works on any host (laptop, VPS).
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -167,13 +178,21 @@ def ib_spec(ibcfg: pd.DataFrame, instr: str) -> dict | None:
 # Tradable-set selection — the optimiser's menu
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_tradable_set(verbose: bool = True) -> tuple[set, list]:
+def build_tradable_set(verbose: bool = True,
+                       require_carry_fresh: bool = False) -> tuple[set, list]:
     """
     Decide which Jumbo instruments the optimiser may actually trade today.
 
     An instrument is tradable iff it passes instrument_selection filters (cost,
     annual vol floor, history) AND its PST data is fresh (≤ FRESH_DAYS old).
     Volume filters are skipped when no cached volume data exists.
+
+    require_carry_fresh: when the live strategy uses a carry forecast (basic carry or
+    combined carry+trend), the CARRY leg of multiple_prices can go stale INDEPENDENTLY of
+    PRICE (pst_updater can refresh PRICE while the carry fetch fails). Pass True so the
+    gate also ages the CARRY column — otherwise a frozen term structure passes the
+    PRICE-only check and the optimiser sizes off stale carry. Default False = EWMAC trend
+    (carry columns irrelevant), the current behaviour.
 
     Returns (tradable_set, rows) where rows is a per-instrument diagnostic table.
     """
@@ -189,11 +208,22 @@ def build_tradable_set(verbose: bool = True) -> tuple[set, list]:
         reason = ""
         last_date = None
         try:
-            mp = pst.multiple_prices(instr)["PRICE"].dropna()
-            last_date = mp.index[-1]
+            mp = pst.multiple_prices(instr)
+            price = mp["PRICE"].dropna()
+            last_date = price.index[-1]
             age = (today - last_date.normalize()).days
             if age > FRESH_DAYS:
                 reason = f"stale ({last_date.date()}, {age}d old)"
+            elif require_carry_fresh:
+                # Carry leg can freeze independently of PRICE — age it too.
+                carry = mp["CARRY"].dropna()
+                if carry.empty:
+                    reason = "no carry data"
+                else:
+                    c_last = carry.index[-1]
+                    c_age = (today - c_last.normalize()).days
+                    if c_age > FRESH_DAYS:
+                        reason = f"stale carry ({c_last.date()}, {c_age}d old)"
         except Exception as e:
             reason = f"data error ({e})"
 
@@ -1123,7 +1153,8 @@ def run_daemon(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="EWMAC dynamic-optimisation live executor")
+    ap = argparse.ArgumentParser(
+        description="Combined carry+trend dynamic-optimisation live executor")
     ap.add_argument("--execute", action="store_true",
                     help="Place orders (omit = dry-run)")
     ap.add_argument("--capital", type=float, default=None,
@@ -1156,7 +1187,8 @@ def main():
     # ══════════════════════════════════════════════════════════════════════════
     if run_compute:
         print("=" * 80)
-        print(f"  EWMAC DYNAMIC OPT  [COMPUTE]  |  {today}  |  {mode_str}")
+        print(f"  COMBINED CARRY+TREND ({COMBINED_TREND_WEIGHT:.0%}/{1-COMBINED_TREND_WEIGHT:.0%}) "
+              f"DYNAMIC OPT  [COMPUTE]  |  {today}  |  {mode_str}")
         print("=" * 80)
 
         ib = _connect(CLIENT_ID_COMPUTE)
@@ -1173,7 +1205,10 @@ def main():
         print(f"\n  capital ${capital:,.0f}  |  target risk {args.target_risk:.0%}  |  "
               f"universe {len(UNIVERSE)} instr")
 
-        tradable_set, _ = build_tradable_set()
+        # require_carry_fresh: the live forecast uses carry, whose term structure can go
+        # stale independently of PRICE — age the CARRY leg too so a frozen multiple_prices
+        # file fails the instrument out rather than sizing off months-old carry.
+        tradable_set, _ = build_tradable_set(require_carry_fresh=True)
         if not tradable_set:
             print("ERROR: no tradable instruments at this capital — aborting.")
             ib.disconnect()
@@ -1181,7 +1216,7 @@ def main():
 
         print(f"\n  Building universe from PST data…")
         uni = _build_universe(list(UNIVERSE.keys()), tradable_set=tradable_set,
-                              lookback_days=3000)
+                              lookback_days=3000, signal_fn=_combined_signal)
         if uni is None:
             print("ERROR: universe build failed (no instruments with valid signals).")
             ib.disconnect()
@@ -1245,7 +1280,8 @@ def main():
         check_last_targets(LAST_TARGETS_PATH, current)
 
         print("\n" + "=" * 80)
-        print(f"  EWMAC DYNAMIC OPT  [EXECUTE — {mode_str}]  |  {today}")
+        print(f"  COMBINED CARRY+TREND ({COMBINED_TREND_WEIGHT:.0%}/"
+              f"{1-COMBINED_TREND_WEIGHT:.0%}) DYNAMIC OPT  [EXECUTE — {mode_str}]  |  {today}")
         print(f"  Snapshot as of {meta.get('date')}  |  capital ${capital:,.0f}  "
               f"|  IDM {meta.get('idm')}  |  {meta.get('n_live')} live  "
               f"|  target holds {meta.get('n_held_target')}  "

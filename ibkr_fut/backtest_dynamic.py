@@ -95,11 +95,21 @@ def _build_universe(
     instruments: list[str],
     tradable_set: set | None = None,
     lookback_days: int | None = None,
-) -> dict | None:
+    signal_fn=None,
+    return_components: bool = False,
+):
     """
-    Build aligned numpy panels for every instrument with valid signals.
-    Returns a dict of arrays (T x n) plus per-instrument scalars and the
-    covariance estimator, or None if nothing is tradable.
+    Build aligned numpy panels for every instrument with a valid signal.  This is the ONE
+    universe builder shared by EWMAC trend (default), basic carry, and combined carry+trend
+    — they differ only in `signal_fn`; vol, correlation, handcraft weights, IDM, and the
+    covariance estimator are strategy-independent.  Returns a dict of arrays (T x n) plus
+    per-instrument scalars and the covariance estimator, or None if nothing is tradable.
+
+    signal_fn(spec, mp) -> {"sigma","forecast",...} | None : per-instrument signal builder.
+    Default is the EWMAC trend `instrument_signals` (which ignores `mp`).  Pass
+    `carry_instrument_signals` / `carry_trend_instrument_signals` for the other strategies;
+    those need the `mp` (multiple_prices) term structure, which is fetched here and passed
+    in (None if the instrument has no term-structure file — the carry builders return None).
 
     tradable_set: optional set of instrument names we are allowed to trade. The full
     `instruments` list forms the optimisation universe (drives covariance + target
@@ -111,24 +121,41 @@ def _build_universe(
     before today before building the panels.  Use ~3000 for live runs to avoid OOM
     while still covering the full 10-year blended-vol rolling window (2520 trading
     days ≈ 3000 calendar days).  None => full history (backtest behaviour).
+
+    return_components: also return (specs, signals) so callers (e.g. the proportion sweep)
+    can recompute just the forecast panel without rebuilding the covariance model.
     """
+    if signal_fn is None:
+        signal_fn = lambda spec, mp: instrument_signals(spec)   # EWMAC trend default
+
     cutoff_date: pd.Timestamp | None = None
     if lookback_days is not None:
         cutoff_date = pd.Timestamp.today().normalize() - pd.Timedelta(days=lookback_days)
 
     specs, signals = {}, {}
+    skipped: list[tuple[str, str]] = []
     for instr in instruments:
         spec = _pst_spec(instr)
         if spec is None:
+            skipped.append((instr, "no spec (no data/metadata or short history)"))
             continue
+        # Term structure for carry signals; None for instruments lacking the file (trend
+        # ignores it, carry returns None). _pst_spec already reads this file, so cached.
+        try:
+            mp = pst.multiple_prices(instr)
+        except (FileNotFoundError, KeyError):
+            mp = None
         if cutoff_date is not None:
             spec = dc_replace(
                 spec,
                 prices=spec.prices[spec.prices.index >= cutoff_date],
                 raw_price=spec.raw_price[spec.raw_price.index >= cutoff_date],
             )
-        sig = instrument_signals(spec)
+            if mp is not None:
+                mp = mp[mp.index >= cutoff_date]
+        sig = signal_fn(spec, mp)
         if sig is None:
+            skipped.append((instr, "no eligible signal / invalid vol"))
             continue
         specs[instr] = spec
         signals[instr] = sig
@@ -138,6 +165,9 @@ def _build_universe(
         return None
     print(f"  {len(names)} instruments with valid signals"
           + (f" (lookback {lookback_days}d)" if lookback_days else ""))
+    if skipped:
+        print(f"  {len(skipped)} skipped: "
+              + ", ".join(f"{i} ({r})" for i, r in skipped))
 
     # Common daily index = union of all instrument price indices.
     idx = None
@@ -190,11 +220,14 @@ def _build_universe(
         print(f"  {int(tradable.sum())}/{n} instruments tradable "
               f"(rest held at min=max=current)")
 
-    return dict(
+    uni = dict(
         names=names, idx=idx, price=price, raw=raw, fx=fx, sigma=sigma,
         forecast=forecast, mult=mult, spread=spread, commission=commission,
         W=W, C=C, est=est, tradable=tradable,
     )
+    if return_components:
+        return uni, specs, signals
+    return uni
 
 
 NAIVE_BUFFER_FRAC = 0.10   # per-instrument buffer band for the naive baseline  [calcs line 113]

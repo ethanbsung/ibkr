@@ -14,10 +14,13 @@ source "$REPO/venv/bin/activate"
 
 echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') run_dynamic start (repo=$REPO) ====="
 
-# 1. Refresh PST futures + FX data from IBKR so EWMAC signals use today's close.
+# 1. Refresh PST futures + FX data from IBKR so trend+carry signals use today's close.
+#    --carry refreshes the multiple_prices term structure (CARRY leg) too; the combined
+#    forecast sizes off carry, and live_dynamic ages the CARRY column (require_carry_fresh),
+#    so a stale term structure would fail instruments out without this.
 UNIVERSE_INSTRUMENTS=$(python3 -c "from ibkr_fut.instrument_universe import UNIVERSE; print(' '.join(UNIVERSE))") \
   || { echo "ERROR: failed to load UNIVERSE — aborting compute (no snapshot written)"; exit 1; }
-python3 ibkr_fut/pst_updater.py $UNIVERSE_INSTRUMENTS --fx || echo "WARN: pst_updater nonzero; proceeding with existing data"
+python3 ibkr_fut/pst_updater.py $UNIVERSE_INSTRUMENTS --fx --carry || echo "WARN: pst_updater nonzero; proceeding with existing data"
 
 # 2. Refresh volume cache weekly (stale after 7 days; used by instrument_selection filter).
 python3 ibkr_fut/volume_collector.py --max-age 7 || echo "WARN: volume_collector nonzero; proceeding with existing cache"
@@ -27,7 +30,7 @@ python3 ibkr_fut/volume_collector.py --max-age 7 || echo "WARN: volume_collector
 #    compute — broken instruments fail safe (skipped) at order time.
 python3 ibkr_fut/preflight_check.py || echo "WARN: preflight reported failures (alerted); proceeding"
 
-# 4. Run the EWMAC dynamic-optimisation executor — compute phase only.
+# 4. Run the combined carry+trend dynamic-optimisation executor — compute phase only.
 #    Order execution is handled by the daemon (run_execution.sh), which picks up
 #    the new snapshot automatically.
 python3 ibkr_fut/live_dynamic.py --mode compute

@@ -38,7 +38,7 @@ from ibkr_fut.ewmac_signals import (
 # ── Parameters ───────────────────────────────────────────────────────────────────
 
 CAPITAL          = 100_000   # fixed capital for position sizing throughout
-TARGET_RISK      = 0.20
+TARGET_RISK      = 0.25
 BUFFER_FRAC      = 0.10         # [calcs line 113]
 COMMISSION       = 1.5          # round-trip commission per contract
 IDM_CAP          = 2.5          # cap IDM for live realism (Carver caps at 2.5)  [calcs line 69]

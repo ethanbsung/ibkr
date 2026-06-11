@@ -30,7 +30,7 @@ from ibkr_fut.foundations import (
     sr_cost_per_trade,
     annual_sr_cost,
 )
-from ibkr_fut.ewmac_signals import FORECAST_CAP   # ±20 forecast cap, shared with EWMAC
+from ibkr_fut.ewmac_signals import FORECAST_CAP, COST_LIMIT_SR   # shared with EWMAC
 
 # ── Constants ────────────────────────────────────────────────────────────────────
 
@@ -69,8 +69,8 @@ CARRY_SPAN_TURNOVER: dict[int, float] = {
     60:  1.8,
     120: 1.22,
 }
-
-COST_LIMIT_SR = 0.15   # max annual SR cost to include a trading rule  [calcs line 171]
+# COST_LIMIT_SR is imported from ewmac_signals (single source of truth, shared by both
+# styles so the combined-strategy cost gate stays consistent across trend and carry).
 
 
 # ── Raw carry ──────────────────────────────────────────────────────────────────────
@@ -121,6 +121,49 @@ def carry_eligible_spans(cost_per_trade: float, rolls_per_year: int) -> list[int
     return eligible
 
 
+def carry_span_forecasts(
+    mp: pd.DataFrame,
+    raw_price: pd.Series,
+    sigma_pct: pd.Series,
+    active_spans: list[int],
+) -> dict[int, pd.Series]:
+    """
+    Per-span capped carry forecast (each scaled so avg |value| ≈ 10, capped ±20), aligned
+    to raw_price.index.  Shared building block: carry_forecast (Strategy 10) equal-weights
+    these + applies the per-style FDM; carry_trend_signals (Strategy 11) reuses them at the
+    per-rule level for the combined 60/40 blend — so the carry math lives in one place.
+
+    raw_price : front/PRICE contract price (always positive) — risk-adjust denominator.
+    sigma_pct : annualised vol as a fraction (blended_vol), same series used for sizing.
+
+    Stale-data fail-safe: annualised carry is forward-filled at most CARRY_FFILL_LIMIT
+    trading days; PAST that horizon the carry is stale and the span forecast is forced to
+    NaN, so the instrument drops out of the tradable set rather than trading months-old
+    carry.  This masking is essential — a bare ewm().mean() carries its last value forward
+    through NaNs indefinitely, which would silently defeat the ffill bound (see live
+    FRESH_DAYS).  Rows before the first carry observation are NaN for the same reason.
+
+    Returns {} for an empty span list (so callers with no carry rule never touch mp).
+    """
+    if not active_spans:
+        return {}
+    idx = raw_price.index
+    arc = annualised_raw_carry(mp).reindex(idx).ffill(limit=CARRY_FFILL_LIMIT)
+    stale = arc.isna()   # NaN after the ffill horizon (or before any carry observation)
+
+    # Risk-adjusted carry (dimensionless, ~SR units): annualised carry in price points
+    # divided by annualised vol in price points (= σ% · price = σ_p · 16).
+    denom = (raw_price * sigma_pct).replace(0.0, np.nan)
+    carry_raw = arc / denom
+
+    out: dict[int, pd.Series] = {}
+    for span in active_spans:
+        smoothed = carry_raw.ewm(span=span, min_periods=1, adjust=False).mean()
+        capped   = (smoothed * CARRY_FORECAST_SCALAR).clip(-FORECAST_CAP, FORECAST_CAP)
+        out[span] = capped.where(~stale)   # force NaN where carry is stale/absent
+    return out
+
+
 def carry_forecast(
     mp: pd.DataFrame,
     raw_price: pd.Series,
@@ -128,32 +171,16 @@ def carry_forecast(
     active_spans: list[int],
 ) -> pd.Series:
     """
-    Combined, capped carry forecast aligned to raw_price.index.
-
-    raw_price : front/PRICE contract price (always positive) — risk-adjust denominator.
-    sigma_pct : annualised vol as a fraction (blended_vol), same series used for sizing.
-    active_spans : carry smoothing spans surviving the cost gate.
+    Combined, capped carry forecast aligned to raw_price.index (Carver Strategy 10):
+    equal-weight the per-span forecasts, apply the FDM, cap to ±20.  NaN wherever the
+    carry is stale (see carry_span_forecasts), which fails the instrument out safely.
     """
     if not active_spans:
         return pd.Series(0.0, index=raw_price.index)
 
-    idx = raw_price.index
-    # Bounded ffill: small gaps in the term-structure feed are carried, but a frozen
-    # carry file goes NaN after CARRY_FFILL_LIMIT days so the instrument fails safe.
-    arc = annualised_raw_carry(mp).reindex(idx).ffill(limit=CARRY_FFILL_LIMIT)
-
-    # Risk-adjusted carry (dimensionless, ~SR units): annualised carry in price points
-    # divided by annualised vol in price points (= σ% · price = σ_p · 16).
-    denom = (raw_price * sigma_pct).replace(0.0, np.nan)
-    carry_raw = arc / denom
-
-    raw_combined = pd.Series(0.0, index=idx)
+    per_span = carry_span_forecasts(mp, raw_price, sigma_pct, active_spans)
     w = 1.0 / len(active_spans)
-    for span in active_spans:
-        smoothed = carry_raw.ewm(span=span, min_periods=1, adjust=False).mean()
-        scaled   = smoothed * CARRY_FORECAST_SCALAR
-        capped   = scaled.clip(-FORECAST_CAP, FORECAST_CAP)
-        raw_combined = raw_combined + w * capped
+    raw_combined = sum(w * fc for fc in per_span.values())
 
     fdm = CARRY_FDM.get(tuple(sorted(active_spans)), 1.0)
     return (raw_combined * fdm).clip(-FORECAST_CAP, FORECAST_CAP)
@@ -167,8 +194,11 @@ def carry_instrument_signals(spec, mp: pd.DataFrame) -> dict | None:
     loop consumes it unchanged.
 
     spec : InstrumentSpec (from backtest_ewmac._pst_spec) — prices/raw_price/fx/mult/etc.
-    mp   : pst.multiple_prices(instr) DataFrame with PRICE/CARRY/*_CONTRACT columns.
+    mp   : pst.multiple_prices(instr) DataFrame with PRICE/CARRY/*_CONTRACT columns, or
+           None if the instrument has no term-structure file (carry can't be computed).
     """
+    if mp is None:
+        return None
     ret   = pct_returns_backadjusted(spec.prices, spec.raw_price)
     sigma = blended_vol(ret)
 

@@ -33,13 +33,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from tabulate import tabulate
 
-from dataclasses import replace as dc_replace
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ibkr_fut.foundations import compute_corr_matrix, handcraft_weights
-from ibkr_fut.backtest_ewmac import pst, _pst_spec, TARGET_RISK, IDM_CAP
-from ibkr_fut.dynamic_opt import CovarianceEstimator, optimise_positions
+from ibkr_fut.backtest_ewmac import TARGET_RISK, IDM_CAP
+from ibkr_fut.dynamic_opt import optimise_positions
 from ibkr_fut.backtest_dynamic import (
+    _build_universe,
     _simulate,
     position_history,
     summarise_position_history,
@@ -60,113 +58,14 @@ def _build_carry_universe(
     lookback_days: int | None = None,
 ) -> dict | None:
     """
-    Carry analogue of backtest_dynamic._build_universe: build aligned numpy panels for
-    every instrument with a valid carry signal, plus per-instrument scalars and the
-    covariance estimator.  Returns the same dict shape `_simulate` consumes, or None.
-
-    Differs from the EWMAC builder in one line — the forecast comes from
-    carry_instrument_signals (needs pst.multiple_prices) instead of instrument_signals.
-    Handcraft weights / correlation / covariance / IDM are strategy-independent and built
-    identically.
-
-    lookback_days: if set, trim all price series to at most this many calendar days
-    before today before building the panels (mirrors backtest_dynamic._build_universe;
-    use ~3000 for a future live carry run to avoid OOM).  None => full history.
+    Build the carry universe via the shared backtest_dynamic._build_universe, passing the
+    carry signal function.  Vol / correlation / handcraft weights / covariance / IDM are
+    strategy-independent; only the per-instrument forecast (carry_instrument_signals,
+    which needs the multiple_prices term structure) differs from EWMAC trend.
     """
-    cutoff_date: pd.Timestamp | None = None
-    if lookback_days is not None:
-        cutoff_date = pd.Timestamp.today().normalize() - pd.Timedelta(days=lookback_days)
-
-    specs, signals = {}, {}
-    skipped: list[tuple[str, str]] = []
-    for instr in instruments:
-        spec = _pst_spec(instr)
-        if spec is None:
-            skipped.append((instr, "no spec (no data/metadata or short history)"))
-            continue
-        try:
-            mp = pst.multiple_prices(instr)
-        except (FileNotFoundError, KeyError):
-            skipped.append((instr, "no carry data (multiple_prices missing)"))
-            continue
-        if cutoff_date is not None:
-            spec = dc_replace(
-                spec,
-                prices=spec.prices[spec.prices.index >= cutoff_date],
-                raw_price=spec.raw_price[spec.raw_price.index >= cutoff_date],
-            )
-            mp = mp[mp.index >= cutoff_date]
-        sig = carry_instrument_signals(spec, mp)
-        if sig is None:
-            skipped.append((instr, "no eligible carry spans / invalid vol"))
-            continue
-        specs[instr] = spec
-        signals[instr] = sig
-
-    names = list(specs.keys())
-    if not names:
-        return None
-    print(f"  {len(names)} instruments with valid carry signals"
-          + (f" (lookback {lookback_days}d)" if lookback_days else ""))
-    if skipped:
-        print(f"  {len(skipped)} skipped: "
-              + ", ".join(f"{i} ({r})" for i, r in skipped))
-
-    # Common daily index = union of all instrument price indices.
-    idx = None
-    for instr in names:
-        ix = specs[instr].prices.index
-        idx = ix if idx is None else idx.union(ix)
-    idx = idx.sort_values()
-    T, n = len(idx), len(names)
-
-    price    = np.full((T, n), np.nan)   # back-adjusted (P&L driver)
-    raw      = np.full((T, n), np.nan)   # raw contract price (sizing denominator)
-    fx       = np.full((T, n), np.nan)
-    sigma    = np.full((T, n), np.nan)   # blended annualised vol (sizing)
-    forecast = np.full((T, n), np.nan)   # combined capped carry forecast
-    mult     = np.zeros(n)
-    spread   = np.zeros(n)
-    commission = np.zeros(n)
-
-    for j, instr in enumerate(names):
-        s = specs[instr]
-        price[:, j]    = s.prices.reindex(idx).values
-        raw[:, j]      = s.raw_price.reindex(idx).ffill().values
-        fx[:, j]       = s.fx.reindex(idx, method="ffill").values
-        sigma[:, j]    = signals[instr]["sigma"].reindex(idx).values
-        forecast[:, j] = signals[instr]["forecast"].reindex(idx).values
-        mult[j]        = s.mult
-        spread[j]      = s.spread
-        commission[j]  = s.commission
-
-    # Static handcraft weights + correlation (for the unrounded-N weight_i and IDM).
-    print("  computing correlation matrix + handcraft weights...")
-    corr_matrix = compute_corr_matrix(names, pst)
-    weights     = handcraft_weights(names, corr_matrix)
-    W = np.array([weights.get(i, 0.0) for i in names])
-    C = corr_matrix.reindex(index=names, columns=names).values.copy()
-    C = np.nan_to_num(C, nan=0.0)
-    np.fill_diagonal(C, 1.0)
-
-    # Time-varying covariance estimator (weekly EWMA corr + daily EWMA vol).
-    print("  building covariance estimator...")
-    est = CovarianceEstimator(
-        {i: specs[i].prices for i in names},
-        {i: specs[i].raw_price for i in names},
-    )
-
-    if tradable_set is None:
-        tradable = np.ones(n, dtype=bool)
-    else:
-        tradable = np.array([i in tradable_set for i in names], dtype=bool)
-        print(f"  {int(tradable.sum())}/{n} instruments tradable "
-              f"(rest held at min=max=current)")
-
-    return dict(
-        names=names, idx=idx, price=price, raw=raw, fx=fx, sigma=sigma,
-        forecast=forecast, mult=mult, spread=spread, commission=commission,
-        W=W, C=C, est=est, tradable=tradable,
+    return _build_universe(
+        instruments, tradable_set=tradable_set, lookback_days=lookback_days,
+        signal_fn=carry_instrument_signals,
     )
 
 

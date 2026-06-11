@@ -70,3 +70,5 @@ trading_strategies_summary_20250707_170759.txt
 pst_updater.log
 .claude/
 *.log
+
+/ibkr_fut/carry/

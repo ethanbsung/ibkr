@@ -24,7 +24,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
-MAX_GROSS_LEV        = 10.0  # skip cycle if portfolio gross leverage exceeds this
+MAX_GROSS_LEV        = 12.0  # skip cycle if portfolio gross leverage exceeds this.
+                             # Combined carry+trend @ target risk 0.25 backtests to
+                             # mean 3.4x / p95 5.9x / max 10.9x gross; 12.0 clears the
+                             # legitimate peak while still catching a genuine blow-up.
 MAX_INSTR_VOL_FRAC   = 0.50  # skip order if single-instr annual $ vol > 50% of capital
 DAILY_LOSS_HALT_FRAC = 0.08  # halt daemon if equity dropped >8% from compute-time capital
 

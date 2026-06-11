@@ -42,7 +42,20 @@ class PSTLoader:
         # daemon never reads these files in its loop, so staleness detection (a
         # one-shot read in the compute phase) is unaffected. Callers must not mutate
         # the returned objects in place (none do — they slice/reindex, which copy).
+        # Bounded (FIFO eviction) so a long-lived process can't grow it without limit;
+        # the cap comfortably holds a full universe (~250 instruments × adjusted+multiple).
         self._price_cache: dict[tuple, object] = {}
+        self._price_cache_max = 1024
+
+    def _cache_put(self, key: tuple, value) -> None:
+        """Insert into the price cache, evicting the oldest entry past the size cap."""
+        if len(self._price_cache) >= self._price_cache_max:
+            self._price_cache.pop(next(iter(self._price_cache)))   # drop oldest (FIFO)
+        self._price_cache[key] = value
+
+    def clear_price_cache(self) -> None:
+        """Drop all cached price panels (call after a PST refresh in a long-lived process)."""
+        self._price_cache.clear()
 
     # ------------------------------------------------------------------ #
     # Instrument list                                                       #
@@ -74,7 +87,7 @@ class PSTLoader:
         series = pd.read_csv(fp, parse_dates=["DATETIME"], index_col="DATETIME")["price"]
         series.index = pd.DatetimeIndex(series.index)
         out = self._resample(series, freq)
-        self._price_cache[key] = out
+        self._cache_put(key, out)
         return out
 
     def multiple_prices(self, instrument: str, freq: str = "daily") -> pd.DataFrame:
@@ -106,7 +119,7 @@ class PSTLoader:
             prices_daily = df[price_cols].resample("D").last()
             contracts_daily = df[contract_cols].resample("D").last()
             df = pd.concat([prices_daily, contracts_daily], axis=1).dropna(how="all")
-        self._price_cache[key] = df
+        self._cache_put(key, df)
         return df
 
     def roll_calendar(self, instrument: str) -> pd.DataFrame:
