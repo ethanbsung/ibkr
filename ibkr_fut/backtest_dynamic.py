@@ -118,9 +118,11 @@ def _build_universe(
     None => every instrument with valid signals is tradable (original behaviour).
 
     lookback_days: if set, trim all price series to at most this many calendar days
-    before today before building the panels.  Use ~3000 for live runs to avoid OOM
-    while still covering the full 10-year blended-vol rolling window (2520 trading
-    days ≈ 3000 calendar days).  None => full history (backtest behaviour).
+    before today before building the panels.  Use ~4000 for live runs to bound memory
+    while fully covering the blended-vol long window (a 2520-TRADING-day rolling average
+    ≈ 3650 calendar days, so 4000 calendar days covers it with margin).  The EWMA
+    covariance (25wk/32d) and handcraft correlation (full history, read straight from
+    pst) don't depend on this window.  None => full history (backtest behaviour).
 
     return_components: also return (specs, signals) so callers (e.g. the proportion sweep)
     can recompute just the forecast panel without rebuilding the covariance model.

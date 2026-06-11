@@ -1215,8 +1215,13 @@ def main():
             return
 
         print(f"\n  Building universe from PST data…")
+        # lookback_days=4000: blended_vol's long component is a 2520-TRADING-day rolling
+        # average (≈3650 calendar days); 4000 calendar days fully covers it (with margin for
+        # weekends/holidays) so live vol exactly matches the full-history backtest. The
+        # EWMA covariance (25wk/32d) and the handcraft correlation (full history via pst)
+        # don't depend on this window. Panel memory cost is modest — safe on the 1GB VPS.
         uni = _build_universe(list(UNIVERSE.keys()), tradable_set=tradable_set,
-                              lookback_days=3000, signal_fn=_combined_signal)
+                              lookback_days=4000, signal_fn=_combined_signal)
         if uni is None:
             print("ERROR: universe build failed (no instruments with valid signals).")
             ib.disconnect()

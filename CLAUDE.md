@@ -58,7 +58,6 @@ There are three independent live-trading pipelines, each with its own ledger and
 - **Entry point:** `ibkr_fut/live_dynamic.py` (cron: 6 PM ET weekdays, run via `run_dynamic.sh`)
 - Reads capital from IBKR (port 4002), builds a Carver "Jumbo" universe from PST CSV data, runs joint portfolio optimisation (`dynamic_opt.optimise_positions`), reconciles target vs held, and submits DAY market orders.
 - **Data pipeline:** `ibkr_fut/pst_updater.py` must run before `live_dynamic.py` to pull fresh PST closes.
-- **IBS strategy:** retired (`run_ibs.sh` removed from cron). The IBS/Williams `live_port.py` (8-strategy 50/50 IBS+Williams on ES/YM/GC/NQ) still exists but is not in the active cron.
 
 ### 3. ETF EWMAC Live (`etf/live/`)
 - **Entry point:** `etf/live/run_daily.py` (cron: 3:55 PM ET weekdays, executes via Alpaca)
