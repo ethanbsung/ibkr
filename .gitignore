@@ -72,3 +72,8 @@ pst_updater.log
 *.log
 
 /ibkr_fut/carry/
+
+# Runtime state & ledgers (change every run, not code)
+paper/ledgers/
+account_snapshots/
+router_state.json
