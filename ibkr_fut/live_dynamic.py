@@ -142,6 +142,39 @@ HEARTBEAT_PATH    = os.path.join(_REPO_ROOT, "ibkr_fut", "daemon_heartbeat.txt")
 
 pst = PSTLoader()
 
+# conId → delivery month (YYYYMM). conId ↔ delivery month is immutable, so this
+# cache persists for the daemon's lifetime — one reqContractDetails per contract, ever.
+_CONID_MONTH_CACHE: dict[int, str] = {}
+
+
+def delivery_month(ib, contract) -> str:
+    """
+    True delivery month (YYYYMM) for a futures contract.
+
+    IB's contract.lastTradeDateOrContractMonth is the EXPIRY date, which for energy
+    (NYMEX crude, Brent, NatGas, HeatOil, Gasoline) and some other contracts precedes
+    the delivery month by one calendar month — e.g. QM Sep-delivery expires 20260819,
+    so [:6] would mis-map it to 202608. ContractDetails.contractMonth is the canonical
+    delivery month and matches the roll-calendar YYYYMM codes, so positions reconcile
+    against the right roll-calendar month instead of triggering phantom rolls.
+    Falls back to the expiry-date prefix only if contractMonth is unavailable.
+    """
+    cid = getattr(contract, "conId", 0)
+    if cid and cid in _CONID_MONTH_CACHE:
+        return _CONID_MONTH_CACHE[cid]
+    month = ""
+    try:
+        cds = ib.reqContractDetails(contract)
+        if cds and cds[0].contractMonth:
+            month = str(cds[0].contractMonth)[:6]
+    except Exception:
+        month = ""
+    if not month:                                   # safe fallback
+        month = (contract.lastTradeDateOrContractMonth or "")[:6]
+    if cid:
+        _CONID_MONTH_CACHE[cid] = month
+    return month
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # IBKR contract config
@@ -407,7 +440,7 @@ def get_positions_by_instr(ib, ibcfg: pd.DataFrame) -> tuple[dict, list]:
         if instr is None:
             unknown.append((c.symbol, c.exchange, qty))
             continue
-        month = (c.lastTradeDateOrContractMonth or "")[:6]
+        month = delivery_month(ib, c)
         by_month = held.setdefault(instr, {})
         by_month[month] = by_month.get(month, 0) + qty
     return held, unknown
