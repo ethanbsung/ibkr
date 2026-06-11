@@ -154,8 +154,8 @@ UNIVERSE: dict[str, str] = {
     "ALUMINIUM":    "Metals",  # COMEX aluminium
 
     # ── Crypto (CME) ──────────────────────────────────────────────────────
-    "BITCOIN":      "Metals",   # grouped with metals per Carver convention
-    "ETHEREUM":     "Metals",
+    "BITCOIN":      "Metals",   # MBT 0.1 BTC ~$10.5k notional; marginal at $250k, trades on strong signals
+    "ETHER-micro":  "Metals",   # MET 0.1 ETH ~$250 notional; ~12 contracts at $250k
 
     # ── Energy (NYMEX — free via Physical Metals/Comms waiver) ───────────
     "CRUDE_W_mini": "Energy",
