@@ -381,10 +381,8 @@ def section_daemon_summary() -> tuple[list[str], list[str]]:
         f"  {cycles} cycles ({mode})  ·  {placed} placed  ·  {deferred} deferred  ·  {errors} errors"
     )
     if error_lines:
-        for el in error_lines[:3]:
+        for el in reversed(error_lines):   # most recent first
             lines.append(f"    {el}")
-        if len(error_lines) > 3:
-            lines.append(f"    ... and {len(error_lines) - 3} more")
         warnings.append(f"{errors} daemon error(s) in last 24h")
 
     return lines, warnings
