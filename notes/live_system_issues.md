@@ -7,7 +7,16 @@ Listed roughly in order of severity.
 
 ## CRITICAL
 
-### [BUG-1] Energy contract month mismatch causes phantom spread rolls
+### [BUG-1] Energy contract month mismatch causes phantom spread rolls — RESOLVED 2026-06-11
+
+**Status**: FIXED in `live_dynamic.py` (commit b35e577, deployed to VPS + daemon restarted
+2026-06-11 23:29Z). Added `delivery_month(ib, contract)` helper that reads the canonical
+delivery month from `ContractDetails.contractMonth` (matches roll-calendar YYYYMM codes),
+with a persistent conId cache, and use it in `get_positions_by_instr` in place of
+`lastTradeDateOrContractMonth[:6]`. Verified: held `+1 QMU6` now reads as `{'202609': 1}`,
+and the post-restart daemon cycle placed ZERO QM orders (was phantom-rolling every cycle).
+Note: the same bug still exists in the retired `live_signals.py:129` (IBS, off cron) — left
+as-is. Original analysis below.
 
 **Affected instruments**: All NYMEX energy contracts — QM, CRUDE_W_mini, BRENT-LAST, GAS_US_mini, GAS-LAST, HEATOIL, GASOILINE (and likely others where delivery month ≠ expiry month).
 
