@@ -58,6 +58,7 @@ There are three independent live-trading pipelines, each with its own ledger and
 - **Entry point:** `ibkr_fut/live_dynamic.py` (cron: 6 PM ET weekdays, run via `run_dynamic.sh`)
 - Reads capital from IBKR (port 4002), builds a Carver "Jumbo" universe from PST CSV data, runs joint portfolio optimisation (`dynamic_opt.optimise_positions`), reconciles target vs held, and submits DAY market orders.
 - **Data pipeline:** `ibkr_fut/pst_updater.py` must run before `live_dynamic.py` to pull fresh PST closes.
+- **Issue log:** `ibkr_fut/notes/live_system_issues.md` is the running log of serious live-system issues. When you find a serious issue in this system, add it there (ID `BUG-n`/`OBS-n`, severity, symptom, root cause, fix). When one is fixed, move its entry to the **Resolved** section (keep it, don't delete) with the commit + the verification that proved it fixed.
 
 ### 3. ETF EWMAC Live (`etf/live/`)
 - **Entry point:** `etf/live/run_daily.py` (cron: 3:55 PM ET weekdays, executes via Alpaca)
