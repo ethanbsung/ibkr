@@ -18,6 +18,20 @@ and the post-restart daemon cycle placed ZERO QM orders (was phantom-rolling eve
 Note: the same bug still exists in the retired `live_signals.py:129` (IBS, off cron) — left
 as-is. Original analysis below.
 
+**Universe-wide cross-check (2026-06-11, /tmp/crosscheck_months.py):** qualified each
+instrument's roll-calendar current+next month and confirmed `delivery_month()` round-trips
+to the roll-calendar code. **RED (round-trip mismatch) = 0** across all 105 instruments —
+the universal change is safe. The old `[:6]` was wrong by varying amounts in BOTH
+directions, not just "energy off by one":
+- SOFR (Bond): off by **−3 months** (IMM quarterly; currently filtered out but a latent landmine)
+- BRENT-LAST (Energy): off by **−2 months**
+- CRUDE_W_mini, GAS_US_mini, GAS-LAST, HEATOIL, GASOILINE, RUBBER, BRE: off by −1 month
+- CHEESE (Ags): off by **+1 month** (expiry falls AFTER the contract month — old code overshot)
+
+191 contract-months were no-ops (expiry month == contract month: all FX/equity/bond/metal
+and most ags). Held legs JPY & NZD are no-ops, confirming the deploy didn't disturb them.
+Only `BRE/202606` failed to qualify (known stale-BRE issue, unrelated).
+
 **Affected instruments**: All NYMEX energy contracts — QM, CRUDE_W_mini, BRENT-LAST, GAS_US_mini, GAS-LAST, HEATOIL, GASOILINE (and likely others where delivery month ≠ expiry month).
 
 **Root cause**: For WTI crude (QM) and other energy futures, IBKR's `lastTradeDateOrContractMonth` on the resolved contract is the *expiry date*, not the *delivery month*. These differ by one calendar month:
