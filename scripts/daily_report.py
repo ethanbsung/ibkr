@@ -397,7 +397,7 @@ def section_pnl_summary() -> tuple[list[str], list[str]]:
                 suffix = "" if mode == "LIVE" else ("  (dry-run)" if mode == "DRY-RUN" else "")
                 if "daily_pnl_usd" in df.columns:
                     pnl_usd = float(last5["daily_pnl_usd"].iloc[-1])
-                    sgn_p   = "+" if pnl_usd >= 0 else ""
+                    sgn_p   = "+" if pnl_usd >= 0 else "-"
                     today_s = f"{sgn_p}${abs(pnl_usd):,.0f}"
             else:
                 nav_val = float(df["nav"].iloc[-1]) if "nav" in df.columns else None
