@@ -74,6 +74,7 @@ pst_updater.log
 /ibkr_fut/carry/
 /ibkr_fut/carry_trend/
 /ibkr_fut/results/
+/ibkr_fut/breakout/
 
 # Runtime state & ledgers (change every run, not code)
 paper/ledgers/

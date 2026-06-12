@@ -70,6 +70,7 @@ import math
 import os
 import sys
 import time
+import traceback
 from datetime import date, datetime, timezone
 
 import numpy as np
@@ -411,6 +412,22 @@ def get_equity(ib) -> float | None:
     return None
 
 
+def ib_symbol_to_instr(ibcfg: pd.DataFrame) -> dict:
+    """
+    {IBSymbol: instr} over UNIVERSE. Ambiguous symbols (carried by 2+ instruments)
+    map to None — a bare symbol must not silently claim someone else's position.
+    The single definition of the symbol→instrument map, reused by callers that
+    only have an IB symbol (e.g. the daily report's positions.csv fallback).
+    """
+    sym_only: dict = {}
+    for instr in UNIVERSE:
+        spec = ib_spec(ibcfg, instr)
+        if spec:
+            sym = spec["symbol"]
+            sym_only[sym] = None if sym in sym_only else instr
+    return sym_only
+
+
 def get_positions_by_instr(ib, ibcfg: pd.DataFrame) -> tuple[dict, list]:
     """
     Return ({instr: {YYYYMM: qty}}, unknown) for all held futures.
@@ -419,13 +436,12 @@ def get_positions_by_instr(ib, ibcfg: pd.DataFrame) -> tuple[dict, list]:
     # (symbol, exchange) -> instr, restricted to Jumbo. Symbol-only fallback is
     # used only when exactly one universe instrument carries that IB symbol —
     # an ambiguous symbol must not silently claim someone else's position.
-    rev, sym_only = {}, {}
+    rev = {}
     for instr in UNIVERSE:
         spec = ib_spec(ibcfg, instr)
         if spec:
             rev[(spec["symbol"], spec["exchange"])] = instr
-            sym = spec["symbol"]
-            sym_only[sym] = None if sym in sym_only else instr
+    sym_only = ib_symbol_to_instr(ibcfg)
 
     held, unknown = {}, []
     for pos in ib.positions():
@@ -1113,7 +1129,8 @@ def run_daemon(args):
                                      n_positions=meta.get("n_held_target") if meta else None,
                                      gross_leverage=meta.get("gross_lev") if meta else None)
                 except Exception as e:
-                    print(f"[{_now()}] WARNING: log_daily failed: {e}")
+                    print(f"[{_now()}] WARNING: log_daily failed: {e}\n"
+                          f"{traceback.format_exc()}")
                 ledger = DynLedger()
 
             snapshot_computed_at = snap.get("computed_at")

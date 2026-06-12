@@ -194,6 +194,50 @@ def section_data_health() -> tuple[list[str], list[str]]:
     return lines, warnings
 
 
+# ── Shared live IBKR fetch ────────────────────────────────────────────────────
+
+# Cache the single live IB read so positions + P&L sections share one connection
+# and one source of truth. _SENTINEL distinguishes "not yet attempted" from
+# "attempted and failed" (which legitimately returns None).
+_IB_LIVE_CACHE = "__unset__"
+
+
+def _fetch_ib_live():
+    """
+    One live IBKR read for the whole report: ({equity}, held_by_instr, unknown).
+
+    Returns (equity_or_None, held|{}, unknown|[]). On any failure (gateway down,
+    deps missing) returns (None, {}, []) so callers fall back gracefully. Cached
+    module-wide — connects once (clientId IB_CLIENT), reuses the canonical
+    symbol→instrument mapping from live_dynamic so held is in the PST-instrument
+    namespace (matching targets), not raw IB symbols.
+    """
+    global _IB_LIVE_CACHE
+    if _IB_LIVE_CACHE != "__unset__":
+        return _IB_LIVE_CACHE
+
+    result = (None, {}, [])
+    try:
+        from ib_insync import IB
+        from ibkr_fut.live_dynamic import (get_positions_by_instr, load_ib_config,
+                                           get_equity)
+        ib = IB()
+        ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT, timeout=8, readonly=True)
+        try:
+            equity = get_equity(ib)
+            ibcfg = load_ib_config()
+            by_instr, unknown = get_positions_by_instr(ib, ibcfg)
+            held = {instr: sum(months.values()) for instr, months in by_instr.items()}
+            result = (equity, held, unknown)
+        finally:
+            ib.disconnect()
+    except Exception:
+        result = (None, {}, [])
+
+    _IB_LIVE_CACHE = result
+    return result
+
+
 # ── Section: futures positions ────────────────────────────────────────────────
 
 def section_futures_positions() -> tuple[list[str], list[str]]:
@@ -211,28 +255,33 @@ def section_futures_positions() -> tuple[list[str], list[str]]:
     targets   = snap.get("targets", {})
     snap_date = snap.get("date", "unknown")
 
-    # Try live IBKR first (gateway always up via IBC)
-    held   = {}
-    source = "cached"
-    try:
-        from ib_insync import IB
-        ib = IB()
-        ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT, timeout=8, readonly=True)
-        for pos in ib.positions():
-            c = pos.contract
-            if c.secType == "FUT":
-                held[c.symbol] = int(pos.position)
-        ib.disconnect()
-        source = "live"
-    except Exception:
+    # Live IBKR first (gateway up via IBC) — held is in the PST-instrument
+    # namespace (matching targets) via the shared canonical mapping. The CSV
+    # fallback stores IB symbols, so translate them to instruments too.
+    _, held, unknown = _fetch_ib_live()
+    source = "live" if held or unknown else "cached"
+    for sym, exch, qty in unknown:
+        warnings.append(f"unmapped IB position {sym} {exch} {qty:+d}")
+
+    if source == "cached":
+        held = {}
         pos_csv = LEDGERS["ibkr_dynamic"] / "positions.csv"
         if pos_csv.exists():
             df = pd.read_csv(pos_csv)
             if not df.empty:
+                # positions.csv keys by IB symbol — map back to instrument so it
+                # compares against targets in the same namespace.
+                sym_to_instr = {}
+                try:
+                    from ibkr_fut.live_dynamic import ib_symbol_to_instr, load_ib_config
+                    sym_to_instr = ib_symbol_to_instr(load_ib_config())
+                except Exception:
+                    warnings.append("position source degraded — names may not match targets")
                 latest = df[df["date"] == df["date"].max()]
                 for _, row in latest.iterrows():
                     if int(row["qty"]) != 0:
-                        held[row["symbol"]] = int(row["qty"])
+                        key = sym_to_instr.get(row["symbol"]) or row["symbol"]
+                        held[key] = held.get(key, 0) + int(row["qty"])
 
     all_syms = sorted(set(list(targets) + list(held)))
     tgt_str  = "  ".join(f"{s}={targets.get(s, 0):+d}" for s in all_syms) if targets else "(none)"
@@ -264,6 +313,42 @@ def _read_daily(ledger_dir: Path) -> pd.DataFrame:
     return df.sort_values("date").drop_duplicates("date", keep="last")
 
 
+def _detect_daemon_mode() -> str:
+    """
+    Ground-truth LIVE/DRY-RUN/UNKNOWN from what the daemon actually logged in the
+    last 24 h. The most recent "Cycle done" line wins: a plain cycle ("N placed …
+    deferred") is LIVE, a "(DRY-RUN)" cycle is DRY-RUN. UNKNOWN if no cycle in
+    range (e.g. daemon down) — callers should not label the account in that case.
+    """
+    log_path = REPO / "ibkr_fut" / "daemon_cron.log"
+    if not log_path.exists():
+        return "UNKNOWN"
+    try:
+        content = log_path.read_text(errors="replace").splitlines()
+    except Exception:
+        return "UNKNOWN"
+
+    cutoff = datetime.now(UTC) - timedelta(hours=24)
+    ts_re  = re.compile(r"\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z\]")
+    dry_re = re.compile(r"Cycle done \(DRY-RUN\):")
+    live_re = re.compile(r"Cycle done(?! \(DRY-RUN\)).*placed")
+
+    mode = "UNKNOWN"
+    for line in content:
+        m = ts_re.search(line)
+        if m:
+            try:
+                if datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=UTC) < cutoff:
+                    continue
+            except ValueError:
+                pass
+        if dry_re.search(line):
+            mode = "DRY-RUN"
+        elif live_re.search(line):
+            mode = "LIVE"
+    return mode
+
+
 def section_pnl_summary() -> tuple[list[str], list[str]]:
     lines = ["P&L SUMMARY (last 5 trading days)"]
     warnings = []
@@ -287,12 +372,29 @@ def section_pnl_summary() -> tuple[list[str], list[str]]:
 
             # NAV / equity label
             if name == "ibkr_dynamic":
-                state_p = ledger_dir / "state.json"
-                eq = None
-                if state_p.exists():
-                    eq = json.load(open(state_p)).get("last_equity")
-                nav_s = f"${eq:>10,.0f}" if eq else ""
-                suffix = "  (dry-run)"
+                # Prefer LIVE NetLiquidation (can't go stale if log_daily is
+                # missed); fall back to state.json last_equity with a [cached]
+                # marker so a stale fallback is visible.
+                live_eq, _, _ = _fetch_ib_live()
+                if live_eq is not None:
+                    eq, eq_src = live_eq, "live"
+                else:
+                    state_p = ledger_dir / "state.json"
+                    eq = json.load(open(state_p)).get("last_equity") if state_p.exists() else None
+                    eq_src = "cached"
+                nav_s = f"${eq:>10,.0f} [{eq_src}]" if eq else ""
+
+                # Flag a stale ledger: live equity far from daily.csv's last row
+                # means log_daily hasn't flushed.
+                if live_eq is not None and not df.empty and "equity" in df.columns:
+                    last_logged = float(df["equity"].iloc[-1])
+                    if last_logged and abs(live_eq - last_logged) / last_logged > 0.02:
+                        warnings.append(
+                            f"ibkr_dynamic equity drift: live ${live_eq:,.0f} vs "
+                            f"ledger ${last_logged:,.0f} — log_daily may not be flushing")
+
+                mode = _detect_daemon_mode()
+                suffix = "" if mode == "LIVE" else ("  (dry-run)" if mode == "DRY-RUN" else "")
                 if "daily_pnl_usd" in df.columns:
                     pnl_usd = float(last5["daily_pnl_usd"].iloc[-1])
                     sgn_p   = "+" if pnl_usd >= 0 else ""
@@ -346,7 +448,6 @@ def section_daemon_summary() -> tuple[list[str], list[str]]:
     error_re = re.compile(r"\b(ERROR|CRITICAL)\b")
 
     cycles = placed = deferred = errors = 0
-    is_dry = False
     error_lines: list[str] = []
 
     for line in content:
@@ -362,7 +463,6 @@ def section_daemon_summary() -> tuple[list[str], list[str]]:
 
         if dry_re.search(line):
             cycles += 1
-            is_dry  = True
             continue
 
         m = cycle_re.search(line)
@@ -376,7 +476,7 @@ def section_daemon_summary() -> tuple[list[str], list[str]]:
             errors += 1
             error_lines.append(line.strip())
 
-    mode = "DRY-RUN" if is_dry else "LIVE"
+    mode = _detect_daemon_mode()   # most-recent-cycle wins (shared with P&L tag)
     lines.append(
         f"  {cycles} cycles ({mode})  ·  {placed} placed  ·  {deferred} deferred  ·  {errors} errors"
     )
