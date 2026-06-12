@@ -2,6 +2,21 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Trading VPS
+
+The live trading system runs on the VPS, not this machine. SSH in whenever you need to do
+something that's only possible there — read live logs (`ibkr_fut/daemon_cron.log`,
+`dynamic_cron.log`), connect to IB Gateway (port 4002), check live positions, inspect the
+on-VPS `Data/` (gitignored, not in the repo), or restart the daemon:
+
+```bash
+ssh ethan@68.183.103.50      # repo at /home/ethan/ibkr; UTC host
+```
+
+Activate the venv there too (`source /home/ethan/ibkr/venv/bin/activate`). Run throwaway
+diagnostic scripts in `/tmp`, not in the repo. Code deploys via git (the VPS pulls `main`);
+`Data/` and `ib_config` fixes must be applied directly on the VPS since they're gitignored.
+
 ## Environment Setup
 
 Always activate the venv before running any Python:
