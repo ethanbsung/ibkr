@@ -15,28 +15,50 @@ First logged: 2026-06-11 live monitoring session.
 
 ## OPEN
 
-### HIGH
+### CRITICAL
 
-#### [BUG-6] Daily report compares targets (PST name) against held (IB symbol) — phantom mismatches, no real reconciliation
+#### [BUG-7] Daemon's `ib.positions()` cache freezes → re-rolls QM every cycle off a stale position (live capital churn)
 
-The Discord daily report's FUTURES POSITIONS section (`scripts/daily_report.py:199` `section_futures_positions`) keys **held** positions by IB symbol (`held[c.symbol]`, line 224) but keys **targets** by PST instrument name (straight from `targets_snapshot.json`, line 211). The two dicts live in different namespaces and are never mapped, so the mismatch logic (lines 242-244) compares apples to oranges.
+**Found 2026-06-16 live monitoring.** This is the QM "sell-Aug/buy-Sep every cycle" symptom that BUG-1 was thought to have fixed — but it is a **different bug**. BUG-1 (delivery_month mapping) is genuinely fixed and was *not* the cause here; `delivery_month` maps both QM legs correctly (`202609`/`202608`). Do **not** re-open BUG-1.
 
-**Concrete failure (2026-06-12 report):** the snapshot target was `CRUDE_W_mini=+1, DAX=-1, JPY=-1, NZD=-1`; actually held was `QM=+1, DAX=-1, JPY=-1, NZD=-1` (`scripts/account_summary.py`). `CRUDE_W_mini` *is* IB symbol `QM` — the +1 crude position is **correct and matched**. But the report rendered:
-
+**Symptom.** From the first cycle of the 2026-06-15T22:15Z daemon run, every 10-min cycle logged the identical line and re-traded it:
 ```
-Target:   CRUDE_W_mini=+1  DAX=-1  JPY=-1  NZD=-1  QM=+0
-Held:     CRUDE_W_mini=+0  ← MISMATCH  DAX=-1  JPY=-1  NZD=-1  QM=+1  ← MISMATCH
+CRUDE_W_mini  QM  202609  | held +1 → target +1   (fcast +14.6 ideal +0.19)
+  ⚠ ROLL — other months: 202608:+1
+  ACTION: BUY  1 QM 202609 [LMT ALGO]
+  ACTION: SELL 1 QM 202608 [ROLL CLOSE LMT ALGO]
 ```
+The daemon believed it held `{202609:+1, 202608:+1}` on **every** cycle and never saw its own fills. Over ~26 cycles the true position drifted to **+27 QM Sep / −27 QM Aug** (net +1, but **54 contracts gross** — a needless calendar spread) while the log kept printing `held +1`. Each cycle cost ~$2/contract commission + aggressive-fill slippage (most rolls switched to AGGRESSIVE).
 
-One real, in-line position shown as **two false mismatches** plus two spurious warnings. DAX/JPY/NZD line up only because their PST name happens to equal their IB symbol; any instrument whose PST name ≠ IB symbol (energy, micros, anything with a magnifier/alias) will always read as a double-mismatch even when perfectly reconciled.
+**Root cause.** `get_positions_by_instr` (live_dynamic.py:447) reads `ib.positions()`, which in ib_insync returns a **cached** list maintained by the `reqPositions` subscription that `connectAsync` starts — it is *not* a fresh query. The daemon comment at live_dynamic.py:1154 ("Fetch **fresh** positions") is wrong. The cache froze at the run's first value `{202609:+1, 202608:+1}` and never updated, even across the 22:30Z reconnect (the log shows `Peer closed connection.` / `IB disconnected — reconnecting…` around the gateway's nightly-reset window). The daemon then:
+- saw Aug as `+1` (long) → `old_months={202608:+1}` → "ROLL CLOSE **SELL** 1 Aug",
+- but Aug was actually short, so the SELL **opened/extended** the short (−25→−26→−27),
+- and the Sep BUY drove Sep +25→+26→+27.
 
-**Impact:** the report is useless for its one job — telling you whether held = target. It cries wolf on matched positions and would *hide* a genuine mismatch in the noise. (The DRY-RUN daemon means held never actually converges to target either — see context below — but that's a separate axis; even in execute mode this report would mislead.)
+So the reconcile logic was correct *given its inputs*; the inputs were a stale snapshot detached from reality. A fresh IB client always saw the true `+27/−27` (verified three times with throwaway clientIds) — proving the staleness is specific to the long-lived clientId-5 daemon session, not IB.
 
-**Root cause:** `live_dynamic.get_positions_by_instr` already does this mapping correctly — it builds a reverse `(symbol, exchange) → PST instr` map from `ib_spec`/`UNIVERSE` and also handles delivery-month aggregation. The report reimplemented position-fetching with a bare `c.symbol` key and skipped the mapping.
+**Why no self-heal / no alert.** Nothing re-requests positions; `reqPositions` is never explicitly called anywhere in the futures path (only `ib.positions()` reads, live_dynamic.py:447). On reconnect the daemon builds a fresh `IB()` but never forces a position re-seed + settle before the first read, and there is no sanity check that "held" is consistent with the orders we just placed (e.g. we just BOUGHT Sep yet Sep didn't increase).
 
-**Fix needed:** in `section_futures_positions`, map each held contract's `(c.symbol, c.exchange)` back to its PST instrument name via the same `UNIVERSE`/`ib_spec` reverse map `get_positions_by_instr` uses (or just import and call it), so target and held are compared in the PST-name namespace. Net the multiple-month-per-instrument case while at it. Also note the snapshot it reads is stale relative to live (report dated 2026-06-12 but `Snapshot: 2026-06-11`) — surface the snapshot age so a one-day-late compute is visible, and reconcile against *today's* expected target, not a day-old one.
+**Immediate remediation (done 2026-06-16, on VPS):**
+- Wrote `ibkr_fut/risk_halt.txt` (manual halt) and killed daemon PID 306866. Watchdog respects the halt file (watchdog.py:107) and will not restart.
+- Cancelled the orphaned working order left by the killed daemon (`orderId 220 BUY 1 QM Sep LMT 78.075`, clientId 5) — had to reconnect **as clientId 5** to cancel it; a cross-client `cancelOrder` was a no-op and `reqGlobalCancel` was (correctly) blocked.
+- Flattened the spread with two market orders (SELL 26 QMU6, BUY 27 QMQ6) → **final position +1 QM Sep, 0 Aug = the true target**, 0 open orders. Other holdings (NZD −1, JPY −1, DAX −1) match the snapshot's `target holds 4`.
+- **Daemon remains halted** pending the code fix below.
+
+**Origin trace (how the Aug residue was born, 2026-06-11).** This was *not* a one-cycle accident — the stale-position root cause was already biting during 6/11's legitimate roll window (`[SPREAD d=0]`). In overlapping cycles 22:33–23:15Z the daemon fired an outright `BUY 1 QM 202609`, a `SPREAD ROLL 1 202608→202609` (= SELL Aug + BUY Sep), *and* a `SELL 1 202607` roll-close — because it couldn't see its own in-flight fills, it double-acted and left a residual short Aug leg. When the 6/15 daemon started it inherited that `{Sep:+1, Aug:+1}`-shaped residue, froze on it, and amplified it to +27/−27. So the frozen-cache bug both *created* and *fed* the spread.
+
+**Fix implemented 2026-06-16 (commit pending) in `live_dynamic.py` + `test_execution.py`:**
+1. **Live position re-request every cycle, bounded.** New `fetch_positions(ib)` re-requests positions authoritatively via `ib.run(asyncio.wait_for(ib.reqPositionsAsync(), POSITIONS_TIMEOUT_SECS))` instead of the passively-cached `ib.positions()`. `get_positions_by_instr` now reads through it, so the daemon can never act on a frozen snapshot again. **The `wait_for` bound is load-bearing:** `IB.RequestTimeout` defaults to 0 = *no* timeout, so a half-open gateway (TCP up, API silent — the very state that caused this bug) would hang the `positionEnd` await and block the whole daemon forever; the 15s cap raises `TimeoutError` and falls back to the cache, so a stuck/transient connection degrades to "possibly stale", never "hung". The reconnect path is covered for free: each cycle re-requests, and `_connect()`'s `ib.sleep(2)` settles the fresh connection first. (Code-review catch: the first cut used the unbounded `ib.run(ib.reqPositionsAsync())`, which had the indefinite-hang flaw.)
+2. **Per-instrument churn circuit-breaker.** `MAX_INSTR_TRADES_PER_SESSION = 6`. `reconcile_and_execute` now returns the set of instruments it placed live orders for; the daemon counts cycles-with-a-trade per instrument and, if any exceeds the cap, halts + alerts via the shared `risk_check.raise_halt(reason, alert)` helper (extracted in this change — `check_daily_loss` now uses it too, replacing its inline halt-file-write + Discord), then `sys.exit(1)`. The counter resets when a fresh snapshot loads (a new day's legit rebalances aren't charged against yesterday). This would have stopped the 26-cycle bleed after ~6.
+3. **Tests:** `test_fetch_positions_bypasses_stale_cache` / `..._falls_back_to_cache_on_error` / `..._falls_back_on_timeout`; all `get_positions_by_instr` + `reconcile_and_execute` tests updated for the live-request path and 4-tuple return (also fixed two *pre-existing* failures in those position tests where `reqContractDetails` wasn't stubbed). Full suite: 105 passed.
+
+**Deferred (not blocking restart, lower-leverage):** a strict post-fill direction guard ("we BOUGHT Sep ⇒ Sep must not be unchanged/decreasing next read") — the live re-request + churn cap already break the loop; the direction guard is a tighter, single-cycle stop worth adding later.
+
+**Verification owed before removing the halt + restart:** deploy to VPS (git pull), run the daemon, force a gateway disconnect/reconnect, place a fill, and confirm the next cycle's `held` reflects the fill (no repeated identical roll). Confirm the churn cap halts a deliberately-looped instrument. Then remove `risk_halt.txt` and restart via `run_execution.sh`. **Note:** the QM position was already manually flattened to the true target (+1 Sep) on 6/16, so the daemon will start from a clean book.
 
 ---
+
+### HIGH
 
 #### [BUG-2] No visibility into full optimization output
 
@@ -62,13 +84,46 @@ The snapshot `diag` only stores entries for instruments with `target != 0 or cur
 
 ---
 
-#### [BUG-4] BRE (Brazilian Real) — persistently stale, recurring preflight failures
+#### [BUG-4] `pst_updater` prices a dead (pre-roll, no-trade) contract → flatlined series on near-monthly instruments
 
-BRE data has been stale since 2026-06-01. `pst_updater` fetches "1 bar" but the bar is already in the CSV — IBKR appears to have no data for BRE after June 1. The current-month contract also fails to qualify in preflight ("BRE 202606 on CME"). BRE is monthly, so this pattern recurs every roll cycle. (BRE also surfaced in the BUG-1 and BUG-5 cross-checks as the lone qualify-fail.)
+**Re-diagnosed 2026-06-12** — the original "BRE has no IBKR data / remove it" framing was *wrong*. IBKR data is fine; the updater is asking for the wrong contract. NOT a subscription gap, NOT a symbol/mapping error.
 
-**Impact**: BRE generates a Discord alert every day and never enters the tradable set. It is contributing nothing to the portfolio.
+**Real root cause.** `update_prices` seeds `build_schedule` from the CSV's last `PRICE_CONTRACT` and rolls forward by **expiry-based** date (`RollOffsetDays=-5`, i.e. roll 5 days before expiry). But thinly-traded near-monthly contracts go **no-trade ~2–3 weeks before expiry**. That opens a dead window where the schedule still prices the *expiring* contract (which now returns only stale `TRADES`) while the genuinely-liquid next contract is never fetched. The series flatlines until the calendar finally rolls.
 
-**Options**: Remove from UNIVERSE, or investigate why IBKR has no data (liquidity/subscription issue).
+Proven for BRE on 2026-06-12 (gateway up):
+```
+CSV last PRICE_CONTRACT = 20260600 (June)   ← schedule seeds from June
+build_schedule → [('202606', 2026-05-30 → 2026-06-12)]   ← June roll_date is after the window, so it never advances
+fetch_bars(202606, TRADES) → 1 bar, last 2026-06-01       ← June died after 6/01
+fetch_bars(202607, TRADES) → 11 bars, last 2026-06-12     ← July (liquid, vol 27k) is RIGHT THERE, never requested
+```
+The nightly run logs `1 bars … last price 0.1978` and **`0 failed`** — the failure is invisible to the run's own accounting (no exception, the fetch "succeeded" with stale data).
+
+**Blast radius (universe scan 2026-06-12, `multiple_prices` PRICE staleness over the 105-instr UNIVERSE):** 4 stale ≥3d, three of them this same bug, one a genuine data gap:
+- **BRE** (CME 6L, monthly): dead-contract bug above. Self-heals once the calendar rolls to July, recurs every roll. Data exists.
+- **FTSEINDO** (SGX WIIDN): same — schedule advanced to `202607` which has *no front data* yet; carry pass even queried an expired `202503`. Data exists on the liquid month.
+- **ETHER-micro** (CME MET): *transient* HMDS backfill lag on 6/05; a manual re-run on 6/12 fetched 8 fresh bars and fully healed it. Not the dead-contract bug.
+- **TWD-mini** (SGX TD, mini): **genuine gap** — `TDM26/TDN26/TDQ26@SGX` all return HMDS "no data" for both TRADES *and* MIDPOINT. Forward months simply aren't served. This is the real "illiquid/untradeable" case BUG-4 originally feared — but it's TWD-mini, not BRE. (The non-UNIVERSE Jumbo instruments showing 6/05 are *expected* stale — the nightly cron only fetches `UNIVERSE`, by design.)
+
+**Impact**: any near-monthly UNIVERSE instrument silently flatlines for ~1–2 weeks every roll cycle. A flat price series → zero EWMAC signal + understated vol → mis-sizing and a stale carry leg, with no alert (`0 failed`). Recurs 12×/yr per affected instrument.
+
+**Fix decision (settled 2026-06-12 by auditing pysystemtrade — `pst-group/pysystemtrade`, the source of all pre-Mar-2024 data):**
+
+What pysystemtrade (Carver's production system) actually does:
+- **`whatToShow`: TRADES for futures, MIDPOINT for FX** (`sysbrokers/IB/client/ib_price_client.py:41`, `ib_fx_client.py:89`) — *identical* to `pst_updater`'s convention. Our data collection is already in parity with the inherited history; a MIDPOINT switch (old option 2) is ruled out — it would *break* parity, and it also returns 0 bars for TWD-mini.
+- **Rolls the priced contract on VOLUME, not the expiry calendar.** Production roll state comes from `update_roll_status` with auto-roll defaults `auto_roll_if_relative_volume_higher_than: 1.0` (roll when forward volume exceeds priced volume), `min_relative_volume: 0.01`, `min_absolute_volume: 100`, `auto_roll_expired: True` (`sysdata/config/defaults.yaml:79-88`). The `RollOffsetDays` CSV is only the *approximate/backtest* calendar; roll calendars built from prices are then `adjust_to_price_series`'d onto dates where both contracts actually have data.
+- **Samples the whole contract chain daily** (`update_sampled_contracts` + `update_historical_prices`), so the next contract's history already exists whenever a roll registers.
+
+⇒ The "backtest parity" worry was **inverted**: the pre-2024 multiple_prices embed Carver's *liquidity-driven* production rolls. Our expiry-offset `build_schedule` is the deviation, and the dead-window flatline is its direct consequence.
+
+**Chosen fix (3 parts, in `pst_updater.py`):**
+1. **Stale-front early roll in `update_prices`.** Front *and* forward are already fetched per segment (zero extra IB requests). If the front's last bar is materially older than `seg_end` while the forward has fresh bars beyond it, roll early: split the segment at the latest front/forward common date and continue with the forward as front. `compute_adjustments` already splices on the latest common date, so the Panama adjustment needs no change. Healthy instruments still roll on the calendar exactly as before — near-zero blast radius. (Full volume-crossover rolling à la Carver = future enhancement; `fetch_bars` would just need to keep the `volume` column.)
+2. **Roll-calendar lockstep.** When an early roll fires, rewrite the affected `roll_calendars_csv` row to the actual roll date — `live_dynamic.get_roll_info` drives the *held* month and spread-roll timing from that file, so the traded contract must advance with the priced one or data and execution diverge.
+3. **Loud staleness alert** (old option 4): Discord warning whenever a scheduled front returns a series whose last bar is materially older than `seg_end` — converts the invisible `0 failed` into a visible signal even when the early roll can't help (e.g. genuine gaps).
+
+**Out of scope of the code fix:** TWD-mini — forward SGX data genuinely absent for TRADES *and* MIDPOINT; removal candidate pending a front-month tradability check. Paid data (Norgate/Databento) was considered and rejected as the fix: this is a roll-*pointer* bug, not a data-quality bug — the same schedule would have requested the same dead contract from any vendor, and Carver-style carry needs per-contract prices regardless. IB already returns volume in the bars we fetch, free.
+
+**Verified working today**: re-running `pst_updater BRE ETHER-micro FTSEINDO TWD-mini --carry` healed ETHER-micro (8 bars→6/12); BRE/FTSEINDO still stuck (dead-contract bug persists until roll); TWD-mini still 1 bar (genuine gap).
 
 ---
 
@@ -189,6 +244,24 @@ R1000 maps to symbol RSV (E-mini Russell 1000) on CME. Preflight confirms no bid
 ---
 
 ## RESOLVED
+
+#### [BUG-6] Daily report compares targets (PST name) against held (IB symbol) — phantom mismatches, no real reconciliation
+
+**Resolved 2026-06-12** in `scripts/daily_report.py` + `ibkr_fut/live_dynamic.py` (commits cfd0eb2 + d6b5599, deployed to VPS). Plus a one-time VPS ledger reseed (gitignored).
+
+**Symptom**: the FUTURES POSITIONS section keyed **held** by IB symbol (`held[c.symbol]`) but **targets** by PST instrument name, two unmapped namespaces. The 2026-06-12 report rendered a correct, matched `+1 QM` (= `CRUDE_W_mini`) as *two* false `← MISMATCH` lines. Secondary symptoms: equity stuck at the pre-reset `$107,836` (stale `state.json`, `log_daily` not flushing since 6/10) and a hardcoded `(dry-run)` tag even though the daemon was live.
+
+**Root cause**: the report reimplemented position-fetching with a bare `c.symbol` key, skipping the `(symbol, exchange) → PST instr` reverse map that `get_positions_by_instr` already builds. Equity read a frozen `last_equity`; the dry-run tag was a literal string.
+
+**Fix**:
+- Extracted `ib_symbol_to_instr(ibcfg)` in `live_dynamic.py` (shared symbol→instr map; ambiguous symbols dropped); `get_positions_by_instr` now uses it.
+- `daily_report.py`: added cached `_fetch_ib_live()` (one IB connection, clientId 20) returning `(equity, held_by_instr, unknown)`. `section_futures_positions` now compares held vs target in the PST namespace and surfaces unmapped positions as warnings; CSV fallback translates IB symbols via `ib_symbol_to_instr`. `section_pnl_summary` prefers live NetLiquidation (`[live]` vs `[cached]`), warns on >2% drift. `_detect_daemon_mode()` derives the LIVE/DRY-RUN tag from the daemon log (shared with `section_daemon_summary`).
+- Daemon `log_daily` failure now logs `traceback.format_exc()` (so the next missed flush is diagnosable).
+- VPS-only: archived corrupt `state.json`/`daily.csv` (→ `.pre-reset-20260611`), reseeded inception `$250,088.90` @ 6/11 nav 1.0 + a 6/12 row at live `$248,908.68`. `trades.csv` preserved.
+
+**Verification**: report now shows `CRUDE_W_mini`/`QM` collapsed to one matched line, zero false mismatches, `$248,941 [live]`, no `(dry-run)` suffix, `(LIVE)` daemon. Post-cleanup the equity-drift warning disappeared (4→3 warnings; the remaining 3 are legitimate: BRE stale, ETHER-micro stale, daemon errors).
+
+---
 
 #### [BUG-1] Energy contract month mismatch causes phantom spread rolls
 

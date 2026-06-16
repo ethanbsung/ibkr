@@ -67,6 +67,7 @@ import argparse
 import json
 import logging
 import math
+import asyncio
 import os
 import sys
 import time
@@ -97,7 +98,7 @@ from ibkr_fut.carry_trend_signals import (
 from ibkr_fut.dynamic_opt import optimise_positions
 from ibkr_fut.algo_execution import pre_trade_checks, algo_exec, is_contract_okay_to_trade
 from ibkr_fut.risk_check import (check_halt_file, check_gross_leverage,
-                                 check_order_vol, check_daily_loss)
+                                 check_order_vol, check_daily_loss, raise_halt)
 from paper.dyn_ledger import DynLedger
 
 # ── Tradable-set filter ────────────────────────────────────────────────────────
@@ -105,6 +106,17 @@ FRESH_DAYS = 5   # PST data must be no more than this many calendar days old
 
 # ── Daemon execution ───────────────────────────────────────────────────────────
 DAEMON_SLEEP_SECS = 600   # seconds between daemon cycles (~10 min)
+# Bound the live position re-request (fetch_positions). IB.RequestTimeout defaults
+# to 0 = no timeout, so a half-open gateway (TCP up, API silent) would block the
+# reqPositions await — and the whole daemon — forever. Cap it and fall back to the
+# cache on timeout so a stuck connection degrades to "possibly stale", not "hung".
+POSITIONS_TIMEOUT_SECS = 15
+# Per-instrument churn circuit-breaker (BUG-7): if any one instrument is traded in
+# more than this many cycles within a single daemon session, something is looping
+# (stale positions, a roll that won't settle, …). Halt + alert instead of bleeding
+# capital. A genuine roll touches an instrument a handful of times over a few days;
+# 6 trades in one *session* is already pathological.
+MAX_INSTR_TRADES_PER_SESSION = 6
 
 # ── Contract rolling windows ───────────────────────────────────────────────────
 PASSIVE_ROLL_DAYS = 10   # days before roll date: start routing rebalance orders to new month
@@ -428,10 +440,44 @@ def ib_symbol_to_instr(ibcfg: pd.DataFrame) -> dict:
     return sym_only
 
 
+def fetch_positions(ib) -> list:
+    """
+    Return a FRESH list of account positions, re-requested from IB.
+
+    `ib.positions()` returns ib_insync's locally-cached position list, maintained
+    only by the `reqPositions` subscription's `position` events. That cache can
+    silently FREEZE — e.g. after a gateway disconnect/reconnect the subscription
+    is not re-seeded, so the cache keeps returning the value it held at the moment
+    the event stream stopped, while the real account moves on (BUG-7: the daemon
+    re-rolled QM every cycle off a stale +1/+1 snapshot, never seeing its own
+    fills, until the true position was a 27-lot phantom calendar spread).
+
+    `reqPositionsAsync()` round-trips to IB and returns the authoritative current
+    list, bypassing the cache. We always re-request rather than trusting
+    `ib.positions()`. The request is bounded by POSITIONS_TIMEOUT_SECS — IB's own
+    blocking `reqPositions()` inherits RequestTimeout=0 (no timeout), which on a
+    half-open connection would hang the whole daemon waiting for a `positionEnd`
+    that never arrives. On timeout OR any error we fall back to the cached
+    `ib.positions()`, so a stuck/transient connection degrades to "possibly stale"
+    rather than "hung" or "crash".
+    """
+    try:
+        return ib.run(asyncio.wait_for(ib.reqPositionsAsync(),
+                                       POSITIONS_TIMEOUT_SECS))
+    except Exception as e:
+        kind = "timed out" if isinstance(e, asyncio.TimeoutError) else f"failed ({e})"
+        print(f"[{_now()}] WARNING: live reqPositions {kind} — "
+              f"falling back to cached ib.positions()")
+        return ib.positions()
+
+
 def get_positions_by_instr(ib, ibcfg: pd.DataFrame) -> tuple[dict, list]:
     """
     Return ({instr: {YYYYMM: qty}}, unknown) for all held futures.
     Maps IBKR (symbol, exchange) back to a Jumbo PST instrument name.
+
+    Positions are re-requested live each call via fetch_positions (NOT the
+    passively-cached ib.positions()) — see BUG-7.
     """
     # (symbol, exchange) -> instr, restricted to Jumbo. Symbol-only fallback is
     # used only when exactly one universe instrument carries that IB symbol —
@@ -444,7 +490,7 @@ def get_positions_by_instr(ib, ibcfg: pd.DataFrame) -> tuple[dict, list]:
     sym_only = ib_symbol_to_instr(ibcfg)
 
     held, unknown = {}, []
-    for pos in ib.positions():
+    for pos in fetch_positions(ib):
         c = pos.contract
         if c.secType != "FUT":
             continue
@@ -737,6 +783,7 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
     """
     pending = {t.contract.symbol for t in ib.openTrades()}
     placed, skipped, dry_run = [], [], []
+    traded_instrs: set = set()   # instruments that placed a live order this cycle (BUG-7 churn cap)
     _mkt_open_cache: dict = {}   # conId → bool; one reqContractDetails per contract per cycle
 
     def _is_open(c) -> bool:
@@ -970,6 +1017,7 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                 print(f"    WARN: {result.status} on ROLL {sym} {m} — no fill logged")
 
             placed.append((f"ROLL {act} {q} {sym} {m}", result.status, result.order_id))
+            traded_instrs.add(instr)
 
         # ── Execute rebalance orders (blocked on a risk-gate breach) ──────────
         for om, delta in (rebalance_orders if risk_ok else []):
@@ -1011,8 +1059,9 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
 
                     placed.append((f"{act} {q} {sym} {om}",
                                    result.status, result.order_id))
+                    traded_instrs.add(instr)
 
-    return placed, skipped, dry_run
+    return placed, skipped, dry_run, traded_instrs
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1087,6 +1136,10 @@ def run_daemon(args):
     ledger              = DynLedger()
     snapshot_computed_at = None
     targets = diag = capital = meta = None
+    # BUG-7 churn cap: count cycles each instrument placed a live order this session.
+    # Resets when a fresh snapshot loads (a new trading day's legitimate rebalances
+    # should not be charged against yesterday's count).
+    trade_counts: dict = {}
 
     print(f"[{_now()}] Daemon started (sleep={DAEMON_SLEEP_SECS}s, "
           f"execute={'YES' if args.execute else 'DRY-RUN'})")
@@ -1138,6 +1191,7 @@ def run_daemon(args):
             diag    = snap["diag"]
             capital = snap["capital"]
             meta    = diag.get("_meta", {})
+            trade_counts = {}   # new snapshot = new target set; reset the churn cap
             pst_date = meta.get("date", "unknown")
             today_str = date.today().isoformat()
             if pst_date != today_str:
@@ -1177,7 +1231,7 @@ def run_daemon(args):
 
         # ── 5. Execute cycle ──────────────────────────────────────────────────
         print(f"\n[{_now()}] {'─'*60}")
-        placed, skipped, dry_run = reconcile_and_execute(
+        placed, skipped, dry_run, traded_instrs = reconcile_and_execute(
             ib, ibcfg, targets, held, diag, ledger,
             execute=args.execute, skip_unchanged=True, capital=capital)
 
@@ -1193,6 +1247,27 @@ def run_daemon(args):
 
         if args.execute:
             save_last_targets(LAST_TARGETS_PATH, targets, snap["date"])
+
+            # ── 5b. Churn circuit-breaker (BUG-7) ─────────────────────────────
+            # Count cycles each instrument placed a live order this session. A
+            # legitimate roll/rebalance touches an instrument a handful of times;
+            # exceeding the cap means we're looping (stale positions, a roll that
+            # never settles). Halt + alert rather than keep bleeding capital — the
+            # exact failure that turned a clean +1 QM into a 27-lot phantom spread.
+            for instr in traded_instrs:
+                trade_counts[instr] = trade_counts.get(instr, 0) + 1
+            runaway = {i: n for i, n in trade_counts.items()
+                       if n > MAX_INSTR_TRADES_PER_SESSION}
+            if runaway:
+                detail = ", ".join(f"{i}×{n}" for i, n in sorted(runaway.items()))
+                msg = (f"CHURN CIRCUIT-BREAKER (BUG-7): {detail} traded > "
+                       f"{MAX_INSTR_TRADES_PER_SESSION}× this session — likely a "
+                       f"stale-position / unsettled-roll loop. Halting daemon.")
+                print(f"[{_now()}] [RISK] {msg}")
+                raise_halt(msg, alert=(
+                    f"[ibkr_fut] {msg}\nRemove ibkr_fut/risk_halt.txt after "
+                    f"investigating + reconciling positions, then restart."))
+                sys.exit(1)
 
         # ── 6. Sleep until next cycle ─────────────────────────────────────────
         print(f"[{_now()}] Next cycle in {DAEMON_SLEEP_SECS // 60}m…")
@@ -1345,7 +1420,7 @@ def main():
 
         ledger = DynLedger()
         print("\n" + "-" * 80)
-        placed, skipped, dry_run = reconcile_and_execute(
+        placed, skipped, dry_run, _ = reconcile_and_execute(
             ib, ibcfg, targets, held, diag, ledger, execute=args.execute,
             capital=capital)
 

@@ -72,6 +72,28 @@ def _send_discord(text: str) -> None:
         print(f"[RISK] Discord alert failed: {e}")
 
 
+# ── Halt + alert ────────────────────────────────────────────────────────────
+
+def raise_halt(reason: str, alert: str | None = None) -> None:
+    """
+    Trip the kill switch: write `reason` to the halt file and fire a Discord alert.
+
+    The single place that performs "stop trading + notify" — callers (circuit
+    breakers, the daemon's churn guard) hand it a reason instead of re-deriving
+    the halt-file-write + Discord sequence. Best-effort: a failed halt-file write
+    is logged, never raised, so it can't mask the breach that triggered it.
+
+    reason : short line written to risk_halt.txt (prefixed with a UTC timestamp).
+    alert  : optional fuller Discord message; defaults to `reason`.
+    """
+    ts = datetime.now(timezone.utc).isoformat()
+    try:
+        HALT_FILE.write_text(f"{ts} | {reason}\n")
+    except Exception as e:
+        print(f"[RISK] could not write halt file: {e}")
+    _send_discord(alert or reason)
+
+
 # ── Checks ────────────────────────────────────────────────────────────────────
 
 def check_halt_file() -> tuple[bool, str]:
@@ -129,12 +151,11 @@ def check_daily_loss(ib, snapshot_capital: float) -> tuple[bool, str]:
     if drop_frac > DAILY_LOSS_HALT_FRAC:
         reason = (f"equity ${equity:,.0f} vs baseline ${snapshot_capital:,.0f} "
                   f"({drop_frac:.1%} drop)")
-        ts = datetime.now(timezone.utc).isoformat()
-        HALT_FILE.write_text(f"{ts} | circuit breaker — {reason}\n")
-        _send_discord(
-            f"[RISK] CIRCUIT BREAKER TRIGGERED\n{reason}\n"
-            f"Daemon halted; positions left untouched.\n"
-            f"Remove ibkr_fut/risk_halt.txt to resume trading next session."
+        raise_halt(
+            f"circuit breaker — {reason}",
+            alert=(f"[RISK] CIRCUIT BREAKER TRIGGERED\n{reason}\n"
+                   f"Daemon halted; positions left untouched.\n"
+                   f"Remove ibkr_fut/risk_halt.txt to resume trading next session."),
         )
         return False, reason
     return True, ""

@@ -7,6 +7,7 @@ Run:
 No real IBKR connection required.
 """
 
+import asyncio
 import json
 import math
 import os
@@ -34,6 +35,7 @@ from ibkr_fut.algo_execution import (
 )
 from ibkr_fut.live_dynamic import (
     check_last_targets,
+    fetch_positions,
     get_positions_by_instr,
     load_snapshot,
     reconcile_and_execute,
@@ -652,7 +654,7 @@ def test_rne_dry_run_no_pre_trade_check(
     ib = _rne_ib()
     ledger = MagicMock()
 
-    placed, skipped, _ = reconcile_and_execute(
+    placed, skipped, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, ledger, execute=False
     )
 
@@ -694,7 +696,7 @@ def test_rne_pending_order_skipped(
     mock_hold.return_value = ("202609", None, 9999)
     ib = _rne_ib(pending_symbols=["MES"])
 
-    placed, skipped, _ = reconcile_and_execute(
+    placed, skipped, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -718,7 +720,7 @@ def test_rne_pre_trade_fail_skips_algo(
     mock_is_open.return_value = True   # market open → don't defer
     ib = _rne_ib()
 
-    placed, skipped, _ = reconcile_and_execute(
+    placed, skipped, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -850,7 +852,7 @@ def test_rne_no_ib_config_skips(
     mock_spec.return_value = None  # no IB config → skip
     ib = _rne_ib()
 
-    placed, skipped, _ = reconcile_and_execute(
+    placed, skipped, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -872,7 +874,7 @@ def test_rne_no_roll_calendar_skips(
     mock_hold.return_value = (None, None, 9999)  # no roll calendar → skip
     ib = _rne_ib()
 
-    placed, skipped, _ = reconcile_and_execute(
+    placed, skipped, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -1041,7 +1043,7 @@ def test_rne_spread_roll_deferred_when_market_closed(
     mock_hold.return_value = ("202609", "202612", 2)
     held = {"ES": {"202609": 2}}
 
-    placed, skipped, _ = reconcile_and_execute(
+    placed, skipped, _, _ = reconcile_and_execute(
         _rne_ib(), MagicMock(), {"ES": 2}, held, _MOCK_DIAG,
         MagicMock(), execute=True)
 
@@ -1060,7 +1062,7 @@ def test_rne_risk_gate_blocks_rebalance_not_roll_close(
     mock_vol.return_value = (False, "too big")
     held = {"ES": {"202603": 2}}                     # stranded old month
 
-    placed, skipped, _ = reconcile_and_execute(
+    placed, skipped, _, _ = reconcile_and_execute(
         _rne_ib(), MagicMock(), {"ES": 100}, held, _MOCK_DIAG,
         MagicMock(), execute=True, capital=100_000.0)
 
@@ -1286,6 +1288,53 @@ def test_spread_roll_minus_one_sentinel_is_no_quote(mock_time, mock_qual):
     ib.placeOrder.assert_not_called()
 
 
+# ── fetch_positions: live re-request, never the stale cache (BUG-7) ───────────
+
+def _ib_run(value=None, raises=None):
+    """side_effect for ib.run: consume the wait_for coroutine it's handed (so no
+    'coroutine never awaited' warning), then return `value` or raise `raises` —
+    modelling how the real ib.run awaits asyncio.wait_for(reqPositionsAsync(), …)."""
+    def _run(coro):
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        if raises is not None:
+            raise raises
+        return value
+    return _run
+
+
+def _ib_run_returns(value):
+    return _ib_run(value=value)
+
+
+def test_fetch_positions_bypasses_stale_cache():
+    # ib.positions() is ib_insync's passively-maintained cache, which can freeze
+    # after a reconnect. fetch_positions must re-request live via
+    # ib.run(asyncio.wait_for(ib.reqPositionsAsync(), …)) and ignore the cache.
+    ib = MagicMock()
+    ib.run.side_effect = _ib_run_returns(["LIVE"])
+    ib.positions.return_value = ["STALE_CACHE"]
+    assert fetch_positions(ib) == ["LIVE"]
+    assert ib.run.called
+
+
+def test_fetch_positions_falls_back_to_cache_on_error():
+    # A transient API failure degrades to the cache rather than crashing the daemon.
+    ib = MagicMock()
+    ib.run.side_effect = _ib_run(raises=RuntimeError("api hiccup"))
+    ib.positions.return_value = ["FALLBACK"]
+    assert fetch_positions(ib) == ["FALLBACK"]
+
+
+def test_fetch_positions_falls_back_on_timeout():
+    # A half-open connection makes reqPositions hang; the bounded wait_for raises
+    # TimeoutError and we degrade to the cache rather than hanging the daemon.
+    ib = MagicMock()
+    ib.run.side_effect = _ib_run(raises=asyncio.TimeoutError())
+    ib.positions.return_value = ["CACHE_ON_TIMEOUT"]
+    assert fetch_positions(ib) == ["CACHE_ON_TIMEOUT"]
+
+
 # ── get_positions_by_instr symbol mapping ─────────────────────────────────────
 
 def _pos(symbol, exchange, qty, month="20260918"):
@@ -1314,7 +1363,11 @@ def test_positions_symbol_fallback_unique(mock_spec):
         "BETA":  _spec_for("ZB", "CBOT"),
     }[instr]
     ib = MagicMock()
-    ib.positions.return_value = [_pos("MES", "GLOBEX", 2)]
+    # get_positions_by_instr now reads positions via fetch_positions, which
+    # re-requests live: ib.run(asyncio.wait_for(reqPositionsAsync(), …)) (BUG-7).
+    ib.run.side_effect = _ib_run_returns([_pos("MES", "GLOBEX", 2)])
+    # No ContractDetails → delivery_month falls back to the month prefix.
+    ib.reqContractDetails.return_value = []
 
     held, unknown = get_positions_by_instr(ib, MagicMock())
 
@@ -1333,7 +1386,7 @@ def test_positions_symbol_fallback_ambiguous_goes_unknown(mock_spec):
         "BETA":  _spec_for("FUT", "LIFFE"),
     }[instr]
     ib = MagicMock()
-    ib.positions.return_value = [_pos("FUT", "SGX", 1)]
+    ib.run.side_effect = _ib_run_returns([_pos("FUT", "SGX", 1)])
 
     held, unknown = get_positions_by_instr(ib, MagicMock())
 
@@ -1447,7 +1500,8 @@ def test_positions_exact_exchange_match_beats_ambiguity(mock_spec):
         "BETA":  _spec_for("FUT", "LIFFE"),
     }[instr]
     ib = MagicMock()
-    ib.positions.return_value = [_pos("FUT", "LIFFE", -3)]
+    ib.run.side_effect = _ib_run_returns([_pos("FUT", "LIFFE", -3)])
+    ib.reqContractDetails.return_value = []
 
     held, unknown = get_positions_by_instr(ib, MagicMock())
 
