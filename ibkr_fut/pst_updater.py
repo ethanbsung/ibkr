@@ -37,13 +37,31 @@ PST_CUTOFF = pd.Timestamp("2024-03-28")   # last date of original pst data
 
 MONTH_MAP = dict(F=1,G=2,H=3,J=4,K=5,M=6,N=7,Q=8,U=9,V=10,X=11,Z=12)
 
+# ── Volume-based roll (mirrors pysystemtrade's check_if_forward_liquid) ──────────
+# Carver's production auto-roll defaults: roll the priced contract once the
+# forward contract is "liquid" relative to it, rather than on the expiry calendar.
+# Source: pst-group/pysystemtrade sysdata/config/defaults.yaml:79-88,
+# sysproduction/data/volumes.py:102, sysproduction/reporting/data/rolls.py:75.
+AUTO_ROLL_REL_VOL    = 1.0    # roll regardless if fwd/priced smoothed volume > this
+MIN_REL_VOL          = 0.01   # else need rel > this AND abs below
+MIN_ABS_VOL          = 100    # smoothed forward volume (contracts) must exceed this
+VOL_IGNORE_DAYS      = 14     # ignore volume bars older than this (stale)
+VOL_EWMA_SPAN        = 3      # exponential smoothing span
+NOTIONALLY_ZERO_VOL  = 0.0001 # avoid div-by-zero when priced volume is ~0
+
+# Log to the repo root (this is `~/ibkr/pst_updater.log` on the VPS, which is what
+# scripts/daily_report.py reads for staleness). Resolve against _REPO so it works on
+# any host without a pre-existing ~/ibkr dir; fall back to stdout-only if unopenable.
+_LOG_PATH = os.path.join(_REPO, "pst_updater.log")
+_handlers = [logging.StreamHandler(sys.stdout)]
+try:
+    _handlers.insert(0, logging.FileHandler(_LOG_PATH))
+except OSError:
+    pass
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.FileHandler(os.path.expanduser("~/ibkr/pst_updater.log")),
-        logging.StreamHandler(sys.stdout),
-    ],
+    handlers=_handlers,
 )
 log = logging.getLogger(__name__)
 
@@ -121,8 +139,17 @@ def fetch_bars(
     multiplier: str = "",
     trading_class: str = "",
     what_to_show: str = "TRADES",
-) -> pd.Series:
-    """Daily close bars for one contract. Returns empty Series on failure."""
+    with_volume: bool = False,
+):
+    """Daily close bars for one contract. Returns empty Series on failure.
+
+    By default returns just the close Series (unchanged contract). With
+    ``with_volume=True`` returns ``(close, volume)`` — two index-aligned Series
+    (volume in contracts, same date index as close) — used by the volume-based
+    roll decision in ``update_prices``. The volume column is already present in
+    the TRADES bars we fetch; we just stop discarding it.
+    """
+    empty = pd.Series(dtype=float)
     contract = Future(
         symbol=symbol,
         exchange=exchange,
@@ -145,19 +172,91 @@ def fetch_bars(
         )
     except Exception as e:
         log.warning(f"    IB error ({symbol} {contract_yyyymm}): {e}")
-        return pd.Series(dtype=float)
+        return (empty, empty.copy()) if with_volume else empty
 
     if not bars:
-        return pd.Series(dtype=float)
+        return (empty, empty.copy()) if with_volume else empty
 
     df = util.df(bars)
     if df is None or df.empty:
-        return pd.Series(dtype=float)
+        return (empty, empty.copy()) if with_volume else empty
 
     df["date"] = pd.to_datetime(df["date"]).dt.date
-    s = df.set_index("date")["close"].dropna()
-    s = s[pd.to_datetime(s.index).day_of_week < 5]   # drop Sat/Sun (Asian overnight sessions)
-    return s[(s.index >= start) & (s.index <= end)]
+    df = df.set_index("date")
+    df = df[pd.to_datetime(df.index).day_of_week < 5]   # drop Sat/Sun (Asian overnight sessions)
+    df = df[(df.index >= start) & (df.index <= end)]
+
+    s = df["close"].dropna()
+    if not with_volume:
+        return s
+    # volume aligned to the (post-filter) bar index; absent or 0 → NaN
+    vol = df["volume"] if "volume" in df.columns else pd.Series(np.nan, index=df.index)
+    vol = pd.to_numeric(vol, errors="coerce").replace(0, np.nan)
+    return s, vol
+
+# ------------------------------------------------------------------ #
+# Volume-based roll decision (Carver's check_if_forward_liquid)        #
+# ------------------------------------------------------------------ #
+
+def smoothed_volume(vol: pd.Series, asof: date,
+                    ignore_before_days: int = VOL_IGNORE_DAYS,
+                    span: int = VOL_EWMA_SPAN) -> float:
+    """EWMA-smoothed recent daily volume, ignoring bars older than
+    ``ignore_before_days`` before ``asof``. 0.0 if no recent volume.
+
+    Faithful port of pysystemtrade get_smoothed_volume_ignoring_old_data
+    (sysproduction/data/volumes.py:102): drop stale bars, then ewm(span).mean()
+    and take the last value.
+    """
+    if vol is None or len(vol) == 0:
+        return 0.0
+    v = pd.to_numeric(vol, errors="coerce").dropna()
+    if v.empty:
+        return 0.0
+    idx = pd.to_datetime(v.index)
+    cutoff = pd.Timestamp(asof) - pd.Timedelta(days=ignore_before_days)
+    recent = v[idx >= cutoff]
+    if recent.empty:
+        return 0.0
+    return float(recent.ewm(span=span).mean().iloc[-1])
+
+
+def _alert_stale(instrument: str, contract: str, last_bar, seg_end: date, action: str) -> None:
+    """Discord alert when the live front contract returns a stale series.
+
+    Fires both when an early roll rescues it (informational) and when neither
+    volume nor expiry could advance it (genuine data gap). Replaces the
+    previously-invisible '0 failed'. Never aborts the price update on failure.
+    """
+    try:
+        n = (seg_end - last_bar).days if last_bar is not None else None
+        behind = f"{n}d behind" if n is not None else "no bars"
+        msg = (f"[PST-STALE] {instrument} {contract}: last bar "
+               f"{last_bar if last_bar is not None else 'none'} {behind} {seg_end} ({action})")
+        log.warning("  " + msg)
+        from ibkr_fut.risk_check import _send_discord
+        _send_discord(msg)
+    except Exception as e:
+        log.warning(f"  {instrument}: staleness alert failed ({e})")
+
+
+def forward_is_liquid(priced_vol: float, forward_vol: float) -> bool:
+    """True when the forward contract is liquid enough to roll into, using
+    Carver's rule (check_if_forward_liquid): roll if relative volume is very
+    high, OR if it clears a smaller relative bar AND an absolute floor.
+
+    relative_volume normalises the forward to the priced contract; when the
+    priced contract has gone no-trade (smoothed ~0) the ratio explodes, which
+    is exactly how Carver rolls out of a dying contract.
+    """
+    denom = priced_vol if priced_vol > 0 else NOTIONALLY_ZERO_VOL
+    rel = forward_vol / denom
+    if rel > AUTO_ROLL_REL_VOL:
+        return True
+    if rel > MIN_REL_VOL and forward_vol > MIN_ABS_VOL:
+        return True
+    return False
+
 
 # ------------------------------------------------------------------ #
 # Backward (Panama) adjustment                                         #
@@ -316,22 +415,45 @@ def update_prices(
     #           extra IB request, otherwise we fetch it.
     params = _ib_params(ib_cfg)
     raw_segs: list[tuple] = []
-    for contract, seg_start, seg_end in schedule:
+    # Mutable so an early roll on the final (live/open) segment can append a new
+    # segment for the contract we roll into. early_roll records the transition so
+    # the roll calendar can be advanced in lockstep after the loop.
+    seg_list = list(schedule)
+    early_roll: tuple[str, str, date] | None = None   # (old_contract, new_contract, roll_on)
+    rolled_this_run = False
+    i = 0
+    while i < len(seg_list):
+        contract, seg_start, seg_end = seg_list[i]
+        is_final = (i == len(seg_list) - 1)
         cy_, cm_ = int(contract[:4]), int(contract[4:6])
         fy, fm = next_in_cycle(cy_, cm_, hold_cycle)
         fwd_contract = f"{fy:04d}{fm:02d}"
         ky, km = step_in_cycle(cy_, cm_, priced_cycle, carry_offset)
         carry_contract = f"{ky:04d}{km:02d}"
 
-        front = fetch_bars(ib, params["symbol"], params["exchange"],
-                           params["currency"], contract, seg_start, seg_end,
-                           params["multiplier"], params["trading_class"],
-                           params["hist_data_type"])
-        time.sleep(0.6)
-        forward = fetch_bars(ib, params["symbol"], params["exchange"],
-                             params["currency"], fwd_contract, seg_start, seg_end,
-                             params["multiplier"], params["trading_class"],
-                             params["hist_data_type"])
+        # Front + forward with volume on the final segment (so the volume-roll
+        # decision has both legs); historical segments need only closes.
+        if is_final and not rolled_this_run:
+            front, front_vol = fetch_bars(ib, params["symbol"], params["exchange"],
+                                          params["currency"], contract, seg_start, seg_end,
+                                          params["multiplier"], params["trading_class"],
+                                          params["hist_data_type"], with_volume=True)
+            time.sleep(0.6)
+            forward, forward_vol = fetch_bars(ib, params["symbol"], params["exchange"],
+                                              params["currency"], fwd_contract, seg_start, seg_end,
+                                              params["multiplier"], params["trading_class"],
+                                              params["hist_data_type"], with_volume=True)
+        else:
+            front = fetch_bars(ib, params["symbol"], params["exchange"],
+                               params["currency"], contract, seg_start, seg_end,
+                               params["multiplier"], params["trading_class"],
+                               params["hist_data_type"])
+            time.sleep(0.6)
+            forward = fetch_bars(ib, params["symbol"], params["exchange"],
+                                 params["currency"], fwd_contract, seg_start, seg_end,
+                                 params["multiplier"], params["trading_class"],
+                                 params["hist_data_type"])
+            front_vol = forward_vol = None
         time.sleep(0.6)
 
         if carry_contract == fwd_contract:
@@ -347,7 +469,57 @@ def update_prices(
 
         if front.empty:
             log.warning(f"    {instrument} {contract}: no front data")
+
+        # ── Volume-based early roll (Carver) on the final/open segment ──────────
+        # Roll the priced contract when the forward becomes liquid (volume rule),
+        # or once the priced contract is at/past its expiry-based roll date
+        # (expiry backstop, for the both-legs-no-volume case). Splice on the
+        # latest common date so compute_adjustments' gap math is unchanged.
+        if is_final and not rolled_this_run:
+            priced_v = smoothed_volume(front_vol, today) if front_vol is not None else 0.0
+            forward_v = smoothed_volume(forward_vol, today) if forward_vol is not None else 0.0
+            vol_roll = (not forward.empty) and forward_is_liquid(priced_v, forward_v)
+            past_roll = roll_date(cy_, cm_, expiry_off, roll_off) <= today
+            front_stale = front.empty or (not front.empty
+                          and (seg_end - front.index.max()).days > VOL_IGNORE_DAYS)
+
+            if vol_roll or (past_roll and front_stale):
+                common = front.index.intersection(forward.index)
+                if len(common) and not forward.empty:
+                    splice = max(common)
+                    # Keep the front segment through the splice date; append the
+                    # forward contract as a new final segment from splice+1.
+                    seg_list[i] = (contract, seg_start, splice)
+                    seg_end = splice
+                    front_was_carry = (carry_contract == contract)
+                    front_was_forward_carry = (carry_contract == fwd_contract)
+                    front = front[front.index <= splice]
+                    if front_was_carry:
+                        carry = front          # carry leg == priced contract; re-slice
+                    elif not front_was_forward_carry and carry is not None and not carry.empty:
+                        carry = carry[carry.index <= splice]
+                    seg_list.append((fwd_contract, splice + timedelta(days=1),
+                                     min(roll_date(fy, fm, expiry_off, roll_off), today)))
+                    early_roll = (contract, fwd_contract, splice)
+                    rolled_this_run = True
+                    reason = "volume-rolled" if vol_roll else "expiry-rolled"
+                    log.info(f"    {instrument}: early roll {contract}→{fwd_contract} "
+                             f"@ {splice} ({reason}; priced_v={priced_v:.0f} fwd_v={forward_v:.0f})")
+                    _alert_stale(instrument, contract,
+                                 front.index.max() if not front.empty else None,
+                                 schedule[-1][2], reason)
+                elif front_stale:
+                    # Can't splice (forward has no overlapping/any data): genuine gap.
+                    _alert_stale(instrument, contract,
+                                 front.index.max() if not front.empty else None,
+                                 seg_end, "no-roll: forward illiquid too")
+            elif front_stale:
+                _alert_stale(instrument, contract,
+                             front.index.max() if not front.empty else None,
+                             seg_end, "no-roll: forward not yet liquid")
+
         raw_segs.append((contract, fwd_contract, front, forward, carry_contract, carry))
+        i += 1
 
     # Check if anything was fetched
     if all(seg[2].empty for seg in raw_segs):
@@ -414,6 +586,15 @@ def update_prices(
     log.info(f"  {instrument}: {last_date} → {today} | {len(new_adj_rows)} bars "
              f"| hist adj {hist_adj:+.4f} ({'roll rewrite' if rewrite_history else 'lookback rewrite'}) "
              f"| last price {new_adj.iloc[-1]:.4f}")
+
+    # --- Advance roll calendar in lockstep with an early (volume) roll ---
+    # Done after the price CSVs are written so the traded contract that
+    # live_dynamic.get_roll_info reads matches the priced series. The normal
+    # extend_roll_calendar pass (in main) then rebuilds the forward schedule
+    # from this corrected pointer.
+    if early_roll is not None:
+        old_c, new_c, roll_on = early_roll
+        advance_roll_calendar_to(instrument, old_c, new_c, roll_on, roll_cfg)
 
 # ------------------------------------------------------------------ #
 # Carry prices                                                         #
@@ -563,6 +744,65 @@ def create_roll_calendar_from_history(instrument: str, roll_cfg: pd.Series) -> N
     rc_df = rc_df[~rc_df.index.duplicated(keep="last")].sort_index()
     rc_df.to_csv(rc_fp, header=True)
     log.info(f"  {instrument}: bootstrapped roll calendar from history ({len(rows)} rows)")
+
+
+def advance_roll_calendar_to(instrument: str, old_current_yyyymm: str,
+                             new_current_yyyymm: str, roll_on: date,
+                             roll_cfg: pd.Series) -> None:
+    """Record an early (volume-driven) roll in roll_calendars_csv so the traded
+    contract advances in lockstep with the priced series.
+
+    Calendar semantics (see live_dynamic.get_roll_info): a row's DATE_TIME is the
+    last day to hold its ``current_contract``; the *following* row's
+    ``current_contract`` becomes active the day after. So to roll *out of*
+    ``old_current`` on ``roll_on`` and *into* ``new_current``, we:
+      - set the row covering ``roll_on`` to (DATE_TIME=roll_on,
+        current_contract=old_current) — last day on the old contract, and
+      - ensure the next row has current_contract=new_current.
+    Future rows are dropped so the normal extend_roll_calendar pass rebuilds the
+    forward schedule from the corrected pointer.
+    """
+    rc_fp = f"{PST_BASE}/roll_calendars_csv/{instrument}.csv"
+    if not os.path.exists(rc_fp):
+        create_roll_calendar_from_history(instrument, roll_cfg)
+        if not os.path.exists(rc_fp):
+            log.warning(f"  {instrument}: no roll calendar to advance")
+            return
+
+    rc = pd.read_csv(rc_fp, parse_dates=["DATE_TIME"], index_col="DATE_TIME")
+    rc.index = pd.DatetimeIndex(rc.index)
+
+    hold_cycle   = parse_cycle(str(roll_cfg.get("HoldRollCycle", "HMUZ")))
+    priced_cycle = parse_cycle(str(roll_cfg.get("PricedRollCycle", "HMUZ")))
+    carry_offset = int(float(roll_cfg.get("CarryOffset", 1)))
+
+    oy, om = int(old_current_yyyymm[:4]), int(old_current_yyyymm[4:6])
+    ny, nm = int(new_current_yyyymm[:4]), int(new_current_yyyymm[4:6])
+    # NB: pd.Timestamp(date_obj, hour=20) silently ignores hour=; build at 20:00
+    # explicitly so the row matches the rest of the calendar's convention.
+    roll_ts = pd.Timestamp(roll_on).replace(hour=20)
+
+    # next/carry for the OLD contract's closing row (matches extend_roll_calendar)
+    o_ny, o_nm = next_in_cycle(oy, om, hold_cycle)
+    o_cy, o_cm = step_in_cycle(oy, om, priced_cycle, carry_offset)
+    old_row = {
+        "current_contract": int(f"{oy:04d}{om:02d}00"),
+        "next_contract":    int(f"{o_ny:04d}{o_nm:02d}00"),
+        "carry_contract":   int(f"{o_cy:04d}{o_cm:02d}00"),
+    }
+
+    # Drop any rows on/after the roll date, then append the corrected closing row.
+    # extend_roll_calendar (run right after) seeds from this row's next_contract
+    # (= new_current) and rebuilds the forward schedule.
+    rc = rc[rc.index < roll_ts]
+    new_df = pd.DataFrame([{"DATE_TIME": roll_ts, **old_row}]).set_index("DATE_TIME")
+    new_df.index.name = "DATE_TIME"
+    combined = pd.concat([rc, new_df]).sort_index()
+    combined = combined[~combined.index.duplicated(keep="last")]
+    combined = combined[list(rc.columns)] if len(rc.columns) else combined
+    combined.to_csv(rc_fp, header=True)
+    log.info(f"  {instrument} roll cal: early-roll {old_current_yyyymm}→{new_current_yyyymm} "
+             f"on {roll_on} (last-hold row written)")
 
 
 def extend_roll_calendar(instrument: str, roll_cfg: pd.Series) -> None:
