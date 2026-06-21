@@ -229,20 +229,36 @@ def smoothed_volume(vol: pd.Series, asof: date,
 
 
 def _alert_stale(instrument: str, contract: str, last_bar, seg_end: date, action: str) -> None:
-    """Discord alert when the live front contract returns a stale series.
+    """Report on the live front contract's series at a roll boundary.
 
-    Fires both when an early roll rescues it (informational) and when neither
-    volume nor expiry could advance it (genuine data gap). Replaces the
-    previously-invisible '0 failed'. Never aborts the price update on failure.
+    Two distinct cases, distinguished by ``action``:
+
+    * A roll SUCCEEDED (``action`` starts with "volume-rolled"/"expiry-rolled").
+      The old contract's series ends here because we rolled off it — that is the
+      desired, routine behaviour every roll cycle, NOT staleness. Tagged
+      ``[PST-ROLL]`` and only logged (no Discord), so normal rolls don't cry wolf.
+      The "Nd behind" here is just the gap between the old contract's last trade
+      and today (which over a weekend is naturally 2–3 calendar days).
+
+    * NO roll was possible (``action`` starts with "no-roll"): the front returned
+      a stale/empty series AND the forward isn't liquid enough to splice into — a
+      genuine data gap. Tagged ``[PST-STALE]`` and sent to Discord.
+
+    Never aborts the price update on failure.
     """
     try:
         n = (seg_end - last_bar).days if last_bar is not None else None
         behind = f"{n}d behind" if n is not None else "no bars"
-        msg = (f"[PST-STALE] {instrument} {contract}: last bar "
+        is_roll = action.startswith("volume-rolled") or action.startswith("expiry-rolled")
+        tag = "PST-ROLL" if is_roll else "PST-STALE"
+        msg = (f"[{tag}] {instrument} {contract}: last bar "
                f"{last_bar if last_bar is not None else 'none'} {behind} {seg_end} ({action})")
         log.warning("  " + msg)
-        from ibkr_fut.risk_check import _send_discord
-        _send_discord(msg)
+        # Only the genuine data-gap case escalates to Discord; a successful roll
+        # is routine and would otherwise alert on every instrument every cycle.
+        if not is_roll:
+            from ibkr_fut.risk_check import _send_discord
+            _send_discord(msg)
     except Exception as e:
         log.warning(f"  {instrument}: staleness alert failed ({e})")
 

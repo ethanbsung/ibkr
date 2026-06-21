@@ -68,7 +68,9 @@ So the reconcile logic was correct *given its inputs*; the inputs were a stale s
 
 **Root cause.** `_alert_stale` does a lazy `from ibkr_fut.risk_check import _send_discord`, but `pst_updater.py` is launched as a top-level script (`run_dynamic.sh` runs `python3 ibkr_fut/pst_updater.py …`), so the repo root was never on `sys.path` and the `ibkr_fut` package wasn't importable. Every other module in `ibkr_fut/` inserts the repo root at import time (`sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))`); `pst_updater.py` was the one that didn't. Pure packaging oversight — unrelated to the volume-roll logic, but introduced/exposed when `_alert_stale` was added in the roll-updater commit (78d9345).
 
-**Fix (commit pending).** Added the standard repo-root `sys.path.insert` at the top of `pst_updater.py` (right after the stdlib imports). Verified the lazy import resolves. The roll/splice logic itself was correct on 06-18 (LEANHOG/LIVECOW/FEEDCOW rolled as designed).
+**Fix (commit pending).** Added the standard repo-root `sys.path.insert` at the top of `pst_updater.py` (right after the stdlib imports). Verified the lazy import resolves (in production on the 06-21 run: many `[PST-STALE]`/`[PST-ROLL]` alerts fired, zero `staleness alert failed`). The roll/splice logic itself was correct on 06-18 (LEANHOG/LIVECOW/FEEDCOW rolled as designed).
+
+**Follow-up (alert-tag split, 2026-06-21).** Once the alert actually fired, it cried wolf: `_alert_stale` tagged *every* successful roll `[PST-STALE]` and Discord-alerted it, even though a roll ending the old contract's series is the desired routine behaviour (the "Nd behind" is just the weekend gap — a Friday last-bar shows "2d behind" on a Sunday). Split the function: a successful roll (`action` = `volume-rolled`/`expiry-rolled`) is now tagged `[PST-ROLL]` and **log-only**; only the genuine no-roll data gap (`action` = `no-roll: …`, front stale AND forward not liquid enough to splice) stays `[PST-STALE]` and escalates to Discord. So Discord now alerts only on real gaps, not on every roll cycle.
 
 ---
 
