@@ -20,8 +20,18 @@ PATH=/usr/local/bin:/usr/bin:/bin
 #     - Eurex/LIFFE instruments placed when BUND/DAX/EUROSTX open (~2–3 AM ET)
 #     - Daemon reloads targets_snapshot.json automatically when next day's compute runs
 #     - Daemon log: ibkr_fut/daemon_cron.log
-# Runs Sun–Thu (markets closed after Friday settlement; Sunday evening session covers Mon open).
-0 22 * * 0,1-4 /home/ethan/ibkr/ibkr_fut/run_dynamic.sh >> /home/ethan/ibkr/ibkr_fut/dynamic_cron.log 2>&1
+#
+# COMPUTE runs Mon–Fri (1-5): each weekday 6 PM run builds the snapshot off that
+#   day's just-settled CME close. The FRIDAY run is what makes Sunday tradable —
+#   it writes the Friday-close snapshot that Sunday's daemon consumes (no session
+#   settles over the weekend, so Friday's close is the freshest legitimate data).
+# EXECUTE (daemon) runs Sun–Thu (0,1-4): the Sunday-evening Globex session opens
+#   the new trading week, so the daemon must be alive Sun→Thu evenings. Each start
+#   loads the latest snapshot (Fri's snapshot on Sunday; that evening's on Mon–Thu).
+# The daemon's calendar-aware staleness gate (ibkr_fut/trading_calendar.py) trades
+#   whenever the snapshot date == the last completed CME session, so the Sunday run
+#   on Friday's data is correctly treated as fresh (was false-alarmed before).
+0 22 * * 1-5 /home/ethan/ibkr/ibkr_fut/run_dynamic.sh >> /home/ethan/ibkr/ibkr_fut/dynamic_cron.log 2>&1
 15 22 * * 0,1-4 /home/ethan/ibkr/ibkr_fut/run_execution.sh >> /home/ethan/ibkr/ibkr_fut/execution_cron.log 2>&1
 
 # Daemon watchdog — every 15 min. Restarts the execution daemon via

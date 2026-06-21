@@ -13,6 +13,7 @@ pytz==2025.2           # live_port.py / live_port_pc.py timezone handling
 scipy==1.17.1          # foundations.handcraft_weights (scipy.cluster.hierarchy)
 tabulate==0.10.0       # backtest_dynamic result tables
 matplotlib==3.10.9     # backtest_dynamic plot imports (Agg backend, no display needed)
+pandas_market_calendars==5.4.0  # ibkr_fut/trading_calendar.py: CME session calendar for daemon staleness gate
 
 # ETF Alpaca live path (etf/live/executor.py, prices.py)
 alpaca-py==0.43.4      # TradingClient, StockHistoricalDataClient, order submission

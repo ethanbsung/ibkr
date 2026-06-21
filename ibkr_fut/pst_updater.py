@@ -18,6 +18,13 @@ Requirements: IB Gateway running on port 4002 (paper) or 4001 (live).
 import os, sys, time, math, logging, argparse, glob
 from datetime import date, timedelta
 
+# Run as a top-level script (run_dynamic.sh does `python3 ibkr_fut/pst_updater.py`),
+# so the repo root isn't on sys.path and `import ibkr_fut.*` would fail. Insert it
+# like every other module here does, otherwise the lazy `from ibkr_fut.risk_check
+# import _send_discord` in _alert_stale raises "No module named 'ibkr_fut'" and
+# every PST-STALE Discord alert is silently swallowed.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import pandas as pd
 import numpy as np
 from ib_insync import IB, Future, Forex, util

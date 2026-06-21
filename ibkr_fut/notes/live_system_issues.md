@@ -60,6 +60,18 @@ So the reconcile logic was correct *given its inputs*; the inputs were a stale s
 
 ### HIGH
 
+#### [BUG-8] `pst_updater` PST-STALE Discord alerts silently swallowed (`No module named 'ibkr_fut'`)
+
+**Found 2026-06-20** investigating the daemon's repeating "snapshot PST data is from 2026-06-17, not today" warnings.
+
+**Symptom.** Every `_alert_stale` call in `pst_updater.py` logged `staleness alert failed (No module named 'ibkr_fut')` and **no Discord alert was ever sent**. Visible all over `pst_updater.log` (e.g. `LEANHOG: staleness alert failed`, `BBCOMM: staleness alert failed`, `CHEESE`, `RUBBER`…). This is the exact early-warning channel meant to flag wrong-contract / data-gap problems on near-monthly instruments (the QM-class issue the volume-roll change addressed) — and it was dead.
+
+**Root cause.** `_alert_stale` does a lazy `from ibkr_fut.risk_check import _send_discord`, but `pst_updater.py` is launched as a top-level script (`run_dynamic.sh` runs `python3 ibkr_fut/pst_updater.py …`), so the repo root was never on `sys.path` and the `ibkr_fut` package wasn't importable. Every other module in `ibkr_fut/` inserts the repo root at import time (`sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))`); `pst_updater.py` was the one that didn't. Pure packaging oversight — unrelated to the volume-roll logic, but introduced/exposed when `_alert_stale` was added in the roll-updater commit (78d9345).
+
+**Fix (commit pending).** Added the standard repo-root `sys.path.insert` at the top of `pst_updater.py` (right after the stdlib imports). Verified the lazy import resolves. The roll/splice logic itself was correct on 06-18 (LEANHOG/LIVECOW/FEEDCOW rolled as designed).
+
+---
+
 #### [BUG-2] No visibility into full optimization output
 
 The snapshot `diag` only stores entries for instruments with `target != 0 or current_position != 0` (live_dynamic.py:346). All ~86 instruments the optimizer evaluated and assigned 0 are silently discarded.
@@ -223,7 +235,15 @@ The adverse-price check fires when the market moves against the passive limit si
 
 `run_execution.sh` starts the daemon at 6:05 PM ET. `run_dynamic.sh` runs compute at 6:00 PM ET but pst_updater + preflight take ~23 minutes, so compute finishes ~6:23 PM. The daemon finds the prior day's snapshot and emits stale warnings for ~8 minutes until the fresh snapshot appears.
 
-Not a correctness issue — the daemon waits correctly — but generates noise and Discord alerts.
+Not a correctness issue — the daemon waits correctly — but generates noise and Discord alerts. (The *false-on-weekends/holidays* flavour of this warning is fixed by OBS-10; the ~8-min start-up race described here is still separate and open.)
+
+---
+
+#### [OBS-10] Daemon staleness gate compared snapshot date to `date.today()` — false "pst_updater may have failed" every weekend/holiday
+
+**Found 2026-06-20.** The daemon gated execution on `pst_date != date.today()` (live_dynamic.py ~1197). But the snapshot's `date` is the **last PST bar** it was built from, and a CME Globex *session* is named by its 18:00 ET close: the compute runs at 18:00 ET and sizes off the just-settled close, so on a **Sunday-evening run the freshest legitimate data is the previous Friday's session**. Comparing that against `date.today()` (Sunday) made the daemon declare a perfectly fresh snapshot "failed" and refuse to trade — which is exactly what was filling `daemon_cron.log` on Sat/Sun 06-20/21 (snapshot legitimately at Fri's data, "today" ≠ Fri). CME also trades shortened sessions on some US holidays (e.g. Juneteenth 06-19), so "is the market closed today" is the wrong question too.
+
+**Fix (commit pending).** New `ibkr_fut/trading_calendar.py` wraps the `pandas_market_calendars` `CMES` (CME Globex) calendar and exposes `last_completed_session()` / `sessions_behind()` / `is_snapshot_fresh()` (with a 20-min settlement grace so the gate never demands data inside the close→pst_updater window). The daemon now trades whenever `sessions_behind(pst_date) == 0` (snapshot == last completed session) and only skips + Discord-alerts (once per stale date, via the now-working `_send_discord`) when it genuinely lags. Verified: Fri-dated snapshot evaluated Sunday 18:00 → FRESH; Thu-dated → STALE(1); the real 06-17 snapshot → STALE(2). Dependency pinned in `requirements_live.txt`. Paired with the cron change (compute Mon–Fri, execute Sun–Thu) so Friday's compute feeds Sunday's open.
 
 ---
 

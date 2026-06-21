@@ -98,7 +98,9 @@ from ibkr_fut.carry_trend_signals import (
 from ibkr_fut.dynamic_opt import optimise_positions
 from ibkr_fut.algo_execution import pre_trade_checks, algo_exec, is_contract_okay_to_trade
 from ibkr_fut.risk_check import (check_halt_file, check_gross_leverage,
-                                 check_order_vol, check_daily_loss, raise_halt)
+                                 check_order_vol, check_daily_loss, raise_halt,
+                                 _send_discord)
+from ibkr_fut.trading_calendar import last_completed_session, sessions_behind
 from paper.dyn_ledger import DynLedger
 
 # ── Tradable-set filter ────────────────────────────────────────────────────────
@@ -1136,6 +1138,7 @@ def run_daemon(args):
     ledger              = DynLedger()
     snapshot_computed_at = None
     targets = diag = capital = meta = None
+    stale_alerted_for: str | None = None   # snapshot date we've already Discord-alerted as stale
     # BUG-7 churn cap: count cycles each instrument placed a live order this session.
     # Resets when a fresh snapshot loads (a new trading day's legitimate rebalances
     # should not be charged against yesterday's count).
@@ -1192,15 +1195,40 @@ def run_daemon(args):
             capital = snap["capital"]
             meta    = diag.get("_meta", {})
             trade_counts = {}   # new snapshot = new target set; reset the churn cap
-            pst_date = meta.get("date", "unknown")
-            today_str = date.today().isoformat()
-            if pst_date != today_str:
-                print(f"[{_now()}] WARNING: snapshot PST data is from {pst_date}, "
-                      f"not today ({today_str}) — pst_updater may have failed. "
-                      f"Skipping execution until fresh compute runs.")
+            # Staleness gate (calendar-aware). The snapshot's date is the last
+            # PST bar it was built from, NOT wall-clock today. A CME session is
+            # named by its 18:00 ET close, and the compute (run ~18:00 ET) sizes
+            # off the just-settled close — so on a Sunday-evening run the freshest
+            # legitimate data is the *previous Friday's* session. Comparing against
+            # date.today() therefore false-alarmed every weekend/holiday run.
+            #
+            # Correct test: is the snapshot behind the most recent COMPLETED CME
+            # session (sessions_behind > 0)? If so pst_updater/Gateway genuinely
+            # failed → skip + Discord-alert (once per stale date). Otherwise trade.
+            pst_date_str = meta.get("date", "unknown")
+            try:
+                pst_date = date.fromisoformat(pst_date_str)
+                lag = sessions_behind(pst_date)
+            except (ValueError, TypeError):
+                pst_date = None
+                lag = 1   # unparseable date → treat as stale, fail safe
+            if lag > 0:
+                expected = last_completed_session()
+                msg = (f"snapshot PST data is from {pst_date_str}, "
+                       f"{lag} session(s) behind last completed CME session "
+                       f"({expected.isoformat()}) — pst_updater/Gateway may have "
+                       f"failed. Skipping execution until fresh compute runs.")
+                print(f"[{_now()}] WARNING: {msg}")
+                if stale_alerted_for != pst_date_str:
+                    try:
+                        _send_discord(f"[DAEMON-STALE] {msg}")
+                    except Exception as e:
+                        print(f"[{_now()}] WARNING: stale Discord alert failed: {e}")
+                    stale_alerted_for = pst_date_str
                 snapshot_computed_at = None   # force reload next cycle
                 time.sleep(60)
                 continue
+            stale_alerted_for = None   # snapshot is fresh; re-arm the alert
             print(f"[{_now()}] Snapshot loaded: {snapshot_computed_at}  "
                   f"capital ${capital:,.0f}  IDM {meta.get('idm')}  "
                   f"{meta.get('n_live')} live  target holds {meta.get('n_held_target')}")
