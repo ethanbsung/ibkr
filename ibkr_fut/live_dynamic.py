@@ -350,12 +350,13 @@ def compute_targets(uni: dict, capital: float, current_positions: dict,
 
     targets, diag = {}, {}
     if live_idx.size == 0:
-        diag["_meta"] = {"idm": 1.0, "n_live": 0, "date": as_of.date(),
-                         "gross_lev": 0.0}
-        # nothing live; hold everything we currently have
+        # nothing live; hold everything we currently have (all frozen, no signal)
         for nm in names:
             if current_positions.get(nm, 0) != 0:
                 targets[nm] = int(current_positions[nm])
+        diag["_meta"] = {"idm": 1.0, "n_live": 0, "date": as_of.date(),
+                         "gross_lev": 0.0,
+                         "status": {nm: "frozen" for nm in targets}}
         return targets, diag
 
     # Live-universe renormalised weights + IDM.
@@ -407,10 +408,28 @@ def compute_targets(uni: dict, capital: float, current_positions: dict,
         if current_positions.get(nm, 0) != 0 and nm not in targets:
             targets[nm] = int(current_positions[nm])
 
+    # Per-target status so the daily report can explain *why* a position is held:
+    #   active      — in the tradable set; optimiser sized it freely.
+    #   reduce_only — held but not tradable, with a valid signal today: the optimiser
+    #                 may only unwind it toward 0 (never grow/flip). [dynamic_opt]
+    #   frozen      — held but not tradable AND no valid signal today: held at current
+    #                 (the no-blind-trade fallback above).
+    tradable_by_name = {nm: bool(tradable[i]) for i, nm in enumerate(names)}
+    valid_by_name = {nm: bool(valid[i]) for i, nm in enumerate(names)}
+    status = {}
+    for nm in targets:
+        if tradable_by_name.get(nm, False):
+            status[nm] = "active"
+        elif valid_by_name.get(nm, False):
+            status[nm] = "reduce_only"
+        else:
+            status[nm] = "frozen"
+
     diag["_meta"] = {
         "idm": round(idm_t, 3), "n_live": int(live_idx.size),
         "date": as_of.date(), "gross_lev": round(gross_notional / capital, 2),
         "n_held_target": int(np.count_nonzero(N_star)),
+        "status": status,
     }
     return targets, diag
 

@@ -254,6 +254,7 @@ def section_futures_positions() -> tuple[list[str], list[str]]:
         snap = json.load(fh)
     targets   = snap.get("targets", {})
     snap_date = snap.get("date", "unknown")
+    status    = snap.get("diag", {}).get("_meta", {}).get("status", {})
 
     # Live IBKR first (gateway up via IBC) — held is in the PST-instrument
     # namespace (matching targets) via the shared canonical mapping. The CSV
@@ -284,20 +285,39 @@ def section_futures_positions() -> tuple[list[str], list[str]]:
                         held[key] = held.get(key, 0) + int(row["qty"])
 
     all_syms = sorted(set(list(targets) + list(held)))
-    tgt_str  = "  ".join(f"{s}={targets.get(s, 0):+d}" for s in all_syms) if targets else "(none)"
-
-    held_parts = []
-    for s in all_syms:
-        t = targets.get(s, 0)
-        h = held.get(s, 0)
-        flag = "  ← MISMATCH" if t != h else ""
-        held_parts.append(f"{s}={h:+d}{flag}")
-        if t != h:
-            warnings.append(f"position mismatch {s}: target={t:+d} held={h:+d}")
 
     lines.append(f"  Snapshot: {snap_date}  [source: {source}]")
-    lines.append(f"  Target:   {tgt_str}")
-    lines.append(f"  Held:     {'  '.join(held_parts) or '(flat)'}")
+    if not all_syms:
+        lines.append("  (flat — no targets, no positions)")
+        return lines, warnings
+
+    # One instrument per line: target, held, and a status-aware flag.
+    #   active      — freely optimised; t != h is a genuine mismatch (order pending).
+    #   reduce_only — held but not tradable; may only unwind toward 0. If it's still
+    #                 moving toward 0 that's expected (UNWINDING), not a mismatch.
+    #   frozen      — held, not tradable, no signal today; pinned at current.
+    lines.append(f"  {'Instr':<14} {'tgt':>5} {'held':>5}  status")
+    for s in all_syms:
+        t  = targets.get(s, 0)
+        h  = held.get(s, 0)
+        st = status.get(s, "active" if s in targets else "untracked")
+        match = (t == h)
+
+        if match:
+            note = "ok" if st == "active" else st.replace("_", "-")
+        elif st == "reduce_only":
+            # Unwinding toward zero is the intended behaviour, not an error — but
+            # surface it so it's visible while the daemon works the order down.
+            note = "← UNWINDING (reduce-only)"
+            warnings.append(f"{s} unwinding: target={t:+d} held={h:+d} (reduce-only)")
+        elif st == "frozen":
+            note = "← stranded (frozen, no signal)"
+            warnings.append(f"{s} stranded: held={h:+d} but not tradable (frozen)")
+        else:
+            note = "← MISMATCH"
+            warnings.append(f"position mismatch {s}: target={t:+d} held={h:+d}")
+
+        lines.append(f"  {s:<14} {t:>+5d} {h:>+5d}  {note}")
 
     return lines, warnings
 

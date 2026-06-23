@@ -238,19 +238,74 @@ def _corr_cov(vol, rho):
     return np.diag(v) @ r @ np.diag(v)
 
 
-def test_locked_instrument_held_at_current():
-    # A non-tradable instrument must keep its current position exactly, never trade.
+def test_locked_flat_instrument_stays_flat():
+    # A non-tradable instrument that is currently flat must stay flat (no_trade lock).
     cov = _corr_cov([0.20, 0.20], [[1.0, 0.0], [0.0, 1.0]])
     wpc = np.array([0.01, 0.01])
     N = optimise_positions(
         covariance=cov, weight_per_contract=wpc,
         optimal_unrounded_positions=np.array([4.0, 4.0]),
+        previous_positions=np.array([0.0, 0.0]),
+        use_costs=False, use_buffering=False,
+        tradable=np.array([False, True]),
+    )
+    assert N[0] == 0.0          # locked flat, never opened
+    assert N[1] == 4.0          # tradable one optimises freely
+
+
+def test_reduce_only_closes_when_forecast_turns():
+    # A non-tradable HELD instrument whose forecast no longer supports the held side
+    # is unwound toward zero (pysystemtrade reduce_only), not frozen at its size.
+    cov = _corr_cov([0.20, 0.20], [[1.0, 0.0], [0.0, 1.0]])
+    wpc = np.array([0.01, 0.01])
+    N = optimise_positions(
+        covariance=cov, weight_per_contract=wpc,
+        optimal_unrounded_positions=np.array([-4.0, 4.0]),  # held long, model now short
         previous_positions=np.array([2.0, 0.0]),
         use_costs=False, use_buffering=False,
         tradable=np.array([False, True]),
     )
-    assert N[0] == 2.0          # locked at its current 2 contracts
+    assert N[0] == 0.0          # held long unwound to flat (was frozen at +2 before fix)
     assert N[1] == 4.0          # tradable one optimises freely
+
+
+def test_reduce_only_closes_when_no_signal():
+    # Held non-tradable instrument with a flat target unwinds fully to zero.
+    cov = _corr_cov([0.20, 0.20], [[1.0, 0.0], [0.0, 1.0]])
+    wpc = np.array([0.01, 0.01])
+    N = optimise_positions(
+        covariance=cov, weight_per_contract=wpc,
+        optimal_unrounded_positions=np.array([0.0, 4.0]),
+        previous_positions=np.array([2.0, 0.0]),
+        use_costs=False, use_buffering=False,
+        tradable=np.array([False, True]),
+    )
+    assert N[0] == 0.0
+
+
+def test_reduce_only_never_grows_or_flips():
+    # Reduce-only must never increase magnitude or flip sign, regardless of forecast.
+    cov = _corr_cov([0.20, 0.20], [[1.0, 0.0], [0.0, 1.0]])
+    wpc = np.array([0.01, 0.01])
+    # Held short -3; forecast wants strong long (+8). May unwind toward 0 but must
+    # never cross into a long position.
+    N = optimise_positions(
+        covariance=cov, weight_per_contract=wpc,
+        optimal_unrounded_positions=np.array([8.0, 0.0]),
+        previous_positions=np.array([-3.0, 0.0]),
+        use_costs=False, use_buffering=False,
+        tradable=np.array([False, True]),
+    )
+    assert -3.0 <= N[0] <= 0.0   # stays short-or-flat, never flips long
+    # Held long +5; forecast wants more long (+9). Reduce-only can't grow → stays ≤ +5.
+    N2 = optimise_positions(
+        covariance=cov, weight_per_contract=wpc,
+        optimal_unrounded_positions=np.array([9.0, 0.0]),
+        previous_positions=np.array([5.0, 0.0]),
+        use_costs=False, use_buffering=False,
+        tradable=np.array([False, True]),
+    )
+    assert 0.0 <= N2[0] <= 5.0  # never exceeds the held size
 
 
 def test_locked_risk_transfers_to_correlated_tradable():

@@ -216,6 +216,7 @@ def greedy_optimise_weights(
     previous_weights: np.ndarray | None = None,
     cost_in_weight: np.ndarray | None = None,
     locked: np.ndarray | None = None,
+    reduce_only: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Greedy integer optimiser (calcs.txt lines 238-256).
@@ -236,6 +237,15 @@ def greedy_optimise_weights(
     target_i is fixed and the optimiser instead loads the desired risk onto its
     correlated, tradable neighbours through the off-diagonal covariance.
 
+    reduce_only:  optional boolean mask of instruments we may unwind but not grow —
+    pysystemtrade's reduce_only constraint (bounds [0, prev] long / [prev, 0] short).
+    These are instruments we currently hold but can no longer trade into (e.g. they
+    dropped out of the tradable set / became too expensive/illiquid); Carver assigns
+    reduce_only to "markets not trading but with data". A reduce-only instrument starts
+    at its previous weight and may only step *toward* zero (never away, never flipping
+    sign), so a stranded position is unwound instead of frozen. reduce_only on a flat
+    instrument (prev == 0) is equivalent to locked.
+
     The objective is evaluated incrementally for speed. The tracking-error variance
     V = e'Sigma e (e = w - target) updates in O(1) for a one-contract move at i:
         V_new = V + 2*d*g[i] + d^2 * Sigma_ii,  with g = Sigma e,
@@ -255,13 +265,25 @@ def greedy_optimise_weights(
         locked = np.zeros(n, dtype=bool)
     else:
         locked = np.asarray(locked, dtype=bool)
+    if reduce_only is None:
+        reduce_only = np.zeros(n, dtype=bool)
+    else:
+        reduce_only = np.asarray(reduce_only, dtype=bool)
+    # reduce_only with a flat prior is just a no-trade lock (pysystemtrade); a held
+    # locked instrument is promoted to reduce_only so it can be unwound, not frozen.
+    reduce_only = reduce_only & (prev != 0.0)
+    locked = locked | (reduce_only & (prev == 0.0))
 
+    wpc = np.asarray(weight_per_contract, dtype=float)
     direction = np.sign(target)
-    step = np.asarray(weight_per_contract, dtype=float) * direction   # signed weight step
+    step = wpc * direction                                            # signed weight step
+    # Reduce-only instruments may only move *toward* zero, regardless of forecast.
+    step = np.where(reduce_only, -np.sign(prev) * wpc, step)
     diag = np.diag(cov)
 
     w = np.zeros(n)
     w[locked] = prev[locked]          # hold non-tradable instruments at current position
+    w[reduce_only] = prev[reduce_only]  # start held; greedy loop unwinds toward zero
     e = w - target
     g = cov @ e                       # gradient Sigma e
     V = float(e @ g)
@@ -271,6 +293,7 @@ def greedy_optimise_weights(
 
     immovable = (step == 0.0) | locked
     cost_term = COST_MULTIPLIER * cost
+    sign_prev = np.sign(prev)
 
     while True:
         # Vectorised one-contract evaluation across all instruments at once.
@@ -280,6 +303,10 @@ def greedy_optimise_weights(
         cost_new = cur_cost + cost_term * (new_abs - cur_abs)
         obj = track_new + cost_new
         obj[immovable] = np.inf
+        # Reduce-only: forbid any move that would overshoot zero (flip the held sign).
+        w_next = w + step
+        overshoot = reduce_only & (np.sign(w_next) == -sign_prev) & (w_next != 0.0)
+        obj[overshoot] = np.inf
 
         i = int(np.argmin(obj))
         if obj[i] >= cur_obj - 1e-15:
@@ -360,10 +387,15 @@ def optimise_positions(
     cost_per_contract_i is the cash cost of trading one contract (base currency);
     converted to weight terms as (C_i / capital) / weight_per_contract_i.  [calcs line 268]
 
-    tradable:  optional boolean mask (True = may be traded). Instruments with
-    tradable=False are part of the optimisation universe — they shape the target and
-    the covariance — but are held at min=max=current position (calcs.txt line 330):
-    Carver optimises over ~150 futures while only trading ~100 (calcs.txt lines 326-328).
+    tradable:  optional boolean mask (True = may be traded). An instrument with
+    tradable=False is part of the optimisation universe — it shapes the target and
+    the covariance (calcs.txt line 330; Carver optimises over ~150 futures while only
+    trading ~100, calcs.txt lines 326-328) — but cannot be traded into. Following
+    pysystemtrade's two-tier treatment of non-tradable markets:
+      • flat  (prev == 0)  → locked / no_trade: held at min=max=current (0).
+      • held  (prev != 0)  → reduce_only: may be unwound toward zero but never grown
+        or flipped, so a position stranded by an instrument dropping out of the
+        tradable set is closed instead of frozen.
     """
     n = len(optimal_unrounded_positions)
     wpc = np.asarray(weight_per_contract, dtype=float)
@@ -379,10 +411,16 @@ def optimise_positions(
     else:
         cost_in_weight = np.zeros(n)
 
-    locked = None if tradable is None else ~np.asarray(tradable, dtype=bool)
+    if tradable is None:
+        locked = reduce_only = None
+    else:
+        not_tradable = ~np.asarray(tradable, dtype=bool)
+        reduce_only = not_tradable & (prev_positions != 0.0)   # held → unwind toward 0
+        locked = not_tradable & (prev_positions == 0.0)        # flat → frozen at 0
 
     opt_weights = greedy_optimise_weights(
-        covariance, wpc, target_weights, previous_weights, cost_in_weight, locked
+        covariance, wpc, target_weights, previous_weights, cost_in_weight,
+        locked, reduce_only,
     )
 
     if use_buffering:
