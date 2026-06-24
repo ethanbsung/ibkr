@@ -17,6 +17,24 @@ First logged: 2026-06-11 live monitoring session.
 
 ### CRITICAL
 
+#### [BUG-9] Compute writes the snapshot off a phantom-FLAT book when `reqPositions` fails → held positions never close
+
+**Found 2026-06-24** investigating why CHF/JPY/NZD/KOSDQ150/DAX/MBT (held −1 each) weren't being closed even though they'd dropped out of the optimiser's daily targets. The reduce_only optimiser fix (commit f63a2b4) is correct but **never fired**, because compute never saw the held positions.
+
+**Symptom.** `dynamic_cron.log` shows the COMPUTE job logging `WARNING: live reqPositions failed (Socket disconnect) — falling back to cached ib.positions()` then `Current positions: flat` on nearly every recent run (2026-06-16, 17, 21, 22, 23). The persisted `targets_snapshot.json` therefore lists only freshly-optimised positions, all tagged `active`, with **no entry** for the genuinely-held instruments and no `reduce_only`/`frozen` status. The daemon loads that snapshot and reconciles against it; for an instrument that's held but absent from `targets`, `reconcile_and_execute` (live_dynamic.py:858 `desired = int(targets.get(instr, net_held))`) defaults to **keep current** — so the stranded positions are carried indefinitely.
+
+**Root cause.** In the compute path, `get_positions_by_instr` was called *after* the ~15-min `_build_universe` step. The gateway routinely drops the API socket during that long CPU-bound window, so by the time positions are requested the connection is half-open and `reqPositionsAsync` raises "Socket disconnect". `fetch_positions` then silently fell back to `ib.positions()`, whose cache was never seeded on this short-lived compute client → it returned **empty**, indistinguishable from "really flat". `compute_targets` ran with `current_positions = {}`, so even the no-blind-trade fallback (live_dynamic.py:407, gated on `current_positions.get(nm,0) != 0`) preserved nothing. A wrong, flat-book snapshot was persisted and traded against. Same *class* as BUG-7 (acting on an unverified position read), different trigger (one-shot compute client losing its socket mid-build, not a frozen long-lived daemon cache).
+
+**Fix (commit pending) in `live_dynamic.py`:**
+1. **Fetch positions on a fresh socket, before the build.** Moved `get_positions_by_instr` to immediately after `_connect`/`load_ib_config`, so the request goes out while the connection is new (the early `get_equity` read already succeeds there).
+2. **Strict (verified) read when persisting.** New `PositionFetchError` + `strict` flag threaded through `fetch_positions`/`get_positions_by_instr`. In strict mode a failed `reqPositions` **raises** instead of falling back to the cache. Compute catches it, alerts `[COMPUTE-ABORT]` to Discord, and **returns without overwriting the snapshot** — so the daemon keeps reconciling against the last *verified* book rather than a phantom-flat one. The daemon's own per-cycle fetch stays non-strict (it re-fetches every 10 min and degrades to "possibly stale", per BUG-7's design).
+
+**Deferred (chosen 2026-06-24, needs backtest first):** `reconcile_and_execute`'s `targets.get(instr, net_held)` default — when an instrument fully *leaves the universe* while held, Carver would reduce it to 0, not keep it. Left as a follow-up to validate in backtest before changing live trading behaviour.
+
+**Verification owed before trusting live:** on the next VPS compute run, confirm `Current positions (net): …` lists the real held book (not `flat`) and that the snapshot's `status` map tags the dropped instruments `reduce_only`/`frozen`; confirm a forced fetch failure produces `[COMPUTE-ABORT]` and leaves the prior `targets_snapshot.json` untouched. The currently-stranded positions still need to be reconciled once a correct snapshot is produced (the daemon should then unwind them).
+
+---
+
 #### [BUG-7] Daemon's `ib.positions()` cache freezes → re-rolls QM every cycle off a stale position (live capital churn)
 
 **Found 2026-06-16 live monitoring.** This is the QM "sell-Aug/buy-Sep every cycle" symptom that BUG-1 was thought to have fixed — but it is a **different bug**. BUG-1 (delivery_month mapping) is genuinely fixed and was *not* the cause here; `delivery_month` maps both QM legs correctly (`202609`/`202608`). Do **not** re-open BUG-1.

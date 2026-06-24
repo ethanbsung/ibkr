@@ -34,6 +34,7 @@ from ibkr_fut.algo_execution import (
     pre_trade_checks,
 )
 from ibkr_fut.live_dynamic import (
+    PositionFetchError,
     check_last_targets,
     fetch_positions,
     get_positions_by_instr,
@@ -1333,6 +1334,35 @@ def test_fetch_positions_falls_back_on_timeout():
     ib.run.side_effect = _ib_run(raises=asyncio.TimeoutError())
     ib.positions.return_value = ["CACHE_ON_TIMEOUT"]
     assert fetch_positions(ib) == ["CACHE_ON_TIMEOUT"]
+
+
+def test_fetch_positions_strict_raises_instead_of_caching():
+    # BUG-9: when the caller is about to persist the result (compute snapshot), a
+    # fresh reqPositions failure must NOT silently fall back to the cache — a
+    # failed read is indistinguishable from "really flat" and would strand every
+    # held position. strict=True raises so the caller can abort.
+    ib = MagicMock()
+    ib.run.side_effect = _ib_run(raises=RuntimeError("Socket disconnect"))
+    ib.positions.return_value = ["STALE_CACHE"]
+    with pytest.raises(PositionFetchError):
+        fetch_positions(ib, strict=True)
+    ib.positions.assert_not_called()
+
+
+def test_fetch_positions_strict_raises_on_timeout():
+    ib = MagicMock()
+    ib.run.side_effect = _ib_run(raises=asyncio.TimeoutError())
+    ib.positions.return_value = ["STALE_CACHE"]
+    with pytest.raises(PositionFetchError):
+        fetch_positions(ib, strict=True)
+
+
+def test_fetch_positions_strict_returns_live_when_ok():
+    # A healthy strict read behaves exactly like the non-strict one.
+    ib = MagicMock()
+    ib.run.side_effect = _ib_run_returns(["LIVE"])
+    ib.positions.return_value = ["STALE_CACHE"]
+    assert fetch_positions(ib, strict=True) == ["LIVE"]
 
 
 # ── get_positions_by_instr symbol mapping ─────────────────────────────────────

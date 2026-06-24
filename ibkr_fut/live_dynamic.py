@@ -461,7 +461,7 @@ def ib_symbol_to_instr(ibcfg: pd.DataFrame) -> dict:
     return sym_only
 
 
-def fetch_positions(ib) -> list:
+def fetch_positions(ib, strict: bool = False) -> list:
     """
     Return a FRESH list of account positions, re-requested from IB.
 
@@ -481,24 +481,42 @@ def fetch_positions(ib) -> list:
     that never arrives. On timeout OR any error we fall back to the cached
     `ib.positions()`, so a stuck/transient connection degrades to "possibly stale"
     rather than "hung" or "crash".
+    When strict=True the caller is about to PERSIST the result (compute writes a
+    snapshot the daemon then trades against). A silent fall back to the possibly-
+    empty/frozen cache there is dangerous: a fresh reqPositions failure looks
+    identical to "really flat", so the snapshot would be computed off a phantom-
+    flat book, stranding every held position that isn't re-derived (BUG-8). In
+    strict mode we raise PositionFetchError instead of guessing, so the caller can
+    abort WITHOUT overwriting the last good snapshot.
     """
     try:
         return ib.run(asyncio.wait_for(ib.reqPositionsAsync(),
                                        POSITIONS_TIMEOUT_SECS))
     except Exception as e:
         kind = "timed out" if isinstance(e, asyncio.TimeoutError) else f"failed ({e})"
+        if strict:
+            raise PositionFetchError(
+                f"live reqPositions {kind} — refusing to fall back to a "
+                f"possibly-stale/empty cache while persisting a snapshot") from e
         print(f"[{_now()}] WARNING: live reqPositions {kind} — "
               f"falling back to cached ib.positions()")
         return ib.positions()
 
 
-def get_positions_by_instr(ib, ibcfg: pd.DataFrame) -> tuple[dict, list]:
+class PositionFetchError(RuntimeError):
+    """reqPositions failed and the caller required a verified (non-cached) read."""
+
+
+def get_positions_by_instr(ib, ibcfg: pd.DataFrame,
+                           strict: bool = False) -> tuple[dict, list]:
     """
     Return ({instr: {YYYYMM: qty}}, unknown) for all held futures.
     Maps IBKR (symbol, exchange) back to a Jumbo PST instrument name.
 
     Positions are re-requested live each call via fetch_positions (NOT the
-    passively-cached ib.positions()) — see BUG-7.
+    passively-cached ib.positions()) — see BUG-7. strict propagates to
+    fetch_positions: when True a failed re-request raises PositionFetchError
+    rather than silently returning the cache (see BUG-8).
     """
     # (symbol, exchange) -> instr, restricted to Jumbo. Symbol-only fallback is
     # used only when exactly one universe instrument carries that IB symbol —
@@ -511,7 +529,7 @@ def get_positions_by_instr(ib, ibcfg: pd.DataFrame) -> tuple[dict, list]:
     sym_only = ib_symbol_to_instr(ibcfg)
 
     held, unknown = {}, []
-    for pos in fetch_positions(ib):
+    for pos in fetch_positions(ib, strict=strict):
         c = pos.contract
         if c.secType != "FUT":
             continue
@@ -1368,6 +1386,28 @@ def main():
             return
         ibcfg = load_ib_config()
 
+        # Read held positions FIRST, on a fresh socket (BUG-8). The universe build
+        # below takes ~15 min; the gateway frequently drops the API socket during
+        # it, so a position fetch after the build was failing with "Socket
+        # disconnect" and silently falling back to the empty cache → a snapshot
+        # computed as if the book were flat → every held position stranded. Fetch
+        # while the connection is new, and demand a VERIFIED read: if it fails we
+        # abort WITHOUT overwriting the last good snapshot rather than trade off a
+        # phantom-flat book.
+        try:
+            held_c, unknown_c = get_positions_by_instr(ib, ibcfg, strict=True)
+        except PositionFetchError as e:
+            msg = (f"compute aborting: {e}. Last good snapshot left untouched so "
+                   f"the daemon keeps reconciling against a verified book.")
+            print(f"[{_now()}] ERROR: {msg}")
+            try:
+                _send_discord(f"[COMPUTE-ABORT] {msg}")
+            except Exception:
+                pass
+            ib.disconnect()
+            return
+        current_c = {instr: sum(m.values()) for instr, m in held_c.items()}
+
         capital = args.capital or get_equity(ib)
         if capital is None:
             print(f"WARNING: could not read equity — using ${FALLBACK_CAPITAL:,.0f}")
@@ -1376,6 +1416,13 @@ def main():
 
         print(f"\n  capital ${capital:,.0f}  |  target risk {args.target_risk:.0%}  |  "
               f"universe {len(UNIVERSE)} instr")
+        if unknown_c:
+            print(f"\n  ⚠ Held futures NOT in UNIVERSE: {unknown_c}")
+        if current_c:
+            print(f"\n  Current positions (net): "
+                  + "  ".join(f"{k} {v:+d}" for k, v in sorted(current_c.items())))
+        else:
+            print(f"\n  Current positions: flat")
 
         # require_carry_fresh: the live forecast uses carry, whose term structure can go
         # stale independently of PRICE — age the CARRY leg too so a frozen multiple_prices
@@ -1398,16 +1445,6 @@ def main():
             print("ERROR: universe build failed (no instruments with valid signals).")
             ib.disconnect()
             return
-
-        held_c, unknown_c = get_positions_by_instr(ib, ibcfg)
-        current_c = {instr: sum(m.values()) for instr, m in held_c.items()}
-        if unknown_c:
-            print(f"\n  ⚠ Held futures NOT in UNIVERSE: {unknown_c}")
-        if current_c:
-            print(f"\n  Current positions (net): "
-                  + "  ".join(f"{k} {v:+d}" for k, v in sorted(current_c.items())))
-        else:
-            print(f"\n  Current positions: flat")
 
         targets, diag = compute_targets(uni, capital, current_c, args.target_risk)
         meta = diag.get("_meta", {})
