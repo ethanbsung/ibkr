@@ -1675,3 +1675,199 @@ def test_touch_heartbeat_writes_and_never_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(ld, "HEARTBEAT_PATH",
                         str(tmp_path / "no_such_dir" / "hb.txt"))
     ld._touch_heartbeat()                              # must not raise
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Group 8 — Held-but-absent unwind, reduce_only/frozen status guard, and the
+# mass-liquidation guard in reconcile_and_execute.
+#
+# Regression coverage for the stranding bug: a position the optimiser wants at 0
+# is absent from the snapshot's `targets`, and the old `targets.get(instr, net_held)`
+# defaulted to KEEP → the position was never closed. Uses the Group 7 _roll_patches
+# stack; status is supplied via diag["_meta"]["status"].
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _diag_status(status_map):
+    """A diag dict carrying per-instrument status under _meta (what the snapshot stores)."""
+    return {"_meta": {"status": status_map}}
+
+
+@_roll_patches
+def test_rne_held_but_absent_fresh_unwinds_to_zero(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    # THE REGRESSION TEST. Mirrors the live incident: a mostly-present book with a
+    # minority absent (1 of 4 ≤ guard threshold). The absent instrument (held long
+    # 2) is NOT in targets but the snapshot is fresh → unwind toward 0 (SELL 2).
+    # Pre-fix this produced no order at all (desired defaulted to net_held).
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    held = {nm: {"202609": q} for nm, q in
+            (("ES", 2), ("NQ", 1), ("CL", 1), ("GC", 1))}
+    targets = {"NQ": 1, "CL": 1, "GC": 1}            # ES absent (the stranded one)
+    status = {"NQ": "frozen", "CL": "frozen", "GC": "frozen"}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), targets, held,
+                          _diag_status(status),
+                          MagicMock(), execute=True, snapshot_fresh=True)
+
+    assert _exec_orders(mock_exec) == [("202609", "SELL", 2)]   # only ES unwound
+
+
+@_roll_patches
+def test_rne_held_but_absent_stale_holds(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    # Same holding, but snapshot is NOT fresh → never infer a close → no order.
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    held = {"ES": {"202609": 2}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {}, held, _diag_status({}),
+                          MagicMock(), execute=True, snapshot_fresh=False)
+
+    assert _exec_orders(mock_exec) == []
+    mock_exec.assert_not_called()
+
+
+@_roll_patches
+def test_rne_reduce_only_never_grows(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    # reduce_only: long 2, target wants 5 → clamp to 2 → no order (never grow).
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    held = {"ES": {"202609": 2}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 5}, held,
+                          _diag_status({"ES": "reduce_only"}),
+                          MagicMock(), execute=True, snapshot_fresh=True)
+
+    assert _exec_orders(mock_exec) == []
+
+
+@_roll_patches
+def test_rne_reduce_only_never_flips(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    # reduce_only: long 2, target -3 → clamp to 0 → SELL 2 only (close, never short).
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    held = {"ES": {"202609": 2}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": -3}, held,
+                          _diag_status({"ES": "reduce_only"}),
+                          MagicMock(), execute=True, snapshot_fresh=True)
+
+    orders = _exec_orders(mock_exec)
+    assert orders == [("202609", "SELL", 2)]
+    assert all(a != "BUY" for _, a, _ in orders)
+
+
+@_roll_patches
+def test_rne_reduce_only_shrinks_partially(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    # reduce_only: long 3, target 1 (same sign, smaller) → SELL 2.
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    held = {"ES": {"202609": 3}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 1}, held,
+                          _diag_status({"ES": "reduce_only"}),
+                          MagicMock(), execute=True, snapshot_fresh=True)
+
+    assert _exec_orders(mock_exec) == [("202609", "SELL", 2)]
+
+
+@_roll_patches
+def test_rne_frozen_holds_no_rebalance(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    # frozen: held long 2, even an explicit target 0 must NOT trade (hold at current).
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    held = {"ES": {"202609": 2}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 0}, held,
+                          _diag_status({"ES": "frozen"}),
+                          MagicMock(), execute=True, snapshot_fresh=True)
+
+    assert _exec_orders(mock_exec) == []
+
+
+@_roll_patches
+def test_rne_frozen_still_closes_old_month(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    # frozen holds the current-month rebalance, but a stranded OLD month is still
+    # closed (risk-reducing contract maintenance, not a directional trade).
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    held = {"ES": {"202609": 2, "202603": 1}}   # 202603 is an old month
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 0}, held,
+                          _diag_status({"ES": "frozen"}),
+                          MagicMock(), execute=True, snapshot_fresh=True)
+
+    orders = _exec_orders(mock_exec)
+    assert ("202603", "SELL", 1) in orders          # old month closed
+    assert all(m != "202609" for m, _, _ in orders)  # current month held
+
+
+@patch("ibkr_fut.live_dynamic._send_discord")
+@_roll_patches
+def test_rne_mass_liquidation_guard_trips(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol,
+    mock_discord
+):
+    # 4 of 4 held instruments absent from a fresh snapshot (>34%) → suspect bad
+    # snapshot: do NOT auto-close any, and alert.
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    held = {nm: {"202609": 1} for nm in ("ES", "NQ", "CL", "GC")}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {}, held, _diag_status({}),
+                          MagicMock(), execute=True, snapshot_fresh=True)
+
+    assert _exec_orders(mock_exec) == []            # nothing liquidated
+    mock_discord.assert_called_once()
+    assert "RECONCILE-ABSENT" in mock_discord.call_args.args[0]
+
+
+@patch("ibkr_fut.live_dynamic._send_discord")
+@_roll_patches
+def test_rne_mass_liquidation_guard_allows_single_absentee(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol,
+    mock_discord
+):
+    # 1 of 4 held absent (25% ≤ 34%) → the absentee is unwound to 0; the 3 present
+    # (in targets at their current qty) are untouched; no alert.
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    held = {nm: {"202609": 1} for nm in ("ES", "NQ", "CL", "GC")}
+    targets = {"NQ": 1, "CL": 1, "GC": 1}           # ES absent
+    status = {"NQ": "frozen", "CL": "frozen", "GC": "frozen"}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), targets, held,
+                          _diag_status(status),
+                          MagicMock(), execute=True, snapshot_fresh=True)
+
+    assert _exec_orders(mock_exec) == [("202609", "SELL", 1)]   # only ES closed
+    mock_discord.assert_not_called()
+
+
+@_roll_patches
+def test_rne_backward_compat_no_meta_status(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    # Instrument present in targets, diag has no _meta → status None → unchanged
+    # behaviour: routes exactly as test_rne_no_roll_window_routes_current_month.
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    held = {"ES": {"202609": 1}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 3}, held, _MOCK_DIAG,
+                          MagicMock(), execute=True, snapshot_fresh=True)
+
+    assert _exec_orders(mock_exec) == [("202609", "BUY", 2)]

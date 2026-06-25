@@ -128,6 +128,12 @@ FORCE_ROLL_DAYS   = 1    # ≤ this many days to roll date: position MUST leave 
 SPREAD_PASSIVE_SECS = 60 # seconds to work the spread limit before cancelling
 SPREAD_CANCEL_CONFIRM_SECS = 30  # max wait for cancel-ack before abandoning MKT escalation
 
+# Mass-liquidation guard (reconcile_and_execute): if more than this fraction of the
+# held book is absent from a FRESH snapshot, treat the snapshot as suspect — do not
+# auto-close the absentees, alert and hold for manual review. ~1/3 ⇒ a 50%-absent
+# event (the BUG-9 live incident) alerts rather than liquidating half the book.
+ABSENT_HELD_MAX_FRAC = 0.34
+
 # ── Strategy parameters (match the backtest you validated) ─────────────────────
 DYN_TARGET_RISK = TARGET_RISK   # 0.25 — same as backtest_dynamic / backtest_ewmac
 
@@ -814,11 +820,21 @@ def spread_roll_exec(ib, spec: dict, from_month: str, to_month: str, qty: int,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
-                          skip_unchanged: bool = False, capital: float = 0.0):
+                          skip_unchanged: bool = False, capital: float = 0.0,
+                          snapshot_fresh: bool = True):
     """
     For each instrument with a target or current holding, roll out of old months and
     move the hold-month position to the target. Prints the plan; places orders via
     the passive-aggressive limit order algorithm when execute=True.
+
+    snapshot_fresh: whether the snapshot driving `targets` passed the daemon's
+        calendar-aware staleness gate (see run_daemon). A held instrument that is
+        ABSENT from a fresh snapshot is unwound toward 0 (the snapshot is
+        authoritative about what we should hold) — this is the fix for the
+        stranding bug where `targets.get(instr, net_held)` defaulted to keep, so a
+        position the optimiser wanted at 0 was never closed. When the snapshot is
+        NOT fresh, absence is treated as "stale and silent" → hold (never infer a
+        close off untrusted data).
     """
     pending = {t.contract.symbol for t in ib.openTrades()}
     placed, skipped, dry_run = [], [], []
@@ -829,6 +845,34 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
         if c.conId not in _mkt_open_cache:
             _mkt_open_cache[c.conId] = is_contract_okay_to_trade(ib, c)
         return _mkt_open_cache[c.conId]
+
+    # ── Mass-liquidation guard ────────────────────────────────────────────────
+    # The held-but-absent → unwind-toward-0 rule below makes the snapshot
+    # authoritative about which positions to hold. That is correct for a normal
+    # cleanup (a few instruments left the universe), but DANGEROUS if a fresh-but-
+    # CORRUPT snapshot silently omits most of the book (e.g. compute sized off a
+    # partial position read) — auto-closing then liquidates real exposure. If more
+    # than ABSENT_HELD_MAX_FRAC of the held book is absent from a fresh snapshot,
+    # treat the snapshot as suspect: do NOT auto-close, hold everything absent, and
+    # alert. The clean recovery is a verified fresh compute. (Live BUG-9 incident:
+    # 6 of 12 held = 50% absent → this guard would alert+hold, not liquidate.)
+    held_instrs = {i for i in held if sum(held[i].values()) != 0}
+    absent_held = held_instrs - set(targets)
+    suspect_bad_snapshot = bool(
+        snapshot_fresh and held_instrs
+        and len(absent_held) / len(held_instrs) > ABSENT_HELD_MAX_FRAC)
+    if suspect_bad_snapshot:
+        msg = (f"{len(absent_held)}/{len(held_instrs)} held positions absent from a "
+               f"fresh snapshot (> {ABSENT_HELD_MAX_FRAC:.0%}) — suspected bad "
+               f"snapshot; NOT auto-closing absentees. Manual review. "
+               f"Absent: {sorted(absent_held)}")
+        print(f"[{_now()}] WARNING: [RECONCILE-ABSENT] {msg}")
+        try:
+            _send_discord(f"[RECONCILE-ABSENT] {msg}")
+        except Exception as e:
+            print(f"[{_now()}] WARNING: RECONCILE-ABSENT Discord alert failed: {e}")
+
+    status_map = (diag.get("_meta") or {}).get("status", {})
 
     instruments = sorted(set(targets) | set(held))
     for instr in instruments:
@@ -873,7 +917,41 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
         old_months   = {m: q for m, q in pos_by_month.items()
                         if m not in expected_months and q != 0}
         net_held     = qty_current + qty_next + sum(old_months.values())
-        desired      = int(targets.get(instr, net_held))
+        # Position held in the months we keep (current + incoming during a roll).
+        # `desired` is compared against this for rebalancing; old months are always
+        # closed separately via roll_closes, so they must NOT count toward "hold".
+        expected_held = qty_current + qty_next
+
+        # ── Determine desired net position ────────────────────────────────────
+        # Normal case: the instrument is in the snapshot — honour its target.
+        # Held-but-ABSENT case: the snapshot is authoritative about what to hold.
+        #   • fresh snapshot → unwind toward 0 (reduce-only). This is the stranding
+        #     fix: the old `targets.get(instr, net_held)` defaulted to KEEP, so a
+        #     position the optimiser wanted closed was never traded out.
+        #   • not fresh, or flagged by the mass-liquidation guard → hold (frozen);
+        #     never infer a close off an untrusted/suspect snapshot.
+        instr_status = status_map.get(instr)   # active | reduce_only | frozen | None
+        if instr in targets:
+            desired = int(targets[instr])
+        elif (not snapshot_fresh) or (instr in absent_held and suspect_bad_snapshot):
+            desired, instr_status = expected_held, "frozen"
+        else:
+            desired, instr_status = 0, "reduce_only"
+
+        # Hard guard on status, independent of how `desired` was derived, so a bad
+        # snapshot target can never grow or flip a position that should only shrink.
+        # Mirrors dynamic_opt.optimise_positions' reduce_only step/overshoot logic.
+        # Clamp against expected_held (the months we keep), so a stranded OLD month
+        # is still closed by the roll path even when the live position is frozen.
+        if instr_status == "frozen":
+            desired = expected_held            # no directional change; old-month rolls still close
+        elif instr_status == "reduce_only":
+            if expected_held > 0:
+                desired = max(0, min(desired, expected_held))
+            elif expected_held < 0:
+                desired = min(0, max(desired, expected_held))
+            else:
+                desired = 0
 
         d = diag.get(instr, {})
         fc      = d.get("forecast")
@@ -1296,9 +1374,12 @@ def run_daemon(args):
 
         # ── 5. Execute cycle ──────────────────────────────────────────────────
         print(f"\n[{_now()}] {'─'*60}")
+        # The cycle only reaches here after the calendar-aware staleness gate
+        # above (run_daemon `continue`s on lag > 0), so the snapshot is fresh.
         placed, skipped, dry_run, traded_instrs = reconcile_and_execute(
             ib, ibcfg, targets, held, diag, ledger,
-            execute=args.execute, skip_unchanged=True, capital=capital)
+            execute=args.execute, skip_unchanged=True, capital=capital,
+            snapshot_fresh=True)
 
         market_closed = sum(1 for s in skipped if "market closed" in s)
         other_skips   = len(skipped) - market_closed
@@ -1504,9 +1585,11 @@ def main():
 
         ledger = DynLedger()
         print("\n" + "-" * 80)
+        # Snapshot is same-day fresh here: --mode execute loads via load_snapshot
+        # (hard-exits if date != today); the fall-through default mode just wrote it.
         placed, skipped, dry_run, _ = reconcile_and_execute(
             ib, ibcfg, targets, held, diag, ledger, execute=args.execute,
-            capital=capital)
+            capital=capital, snapshot_fresh=True)
 
         save_last_targets(LAST_TARGETS_PATH, targets, today)
 
