@@ -14,6 +14,15 @@ source "$REPO/venv/bin/activate"
 
 echo "===== $(date '+%Y-%m-%d %H:%M:%S %Z') run_dynamic start (repo=$REPO) ====="
 
+# Compute-in-progress marker. The execution daemon restarts (22:15 UTC) while this
+# compute is still running (starts 22:00, finishes ~22:17). The daemon consults this
+# marker so it waits quietly for the imminent fresh snapshot instead of false-alarming
+# on the previous-day snapshot and briefly reading a flat book during compute's
+# connection churn (the 6/25 race). Removed on exit (success OR failure) via trap.
+COMPUTING_MARKER="$REPO/ibkr_fut/computing.lock"
+trap 'rm -f "$COMPUTING_MARKER"' EXIT
+date -u +%Y-%m-%dT%H:%M:%SZ > "$COMPUTING_MARKER"
+
 # 1. Refresh PST futures + FX data from IBKR so trend+carry signals use today's close.
 #    --carry refreshes the multiple_prices term structure (CARRY leg) too; the combined
 #    forecast sizes off carry, and live_dynamic ages the CARRY column (require_carry_fresh),

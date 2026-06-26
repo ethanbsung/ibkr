@@ -42,6 +42,32 @@ Tests: `test_execution.py` Group 8 (10 new tests) — held-but-absent unwind (fr
 
 ---
 
+#### [BUG-10] systemd port-watchdog races IBC's silent restart → daily Gateway COLD-restart + full re-auth (the disconnect-storm root cause)
+
+**Found 2026-06-26** investigating "why is the IB API so unreliable" — the through-line behind BUG-7 and BUG-9. Those two share a root cause (acting on an unverified position read), but the *trigger* — the connection dropping in the first place — is environmental, not in our Python.
+
+**Symptom.** Chronic API instability: **52 `Peer closed connection` + 77 `IB disconnected` events** in `daemon_cron.log`; recurring `reqPositions failed (Socket disconnect)` → phantom-flat reads. The IBC log shows **7 `autorestart file not found: full authentication will be required`** events in a single day, and the Gateway cold-restarting **3× on 2026-06-25 (06:55, 22:19, 23:46)** — the 22:19/23:46 restarts landing squarely in the execution window (the 6/25 `[DAEMON-STALE]` alert + flat read came from the 23:46 one).
+
+**Root cause.** The Gateway runs under IBC with `AutoRestartTime=03:00`, which is IBC's *clean, silent* daily restart — it writes an `autorestart` token so the restart re-authenticates with no 2FA. A separate **systemd `ibgateway-watchdog.timer` fires every 2 min** and runs `ss -tlnp | grep -q ":4002" || systemctl restart ibgateway.service`. During IBC's own AutoRestart the port is briefly down; the 2-min watchdog catches that window and **cold-restarts the whole service** via `start_ibgateway.sh`. A cold start has **no autorestart token** → full re-authentication. During that re-auth window the API port answers but positions/market data aren't loaded yet → exactly the half-open / phantom-flat state that BUG-7's frozen cache and BUG-9's empty-cache fallback then act on. The single-miss, 2-min watchdog turned IB's once-daily *silent* restart into repeated *cold* restarts that poisoned the trading window.
+
+**Fix part 1 — environmental (VPS infra, gitignored):** make the watchdog tolerant so it never races IBC's silent restart.
+- New `/home/ethan/ibgateway_watchdog.sh`: requires **2 consecutive** port-4002-down checks (state in `~/.ibgateway_watchdog_misses`) before restarting; clears the counter the moment the port is back.
+- Timer interval widened **2 min → 5 min** (`ibgateway-watchdog.timer`), so a restart only fires after ≥10 min of *sustained* downtime — IBC's brief silent-restart window passes untouched, but a genuinely dead Gateway is still recovered. Service updated to call the script + log to `~/logs/ibgateway_watchdog.log`.
+- (Requires `sudo` to install the unit files + `systemctl daemon-reload`; staged in `~/ibgateway-watchdog.{service,timer}.new`.)
+
+**Fix part 2 — code, fail-safe so a bad read can never trade (commit pending) in `live_dynamic.py` + `test_execution.py`:** even with the infra fixed, the daemon must never trade off an unverified read.
+1. **Strict read in the daemon execute path.** The daemon cycle now calls `get_positions_by_instr(ib, ibcfg, strict=args.execute)`: a failed/timed-out `reqPositions` raises `PositionFetchError` → the cycle skips + alerts `[DAEMON-READFAIL]` and forces a clean reconnect, instead of silently falling back to the possibly-empty cache and reconciling to targets off a phantom-flat book. (Dry-run keeps the lenient fallback; it never trades.) Extends d411b39's compute-side strict read to execution.
+2. **Halt-on-mismatch gate (Carver lock-on-mismatch).** New `expected_book_mismatch()`: before placing orders, compare the freshly-read broker book against the expected book persisted last execute run (`last_targets.json`). If > `EXPECTED_MISMATCH_MAX_FRAC = 0.5` of the union of {expected, actual} instruments disagree, the read is untrustworthy (e.g. the up-but-not-ready socket during a restart) → skip the cycle + alert `[DAEMON-MISMATCH]`, don't trade. A phantom-flat read → "everything mismatches → trade nothing" = safe failure. Complements the in-reconcile `ABSENT_HELD_MAX_FRAC` guard (snapshot-side) on the read-side.
+3. **Compute/execute ordering race (also clears OBS-3).** New compute-in-progress marker (`computing.lock`, written/removed by `run_dynamic.sh` via an `EXIT` trap; `compute_in_progress()` ignores a marker older than 30 min). The daemon's staleness gate consults it: while compute is mid-run (starts 22:00 UTC, finishes ~22:17; daemon restarts 22:15) the daemon waits quietly for the imminent fresh snapshot instead of false-alarming on the prior-day snapshot and briefly reading flat during compute's connection churn.
+
+Tests: `test_execution.py` Group 9 (13 new) — `expected_book_mismatch` (no-prior/flat/clean/one-differs/phantom-flat/most-of-book/threshold-strict/zero-entries), `compute_in_progress` (no-marker/fresh/stale-ignored), and strict propagation through `get_positions_by_instr`. **130 ibkr_fut/test_execution.py tests pass.**
+
+**Why this is the durable answer to "IB is unreliable".** The investigation (codebase audit + issue-log synthesis + pysystemtrade research) showed these are not many bugs but a few connection-handling weaknesses plus one architectural mismatch: a resident daemon holding one socket for ~24h against a Gateway designed to be restarted daily and flaky right after. Phase 0 (this entry) stops a bad read from ever trading and stops the infra from manufacturing bad reads. **Phase 1 (planned, not yet built)** re-architects to Carver's model — short-lived workers (connection scoped to one run, can't rot), a clientId registry, `errorEvent`-driven health gating, and a SQLite single-source-of-truth — triggered by a supervisor (systemd timers) rather than blind cron. See the approved plan.
+
+**Verification owed:** (a) after the watchdog change, confirm the IBC log no longer shows `autorestart file not found` during the 03:00 restart and the Gateway is not cold-restarted in the trading window; (b) after deploying the code, force a read failure / restart in-window and confirm the daemon skips + alerts (`[DAEMON-READFAIL]`/`[DAEMON-MISMATCH]`) and resumes only after a verified read; (c) confirm the next compute/execute boundary no longer fires a false `[DAEMON-STALE]`.
+
+---
+
 #### [BUG-7] Daemon's `ib.positions()` cache freezes → re-rolls QM every cycle off a stale position (live capital churn)
 
 **Found 2026-06-16 live monitoring.** This is the QM "sell-Aug/buy-Sep every cycle" symptom that BUG-1 was thought to have fixed — but it is a **different bug**. BUG-1 (delivery_month mapping) is genuinely fixed and was *not* the cause here; `delivery_month` maps both QM legs correctly (`202609`/`202608`). Do **not** re-open BUG-1.
@@ -331,7 +357,7 @@ qualify QM 202609 → lastTradeDateOrContractMonth = 20260819 → [:6] = 202608 
 
 #### Stale snapshot on 2026-06-11 (operational, self-resolved)
 
-Daemon restarted at 22:15 before the compute phase finished at 22:23, so it briefly saw the prior day's snapshot and emitted stale-PST warnings. Resolved automatically when it picked up the fresh snapshot at 22:23:52Z. (Underlying timing window tracked as OBS-3.)
+Daemon restarted at 22:15 before the compute phase finished at 22:23, so it briefly saw the prior day's snapshot and emitted stale-PST warnings. Resolved automatically when it picked up the fresh snapshot at 22:23:52Z. (Underlying timing window tracked as OBS-3.) **Fixed 2026-06-26** by the compute-in-progress marker (`computing.lock`) in BUG-10 fix part 2.3: the daemon now waits quietly while compute is mid-run instead of false-alarming, so this window no longer emits a `[DAEMON-STALE]` alert or briefly reads flat.
 
 #### Qualify failures at 22:23 cycle (operational, self-resolved)
 

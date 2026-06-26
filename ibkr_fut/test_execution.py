@@ -33,9 +33,13 @@ from ibkr_fut.algo_execution import (
     algo_exec,
     pre_trade_checks,
 )
+import ibkr_fut.live_dynamic as live_dynamic
 from ibkr_fut.live_dynamic import (
+    EXPECTED_MISMATCH_MAX_FRAC,
     PositionFetchError,
     check_last_targets,
+    compute_in_progress,
+    expected_book_mismatch,
     fetch_positions,
     get_positions_by_instr,
     load_snapshot,
@@ -1871,3 +1875,120 @@ def test_rne_backward_compat_no_meta_status(
                           MagicMock(), execute=True, snapshot_fresh=True)
 
     assert _exec_orders(mock_exec) == [("202609", "BUY", 2)]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Group 9 — Phase 0 IB-reliability safety gates
+#   (strict daemon read, halt-on-mismatch, compute-in-progress marker)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── expected_book_mismatch: Carver lock-on-mismatch (corrupt/partial read) ────
+
+def _write_last_targets(tmp_path, targets, day="2026-06-25"):
+    p = os.path.join(tmp_path, "last_targets.json")
+    with open(p, "w") as fh:
+        json.dump({"date": day, "targets": targets}, fh)
+    return p
+
+
+def test_mismatch_no_prior_expectation_never_fires(tmp_path):
+    # First run / no persisted expected book → never gate (clean cold start).
+    p = os.path.join(str(tmp_path), "missing.json")
+    suspect, _ = expected_book_mismatch(p, {"ES": 1, "NQ": -1})
+    assert suspect is False
+
+
+def test_mismatch_expected_flat_read_flat_ok(tmp_path):
+    # Expected flat and read flat → nothing to reconcile, never gate.
+    p = _write_last_targets(str(tmp_path), {})
+    suspect, _ = expected_book_mismatch(p, {})
+    assert suspect is False
+
+
+def test_mismatch_clean_book_passes(tmp_path):
+    # Broker book matches the expected book → not suspect, trade normally.
+    p = _write_last_targets(str(tmp_path), {"ES": 1, "NQ": -1, "GC": 2})
+    suspect, _ = expected_book_mismatch(p, {"ES": 1, "NQ": -1, "GC": 2})
+    assert suspect is False
+
+
+def test_mismatch_one_instrument_differs_does_not_gate(tmp_path):
+    # A single instrument differing (a genuine fill since last run) must NOT gate
+    # the whole cycle — that is a normal rebalance, handled per-instrument.
+    p = _write_last_targets(str(tmp_path), {"ES": 1, "NQ": -1, "GC": 2, "CL": 1})
+    suspect, _ = expected_book_mismatch(p, {"ES": 1, "NQ": -1, "GC": 2, "CL": 0})
+    assert suspect is False   # 1/4 = 25% < 50%
+
+
+def test_mismatch_phantom_flat_read_gates(tmp_path):
+    # The dangerous case: we expect a full book but read FLAT (corrupt/partial /
+    # half-open socket). Every instrument disagrees → suspect, gate the cycle.
+    p = _write_last_targets(str(tmp_path), {"ES": 1, "NQ": -1, "GC": 2, "CL": 1})
+    suspect, detail = expected_book_mismatch(p, {})
+    assert suspect is True
+    assert "4/4" in detail
+
+
+def test_mismatch_most_of_book_differs_gates(tmp_path):
+    # >50% of the union disagrees → suspect.
+    p = _write_last_targets(str(tmp_path), {"ES": 1, "NQ": -1, "GC": 2, "CL": 1})
+    suspect, _ = expected_book_mismatch(p, {"ES": 1, "NQ": 0, "GC": 0, "CL": 0})
+    assert suspect is True   # 3/4 = 75% > 50%
+
+
+def test_mismatch_threshold_is_strict_greater_than(tmp_path):
+    # Exactly at the threshold (50%) must NOT gate — only strictly above.
+    p = _write_last_targets(str(tmp_path), {"ES": 1, "NQ": -1})
+    suspect, _ = expected_book_mismatch(p, {"ES": 1, "NQ": 0})  # 1/2 = 50%
+    assert suspect is False
+    assert EXPECTED_MISMATCH_MAX_FRAC == 0.5
+
+
+def test_mismatch_ignores_zero_entries(tmp_path):
+    # Zero-qty entries on either side are normalised out (flat == absent).
+    p = _write_last_targets(str(tmp_path), {"ES": 1, "NQ": 0})
+    suspect, _ = expected_book_mismatch(p, {"ES": 1})
+    assert suspect is False
+
+
+# ── compute_in_progress: marker freshness ─────────────────────────────────────
+
+def test_compute_in_progress_no_marker(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_dynamic, "COMPUTING_MARKER_PATH",
+                        os.path.join(str(tmp_path), "absent.lock"))
+    assert compute_in_progress() is False
+
+
+def test_compute_in_progress_fresh_marker(tmp_path, monkeypatch):
+    marker = os.path.join(str(tmp_path), "computing.lock")
+    with open(marker, "w") as fh:
+        fh.write("now")
+    monkeypatch.setattr(live_dynamic, "COMPUTING_MARKER_PATH", marker)
+    assert compute_in_progress() is True
+
+
+def test_compute_in_progress_stale_marker_ignored(tmp_path, monkeypatch):
+    # A marker older than the max age = a crashed compute that never cleaned up.
+    # It must be ignored so the staleness gate is never disabled forever.
+    import time as _t
+    marker = os.path.join(str(tmp_path), "computing.lock")
+    with open(marker, "w") as fh:
+        fh.write("old")
+    old = _t.time() - (live_dynamic.COMPUTING_MARKER_MAX_AGE_SECS + 60)
+    os.utime(marker, (old, old))
+    monkeypatch.setattr(live_dynamic, "COMPUTING_MARKER_PATH", marker)
+    assert compute_in_progress() is False
+
+
+# ── strict read flows through get_positions_by_instr (daemon execute path) ─────
+
+def test_get_positions_strict_propagates_to_fetch(monkeypatch):
+    # The daemon execute path calls get_positions_by_instr(..., strict=True); a
+    # failed read must raise PositionFetchError (no silent cache fallback), so the
+    # cycle can skip + alert rather than trade off an unverified book.
+    ib = MagicMock()
+    ib.run.side_effect = _ib_run(raises=RuntimeError("Socket disconnect"))
+    ib.positions.return_value = []   # phantom-flat cache — must NOT be used
+    with pytest.raises(PositionFetchError):
+        get_positions_by_instr(ib, MagicMock(), strict=True)
+    ib.positions.assert_not_called()

@@ -134,6 +134,18 @@ SPREAD_CANCEL_CONFIRM_SECS = 30  # max wait for cancel-ack before abandoning MKT
 # event (the BUG-9 live incident) alerts rather than liquidating half the book.
 ABSENT_HELD_MAX_FRAC = 0.34
 
+# Halt-on-mismatch guard (daemon cycle, pre-execution): the broker book we just read
+# is compared against the EXPECTED book we persisted last execute run (last_targets).
+# A corrupted/partial read (e.g. the up-but-not-ready socket during the daily Gateway
+# restart) makes positions vanish or appear vs. expectation. If more than this fraction
+# of the union of {expected, actual} instruments disagrees, the read is untrustworthy —
+# skip the cycle + alert rather than trade against it. This is the Carver lock-on-
+# mismatch principle: never act on a single broker read that contradicts our own truth.
+# Set high (most of the book wrong) so a genuine one-off fill difference does not gate
+# trading; the per-instrument absent guard inside reconcile_and_execute handles the
+# subtler "a few instruments left the universe" case.
+EXPECTED_MISMATCH_MAX_FRAC = 0.5
+
 # ── Strategy parameters (match the backtest you validated) ─────────────────────
 DYN_TARGET_RISK = TARGET_RISK   # 0.25 — same as backtest_dynamic / backtest_ewmac
 
@@ -160,6 +172,17 @@ IB_CONFIG_PATH    = os.path.join(_REPO_ROOT, "Data/pst/ib_config/ib_config_futur
 SNAPSHOT_PATH     = os.path.join(_REPO_ROOT, "ibkr_fut", "targets_snapshot.json")
 LAST_TARGETS_PATH = os.path.join(_REPO_ROOT, "ibkr_fut", "last_targets.json")
 HEARTBEAT_PATH    = os.path.join(_REPO_ROOT, "ibkr_fut", "daemon_heartbeat.txt")
+# Compute-in-progress marker. run_dynamic.sh creates this when the compute phase
+# starts and removes it when done. The daemon's staleness gate consults it so that
+# while compute is mid-run (it overlaps the daemon's restart: compute starts 22:00
+# UTC and finishes ~22:17, the daemon restarts 22:15) the daemon waits quietly for
+# the imminent fresh snapshot instead of false-alarming on the previous-day snapshot
+# and briefly reading a flat book during compute's connection churn (the 6/25 race).
+COMPUTING_MARKER_PATH = os.path.join(_REPO_ROOT, "ibkr_fut", "computing.lock")
+# A compute run should finish well within this; a marker older than this is treated
+# as stale (compute crashed without cleanup) and ignored, so the staleness gate is
+# never disabled indefinitely.
+COMPUTING_MARKER_MAX_AGE_SECS = 30 * 60
 
 pst = PSTLoader()
 
@@ -684,6 +707,60 @@ def save_last_targets(path: str, targets: dict, today: str) -> None:
     """Persist today's targets for reconciliation at the next execute run."""
     with open(path, "w") as fh:
         json.dump({"date": today, "targets": targets}, fh, indent=2)
+
+
+def compute_in_progress() -> bool:
+    """
+    True if the compute phase is currently running (run_dynamic.sh holds the marker)
+    and the marker is fresh. A fresh snapshot is imminent, so the daemon's staleness
+    gate should wait quietly rather than false-alarm on the previous-day snapshot.
+    A marker older than COMPUTING_MARKER_MAX_AGE_SECS is treated as a crashed compute
+    that never cleaned up, and ignored — the gate must never be disabled forever.
+    """
+    try:
+        age = time.time() - os.path.getmtime(COMPUTING_MARKER_PATH)
+    except OSError:
+        return False
+    return age < COMPUTING_MARKER_MAX_AGE_SECS
+
+
+def expected_book_mismatch(path: str, current_positions: dict) -> tuple[bool, str]:
+    """
+    Compare the freshly-read broker book against the EXPECTED book persisted at the
+    last execute run (last_targets). Returns (is_suspect, detail).
+
+    This is the daemon's pre-execution halt-on-mismatch gate (Carver lock-on-mismatch):
+    a corrupted/partial position read — e.g. the up-but-not-ready socket during the
+    daily Gateway restart, or a half-open reqPositions that returns a thin/empty book —
+    makes most positions disagree with what we expect to be holding. When more than
+    EXPECTED_MISMATCH_MAX_FRAC of the union of {expected, actual} instruments disagree,
+    the read is untrustworthy: the caller should skip the cycle + alert rather than
+    trade against it. A phantom-flat read → "everything mismatches → trade nothing".
+
+    Returns (False, "") when there is no prior expectation yet (first run, nothing to
+    reconcile against) so the gate never fires spuriously on a clean cold start.
+    """
+    if not os.path.exists(path):
+        return False, ""
+    with open(path) as fh:
+        last = json.load(fh)
+    last_targets = {k: int(v) for k, v in last.get("targets", {}).items() if int(v) != 0}
+    actual = {k: int(v) for k, v in current_positions.items() if int(v) != 0}
+    union = set(last_targets) | set(actual)
+    if not union:
+        return False, ""   # expected flat and read flat — nothing to reconcile
+    mismatched = [i for i in union
+                  if last_targets.get(i, 0) != actual.get(i, 0)]
+    frac = len(mismatched) / len(union)
+    if frac > EXPECTED_MISMATCH_MAX_FRAC:
+        detail = (f"{len(mismatched)}/{len(union)} instruments disagree with the "
+                  f"expected book from last run ({last.get('date')}) "
+                  f"(> {EXPECTED_MISMATCH_MAX_FRAC:.0%}) — suspected corrupt/partial "
+                  f"position read. Mismatched: "
+                  + ", ".join(f"{i}: exp {last_targets.get(i,0):+d} act {actual.get(i,0):+d}"
+                              for i in sorted(mismatched)))
+        return True, detail
+    return False, ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1327,6 +1404,16 @@ def run_daemon(args):
             except (ValueError, TypeError):
                 pst_date = None
                 lag = 1   # unparseable date → treat as stale, fail safe
+            if lag > 0 and compute_in_progress():
+                # Compute is mid-run (it overlaps the daemon restart: starts 22:00
+                # UTC, finishes ~22:17; daemon restarts 22:15). A fresh snapshot is
+                # imminent — wait quietly rather than false-alarm on the old snapshot
+                # and risk reading a flat book during compute's connection churn.
+                print(f"[{_now()}] snapshot from {pst_date_str} is stale but compute "
+                      f"is in progress — waiting for the fresh snapshot…")
+                snapshot_computed_at = None   # force reload next cycle
+                time.sleep(60)
+                continue
             if lag > 0:
                 expected = last_completed_session()
                 msg = (f"snapshot PST data is from {pst_date_str}, "
@@ -1349,12 +1436,52 @@ def run_daemon(args):
                   f"{meta.get('n_live')} live  target holds {meta.get('n_held_target')}")
 
         # ── 3. Fetch fresh positions ──────────────────────────────────────────
+        # When executing we read STRICT: a failed/timed-out reqPositions raises
+        # PositionFetchError rather than falling back to the possibly-stale/empty
+        # ib.positions() cache. A bad read must never drive a trade — "read failed"
+        # and "really flat" look identical from the cache, and the daemon then
+        # reconciles to targets off a phantom-flat book (BUG-7/BUG-9). Fail safe:
+        # skip the cycle + alert, never place orders off an unverified read. The
+        # daily IBC Gateway restart leaves the socket briefly up-but-not-ready, so
+        # this also gates the first post-reconnect cycle until the read succeeds.
+        # Dry-run keeps the lenient fallback (it never trades).
         try:
-            held, unknown = get_positions_by_instr(ib, ibcfg)
+            held, unknown = get_positions_by_instr(ib, ibcfg, strict=args.execute)
+        except PositionFetchError as e:
+            msg = (f"position read failed — refusing to trade off an unverified "
+                   f"book this cycle: {e}")
+            print(f"[{_now()}] [RISK] {msg} — sleeping 60s")
+            try:
+                _send_discord(f"[DAEMON-READFAIL] {msg}")
+            except Exception as de:
+                print(f"[{_now()}] WARNING: READFAIL Discord alert failed: {de}")
+            ib = None   # force a clean reconnect next cycle (socket may be half-open)
+            time.sleep(60)
+            continue
         except Exception as e:
             print(f"[{_now()}] ERROR fetching positions: {e} — sleeping 60s")
             time.sleep(60)
             continue
+
+        # ── 3b. Halt-on-mismatch gate (Carver lock-on-mismatch) ───────────────
+        # The read above succeeded (didn't raise), but a half-open socket can return
+        # a thin/partial book that PASSES as a successful read while contradicting
+        # what we expect to be holding. Compare against the expected book persisted
+        # last execute run; if most of it disagrees, the read is untrustworthy —
+        # skip the cycle + alert rather than trade against it. Never act on a single
+        # broker read that contradicts our own truth.
+        if args.execute:
+            current_net = {instr: sum(m.values()) for instr, m in held.items()}
+            suspect, detail = expected_book_mismatch(LAST_TARGETS_PATH, current_net)
+            if suspect:
+                print(f"[{_now()}] [RISK] [DAEMON-MISMATCH] {detail} — skipping cycle")
+                try:
+                    _send_discord(f"[DAEMON-MISMATCH] {detail}")
+                except Exception as de:
+                    print(f"[{_now()}] WARNING: MISMATCH Discord alert failed: {de}")
+                ib = None   # force a clean reconnect next cycle (socket may be half-open)
+                time.sleep(60)
+                continue
 
         # ── 4. Risk gates ─────────────────────────────────────────────────────
         if args.execute:
