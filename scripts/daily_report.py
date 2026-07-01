@@ -43,13 +43,26 @@ DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 UTC = timezone.utc
 
-# name → (log path relative to REPO, max age in hours before flagging stale)
+# name → cron descriptor. Health is judged against the job's *expected* last run
+# (schedule-aware) rather than a flat "hours ago", so weekend/holiday gaps on
+# weekday-only jobs no longer false-flag as failures (a Fri-only-last-run job is
+# healthy all weekend). Fields:
+#   log       — log path relative to REPO
+#   days      — set of weekdays the job runs (0=Mon … 6=Sun); None = every day
+#   hour_utc  — the UTC hour it's scheduled at (EDT offsets, matching crontab_vps.txt)
+#   grace_h   — hours after the scheduled run before a missing update counts as ✗
+#   trading   — if True, "days" are filtered to CME trading sessions (skips CME
+#               holidays via trading_calendar), so a holiday closure isn't flagged
+#
+# The "daemon" is a long-running process (continuous mtime), judged by its own
+# 24h cycle-count check below, so it carries days=None and is special-cased.
 CRONS = {
-    "pst_updater":  ("pst_updater.log",               26),
-    "compute":      ("ibkr_fut/dynamic_cron.log",      26),
-    "daemon":       ("ibkr_fut/daemon_cron.log",        24),
-    "etf_daily":    ("paper/etf_daily.log",             26),
-    "crypto_paper": ("paper/paper_cron.log",            26),
+    #                log path                        days              hour  grace trading
+    "pst_updater":  ("pst_updater.log",              {0,1,2,3,4},      22,   6,    True),
+    "compute":      ("ibkr_fut/dynamic_cron.log",    {0,1,2,3,4},      22,   6,    True),
+    "daemon":       ("ibkr_fut/daemon_cron.log",     None,             None, 24,   False),
+    "etf_daily":    ("paper/etf_daily.log",          {0,1,2,3,4},      19,   6,    True),
+    "crypto_paper": ("paper/paper_cron.log",         None,             10,   16,   False),
 }
 
 LEDGERS = {
@@ -60,6 +73,15 @@ LEDGERS = {
 }
 
 IB_HOST, IB_PORT, IB_CLIENT = "127.0.0.1", 4002, 20
+
+# IB Gateway session-log dir (holds ibgateway.<YYYYMMDD>.<HHMMSS>.ibgzenc, one file
+# per Gateway start — the cleanest "when did it restart" signal, UTC on this host).
+# The settings-dir name is opaque/host-specific, so glob for the one containing ibg.xml.
+GATEWAY_JTS_DIR = Path.home() / "Jts"
+# A Gateway restart is "in-window" (risk to live execution) if it lands while any
+# traded session is open. The daemon trades ~22:00 UTC (US reopen) through ~07:00
+# UTC (Eurex). A restart outside that is on the maintenance window and benign.
+GATEWAY_WINDOW_START_H, GATEWAY_WINDOW_END_H = 22, 7   # UTC; wraps midnight
 
 
 # ── Timestamp parsing ─────────────────────────────────────────────────────────
@@ -100,12 +122,56 @@ def _log_mtime_utc(log_path: Path) -> datetime | None:
         return None
 
 
+def _is_cme_session(d, cal) -> bool:
+    """True if date d is a CME trading session (not a weekend/holiday)."""
+    if cal is None:
+        # No calendar available → fall back to weekday check (Mon–Fri).
+        return d.weekday() < 5
+    try:
+        sched = cal.schedule(start_date=d.isoformat(), end_date=d.isoformat())
+        return not sched.empty
+    except Exception:
+        return d.weekday() < 5
+
+
+def _expected_last_run(days, hour_utc, trading, now, cal) -> datetime | None:
+    """Most recent datetime this job was scheduled to run, at/before `now`.
+
+    Walks back up to 10 days from today, returning the scheduled run
+    (`hour_utc:00` UTC) on the most recent eligible day:
+      - day-of-week must be in `days` (None = every day), and
+      - if `trading`, the day must be a CME session (skips holidays).
+    Returns None if `hour_utc` is None (caller handles differently).
+    """
+    if hour_utc is None:
+        return None
+    for back in range(0, 11):
+        d = (now - timedelta(days=back)).date()
+        run_at = datetime(d.year, d.month, d.day, hour_utc, 0, tzinfo=UTC)
+        if run_at > now:
+            continue  # today's run hasn't happened yet; keep walking back
+        if days is not None and d.weekday() not in days:
+            continue
+        if trading and not _is_cme_session(d, cal):
+            continue
+        return run_at
+    return None
+
+
 def section_cron_health() -> tuple[list[str], list[str]]:
     lines = ["CRON HEALTH"]
     warnings = []
     now = datetime.now(UTC)
 
-    for name, (rel, max_h) in CRONS.items():
+    # CME calendar for holiday-aware "trading day" filtering; degrade gracefully
+    # to a plain weekday check if the dependency isn't importable.
+    try:
+        from ibkr_fut.trading_calendar import _calendar
+        cal = _calendar()
+    except Exception:
+        cal = None
+
+    for name, (rel, days, hour_utc, grace_h, trading) in CRONS.items():
         log_path = REPO / rel
         if not log_path.exists():
             lines.append(f"  {name:<15} ✗  log not found ({rel})")
@@ -121,7 +187,8 @@ def section_cron_health() -> tuple[list[str], list[str]]:
         age_h = (now - mtime).total_seconds() / 3600
 
         if name == "daemon":
-            # Also show cycle count from parsed timestamps (Cycle done lines)
+            # Long-running process: judge by its own 24h cycle-count, not a
+            # scheduled run time. Show cycle count from parsed timestamps.
             try:
                 content = log_path.read_text(errors="replace").splitlines()[-500:]
                 cutoff  = now - timedelta(hours=24)
@@ -136,17 +203,40 @@ def section_cron_health() -> tuple[list[str], list[str]]:
             except Exception:
                 n_cycles = "?"
 
-            if age_h > max_h:
+            if age_h > grace_h:
                 lines.append(f"  {name:<15} ✗  last modified {mtime.strftime('%Y-%m-%d %H:%M')} UTC  ({age_h:.0f}h ago)")
                 warnings.append(f"{name}: no activity in {age_h:.0f}h")
             else:
                 lines.append(f"  {name:<15} ✓  {mtime.strftime('%Y-%m-%d %H:%M')} UTC  ({n_cycles} cycles in 24h)")
-        else:
-            if age_h > max_h:
+            continue
+
+        # Schedule-aware freshness: healthy if the log was touched at/after the
+        # job's most recent *expected* run (minus grace). A weekday-only job that
+        # last ran Friday is healthy all weekend; a genuinely missed run is ✗.
+        expected = _expected_last_run(days, hour_utc, trading, now, cal)
+        if expected is None:
+            # No schedule resolvable (e.g. no eligible day in 10d) → fall back to
+            # a generous flat-age check so we never crash the section.
+            if age_h > grace_h + 24:
                 lines.append(f"  {name:<15} ✗  {mtime.strftime('%Y-%m-%d %H:%M')} UTC  ({age_h:.0f}h ago)")
-                warnings.append(f"{name}: last run {age_h:.0f}h ago (>{max_h}h)")
+                warnings.append(f"{name}: last run {age_h:.0f}h ago")
             else:
                 lines.append(f"  {name:<15} ✓  {mtime.strftime('%Y-%m-%d %H:%M')} UTC")
+            continue
+
+        deadline = expected + timedelta(hours=grace_h)
+        if mtime < expected and now > deadline:
+            # The most recent scheduled run should have updated the log by now,
+            # but the log predates it → a real miss.
+            lines.append(
+                f"  {name:<15} ✗  {mtime.strftime('%Y-%m-%d %H:%M')} UTC  "
+                f"(missed {expected.strftime('%a %m-%d %H:%M')} UTC run)"
+            )
+            warnings.append(
+                f"{name}: missed expected run at {expected.strftime('%Y-%m-%d %H:%M')} UTC"
+            )
+        else:
+            lines.append(f"  {name:<15} ✓  {mtime.strftime('%Y-%m-%d %H:%M')} UTC")
 
     return lines, warnings
 
@@ -508,6 +598,81 @@ def section_daemon_summary() -> tuple[list[str], list[str]]:
     return lines, warnings
 
 
+# ── Section: gateway health (restart / uptime SLO) ────────────────────────────
+
+_GW_LOG_RE = re.compile(r"ibgateway\.(\d{8})\.(\d{6})\.ibgzenc$")
+
+
+def _gateway_settings_dir() -> Path | None:
+    """The active TWS settings dir (the one holding ibg.xml)."""
+    try:
+        for d in sorted(GATEWAY_JTS_DIR.glob("*/")):
+            if (d / "ibg.xml").exists():
+                return d
+    except Exception:
+        pass
+    return None
+
+
+def _in_trading_window(ts: datetime) -> bool:
+    h = ts.hour
+    if GATEWAY_WINDOW_START_H <= GATEWAY_WINDOW_END_H:
+        return GATEWAY_WINDOW_START_H <= h < GATEWAY_WINDOW_END_H
+    # window wraps midnight (e.g. 22 → 07)
+    return h >= GATEWAY_WINDOW_START_H or h < GATEWAY_WINDOW_END_H
+
+
+def section_gateway_health() -> tuple[list[str], list[str]]:
+    """Lightweight uptime SLO: how many times the Gateway restarted in the last
+    24h, and whether any restart landed inside the trading window. After the
+    2026-07-01 timezone fix the daily restart should be a single event at 03:00
+    ET (07:00 UTC) — off-window — so an in-window restart is now the alarm."""
+    lines = ["GATEWAY HEALTH"]
+    warnings = []
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(hours=24)
+
+    sdir = _gateway_settings_dir()
+    if sdir is None:
+        lines.append("  ?  settings dir not found (skipping restart audit)")
+        return lines, warnings
+
+    restarts = []
+    try:
+        for f in sdir.glob("ibgateway.*.ibgzenc"):
+            m = _GW_LOG_RE.search(f.name)
+            if not m:
+                continue
+            try:
+                ts = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+            except ValueError:
+                continue
+            if ts >= cutoff:
+                restarts.append(ts)
+    except Exception as e:
+        lines.append(f"  ?  could not read session logs ({e})")
+        return lines, warnings
+
+    restarts.sort()
+    in_window = [t for t in restarts if _in_trading_window(t)]
+
+    if not restarts:
+        lines.append("  ✓  no Gateway restarts in last 24h")
+    else:
+        times = ", ".join(t.strftime("%m-%d %H:%M") for t in restarts)
+        tag = "✓" if not in_window else "✗"
+        lines.append(f"  {tag}  {len(restarts)} restart(s) in 24h: {times} UTC")
+        if in_window:
+            iw = ", ".join(t.strftime("%m-%d %H:%M") for t in in_window)
+            lines.append(f"     ⚠ {len(in_window)} landed in the trading window ({iw} UTC)")
+            warnings.append(
+                f"gateway: {len(in_window)} in-window restart(s) — {iw} UTC "
+                f"(expected a single off-window restart at 07:00 UTC)"
+            )
+
+    return lines, warnings
+
+
 # ── Discord ───────────────────────────────────────────────────────────────────
 
 def send_discord(text: str) -> None:
@@ -531,6 +696,7 @@ def main():
     day_str  = datetime.now(UTC).strftime("%a %Y-%m-%d")
     sections = [
         section_cron_health,
+        section_gateway_health,
         section_data_health,
         section_futures_positions,
         section_pnl_summary,

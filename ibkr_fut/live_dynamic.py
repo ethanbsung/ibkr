@@ -1335,6 +1335,16 @@ def run_daemon(args):
     # Resets when a fresh snapshot loads (a new trading day's legitimate rebalances
     # should not be charged against yesterday's count).
     trade_counts: dict = {}
+    # Alert hygiene (P2.3): a single transient read failure / book mismatch is
+    # log-only — the Gateway's daily restart and brief blips routinely produce one
+    # that self-heals next cycle (e.g. the 2026-06-29 18:45 READFAIL recovered by
+    # 18:47). Only escalate to Discord once it PERSISTS this many consecutive
+    # cycles, so a real sustained outage still pages but noise doesn't. The safety
+    # behaviour (skip the cycle, never trade off a bad read) is unchanged; only the
+    # alert is gated.
+    READFAIL_ALERT_AFTER = 2   # consecutive failing cycles before Discord escalation
+    readfail_streak = 0        # consecutive cycles the position read failed/was suspect
+    readfail_alerted = False   # already paged for the current streak
 
     print(f"[{_now()}] Daemon started (sleep={DAEMON_SLEEP_SECS}s, "
           f"execute={'YES' if args.execute else 'DRY-RUN'})")
@@ -1448,13 +1458,20 @@ def run_daemon(args):
         try:
             held, unknown = get_positions_by_instr(ib, ibcfg, strict=args.execute)
         except PositionFetchError as e:
+            readfail_streak += 1
             msg = (f"position read failed — refusing to trade off an unverified "
                    f"book this cycle: {e}")
-            print(f"[{_now()}] [RISK] {msg} — sleeping 60s")
-            try:
-                _send_discord(f"[DAEMON-READFAIL] {msg}")
-            except Exception as de:
-                print(f"[{_now()}] WARNING: READFAIL Discord alert failed: {de}")
+            # Log every failure; escalate to Discord only once the streak proves it's
+            # a sustained outage, not a self-healing blip (P2.3 alert hygiene).
+            print(f"[{_now()}] [RISK] {msg} — sleeping 60s "
+                  f"(read-fail streak {readfail_streak})")
+            if readfail_streak >= READFAIL_ALERT_AFTER and not readfail_alerted:
+                try:
+                    _send_discord(f"[DAEMON-READFAIL] {msg} "
+                                  f"(persisted {readfail_streak} cycles)")
+                    readfail_alerted = True
+                except Exception as de:
+                    print(f"[{_now()}] WARNING: READFAIL Discord alert failed: {de}")
             ib = None   # force a clean reconnect next cycle (socket may be half-open)
             time.sleep(60)
             continue
@@ -1474,14 +1491,31 @@ def run_daemon(args):
             current_net = {instr: sum(m.values()) for instr, m in held.items()}
             suspect, detail = expected_book_mismatch(LAST_TARGETS_PATH, current_net)
             if suspect:
-                print(f"[{_now()}] [RISK] [DAEMON-MISMATCH] {detail} — skipping cycle")
-                try:
-                    _send_discord(f"[DAEMON-MISMATCH] {detail}")
-                except Exception as de:
-                    print(f"[{_now()}] WARNING: MISMATCH Discord alert failed: {de}")
+                readfail_streak += 1
+                print(f"[{_now()}] [RISK] [DAEMON-MISMATCH] {detail} — skipping cycle "
+                      f"(suspect-read streak {readfail_streak})")
+                if readfail_streak >= READFAIL_ALERT_AFTER and not readfail_alerted:
+                    try:
+                        _send_discord(f"[DAEMON-MISMATCH] {detail} "
+                                      f"(persisted {readfail_streak} cycles)")
+                        readfail_alerted = True
+                    except Exception as de:
+                        print(f"[{_now()}] WARNING: MISMATCH Discord alert failed: {de}")
                 ib = None   # force a clean reconnect next cycle (socket may be half-open)
                 time.sleep(60)
                 continue
+
+        # Read succeeded AND the book is trustworthy → clear the failure streak. If
+        # we'd paged for a sustained outage, announce recovery so the channel closes
+        # the loop (mirrors the 1102 "connectivity restored" pattern).
+        if readfail_alerted:
+            try:
+                _send_discord("[DAEMON-RECOVERED] position read + book reconciled "
+                              f"after {readfail_streak} failed cycle(s)")
+            except Exception as de:
+                print(f"[{_now()}] WARNING: RECOVERED Discord alert failed: {de}")
+        readfail_streak = 0
+        readfail_alerted = False
 
         # ── 4. Risk gates ─────────────────────────────────────────────────────
         if args.execute:
