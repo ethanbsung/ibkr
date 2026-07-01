@@ -120,7 +120,7 @@ The framework implements Carver's *Advanced Futures Trading Strategies* end to e
   Asia, incl. sector indices), rates & bonds, FX (majors + crosses/EM), energy,
   metals, agriculturals, volatility, and crypto — mapped onto Carver's "Jumbo"
   universe.
-- **Data warehouse** of daily OHLCV histories with **2–25 years** of data per
+- **Data warehouse** of daily OHLCV histories with **2–40 years** of data per
   instrument, kept current by a nightly incremental ingestion pipeline
   (Panama back-adjustment, volume-driven rolls, staleness / dead-contract
   detection, and data-health alerting).
