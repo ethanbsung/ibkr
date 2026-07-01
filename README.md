@@ -159,31 +159,6 @@ Data/              # market-data warehouse (gitignored on the live host)
 
 ---
 
-## Running it
-
-Always activate the virtual environment first:
-
-```bash
-source venv/bin/activate
-pip install -r requirements_live.txt
-```
-
-```bash
-# Futures system — dry-run by default; --execute to place orders
-ibkr_fut/run_dynamic.sh
-
-# Backtest (Carver dynamic optimisation)
-python3 ibkr_fut/backtest_dynamic.py
-
-# Account summary (requires IB Gateway on port 4002)
-python3 scripts/account_summary.py
-
-# Test suite
-pytest ibkr_fut/
-```
-
----
-
 ## Notes & disclosure
 
 This is a personal research and engineering project. It trades **simulated capital
