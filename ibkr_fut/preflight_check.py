@@ -97,6 +97,26 @@ def check_contracts(ib, ibcfg, universe: dict) -> tuple[list, list]:
             failures.append((instr, "HOURS", "no contract details"))
             continue
         cd = cds[0]
+
+        # SPEC (BUG-5): the CSV multiplier / priceMagnifier drive sizing
+        # (compute_targets) and the pre-trade divergence gate, but IB knows both
+        # authoritatively. Validate (don't replace — the backtest uses the same CSV
+        # value, they must stay in parity): a silent CSV drift would mis-size every
+        # position in that instrument with no other alert. Zero extra IB round-trips
+        # — reuses the reqContractDetails already fetched above.
+        ib_mult = float(front.multiplier) if front.multiplier else None
+        cfg_mult = spec.get("multiplier")
+        if ib_mult is not None and cfg_mult is not None and \
+                abs(ib_mult - cfg_mult) > 1e-6 * max(1.0, abs(ib_mult)):
+            failures.append((instr, "SPEC",
+                             f"multiplier CSV={cfg_mult} != IB={ib_mult}"))
+        # IB reports priceMagnifier=0 when unset; effective value is 1.
+        ib_pm = float(cd.priceMagnifier or 1)
+        cfg_pm = float(spec.get("price_magnifier") or 1)
+        if abs(ib_pm - cfg_pm) > 1e-6 * max(1.0, abs(ib_pm)):
+            failures.append((instr, "SPEC",
+                             f"priceMagnifier CSV={cfg_pm} != IB={ib_pm}"))
+
         tz = cd.timeZoneId or ""
         if tz not in _IB_TZ_MAP:
             failures.append((instr, "HOURS",

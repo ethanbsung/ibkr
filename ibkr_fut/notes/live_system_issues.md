@@ -155,18 +155,6 @@ The snapshot `diag` only stores entries for instruments with `target != 0 or cur
 
 ---
 
-#### [BUG-3] KOSDAQ / KOSPI perpetually deferred — KSE returns empty tradingHours
-
-`is_contract_okay_to_trade` returns False when `tradingHours` is empty. The KSE exchange does not return `tradingHours`, `liquidHours`, or `timeZoneId` for any contract via IBKR's reqContractDetails API. Result: both KOSDAQ and KOSPI are deferred on every daemon cycle and can never execute.
-
-**Confirmed**: `timeZoneId=''`, `tradingHours=''`, `liquidHours=''` for K200 on KSE. This is the inverse of an "ask IB" fix — we already ask IB and it has no answer, so a hardcoded fallback is required.
-
-**Additional note on KOSPI**: K200 multiplier is 250,000 KRW ≈ $64k/contract at $250k capital. Ideal positions are ~0.1 → always rounds to 0 even if tradingHours were fixed. KOSPI is effectively un-tradeable at current capital.
-
-**Fix needed**: Either hardcode KSE hours (09:00–15:30 KST = 00:00–06:30 UTC) in `is_contract_okay_to_trade` when tradingHours is empty, or add a per-exchange hours override map.
-
----
-
 #### [BUG-4] `pst_updater` prices a dead (pre-roll, no-trade) contract → flatlined series on near-monthly instruments
 
 **Re-diagnosed 2026-06-12** — the original "BRE has no IBKR data / remove it" framing was *wrong*. IBKR data is fine; the updater is asking for the wrong contract. NOT a subscription gap, NOT a symbol/mapping error.
@@ -238,7 +226,7 @@ This is the same *failure profile* as BUG-1: a per-instrument value re-derived/t
 
 **Status**: Not currently triggered. Cross-check on 2026-06-11 (`/tmp/crosscheck_specs.py`) over 104 instruments found **0 multiplier mismatches, 0 priceMagnifier mismatches** — the CSV matches IB today. This is a preventive guard, not a live fix.
 
-**Fix needed**: In `preflight_check.py` (which already calls `reqContractDetails` per instrument — zero extra IB round-trips), assert config multiplier == `c.multiplier` and config priceMagnifier == `ContractDetails.priceMagnifier`; alert on mismatch via the existing Discord path. Converts "silent mis-size someday" into "loud alert the night it drifts."
+**Fix implemented 2026-07-01 (commit pending) in `preflight_check.py`.** Added a `SPEC` stage inside `check_contracts`, reusing the `reqContractDetails` already fetched for the HOURS check (zero extra IB round-trips): asserts config `spec["multiplier"]` == qualified contract's `front.multiplier` and config `price_magnifier` == `ContractDetails.priceMagnifier` (treating IB's unset `priceMagnifier=0` as effective `1`), with a float tolerance. A mismatch appends a `[SPEC]` failure that flows through the existing Discord alert path. Validate-not-replace preserved (backtest parity uses the CSV value). Verified live 2026-07-01 across all 105 instruments: **0 SPEC failures** (only the pre-existing R1000/TWD-mini MKTDATA failures), confirming no false positives — the CSV still matches IB, and the guard will now loudly alert the night it drifts. Move to Resolved once a live preflight has run it in production.
 
 ---
 
@@ -353,6 +341,16 @@ R1000 maps to symbol RSV (E-mini Russell 1000) on CME. Preflight confirms no bid
 ---
 
 ## RESOLVED
+
+#### [BUG-3] KOSDAQ / KOSPI perpetually deferred — KSE returns empty tradingHours
+
+**Resolved 2026-07-01 as OBSOLETE — the premise no longer holds; no code change needed.** The original report (KSE returns `timeZoneId=''`/`tradingHours=''`/`liquidHours=''` for any contract, so `is_contract_okay_to_trade` defers KOSDAQ/KOSPI forever and a hardcoded hours fallback is required) was true when logged but **IBKR now returns fully-populated contract details for KSE**. Verified live 2026-07-01 via `reqContractDetails` on the qualified front months:
+
+- **KOSDAQ** (KOSDQ150) and **KOSPI** (K200) both return non-empty `tradingHours` + `liquidHours` (e.g. `20260701:1800-20260702:0600;20260702:0845-…`) and `timeZoneId='Japan'`.
+- `'Japan'` is already in `algo_execution._IB_TZ_MAP` (→ `Asia/Tokyo`), so the open/closed evaluation parses correctly. (`'Korea'` is mapped too.)
+- The daemon's `DEFERRED — KOSDQ150 market closed` lines are therefore **correct** — they occur when the Korean session is genuinely closed, not a data gap. KOSDAQ is a live, tradable instrument (it appears in the held book).
+
+So the proposed hardcoded-KSE-hours fallback would be **dead code guarding a condition that no longer occurs**. Deliberately NOT implemented. (KOSPI/K200's separate un-tradeable-at-$250k-capital note from the original entry stands — ideal ~0.1 contracts rounds to 0 — but that's a sizing reality, not a bug.) If KSE ever regresses to empty hours, the `preflight_check.py` `HOURS` stage (`empty tradingHours (would defer forever)`) will alert on it — the loud-signal path we'd want anyway.
 
 #### [BUG-6] Daily report compares targets (PST name) against held (IB symbol) — phantom mismatches, no real reconciliation
 
