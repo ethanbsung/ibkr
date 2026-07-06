@@ -37,10 +37,35 @@ MESSAGING_FREQUENCY = 30    # seconds between progress log lines
 class FillResult:
     filled_qty:    int
     avg_price:     float
-    status:        str    # Filled | PartiallyFilled | Unfilled | Cancelled | Skipped
+    status:        str    # Filled | PartiallyFilled | Unfilled | Cancelled | Rejected | Skipped
     was_aggressive: bool
     commission:    float
     order_id:      int
+    reject_reason: str = ""   # IB rejection text when the broker refused the order (BUG-13)
+
+
+# IB error codes that accompany our OWN cancels rather than a broker rejection —
+# must not be classified as "Rejected". 202 = "Order Canceled" (sent for every
+# cancelOrder ack), 161 = cancel attempted in an uncancellable state.
+_CANCEL_ERROR_CODES = {161, 202}
+
+
+def _reject_reason(trade) -> str:
+    """
+    IB rejection text from the trade log, '' if none.
+
+    Rejections (margin violation, missing permission, size/price limits) do NOT
+    arrive as a distinct order status — they surface as TradeLogEntry rows
+    carrying an errorCode, with the status left 'Inactive' or moved to
+    'Cancelled' depending on the reject type (BUG-13). Reading the log covers
+    both shapes; our own cancels (code 202) are excluded so a timed-out limit
+    isn't misreported as rejected.
+    """
+    for entry in reversed(getattr(trade, "log", []) or []):
+        code = getattr(entry, "errorCode", 0) or 0
+        if code and code not in _CANCEL_ERROR_CODES:
+            return f"IB error {code}: {getattr(entry, 'message', '')}"
+    return ""
 
 
 def pre_trade_checks(
@@ -90,12 +115,18 @@ def algo_exec(
     action:   str,       # "BUY" or "SELL"
     qty:      int,
     ticker:   Ticker,
+    heartbeat=None,      # optional callable, invoked on each progress tick (BUG-12)
 ) -> FillResult:
     """
     Passive-aggressive limit order execution.
 
     The Ticker must already be subscribed (via reqMktData in pre_trade_checks).
     The caller is responsible for calling ib.cancelMktData(contract) after this returns.
+
+    heartbeat: optional zero-arg callable invoked on the MESSAGING_FREQUENCY
+    progress tick, so a long-running order (up to TOTAL_TIME_OUT) keeps the
+    daemon's liveness signal fresh — otherwise the watchdog mistakes a slow
+    rebalance cycle for a dead daemon and kill -9s it mid-order (BUG-12).
     """
     bid, ask = ticker.bid, ticker.ask
 
@@ -128,6 +159,13 @@ def algo_exec(
         if trade.isDone():
             break
 
+        if (trade.orderStatus.status or "") == "Inactive":
+            # Rejected orders land 'Inactive', which is NOT in ib_insync's
+            # DoneStates — without this break the aggressive chase would spin
+            # for the full TOTAL_TIME_OUT re-submitting a rejected order
+            # (BUG-13). The reject reason is read from trade.log below.
+            break
+
         elapsed = time.time() - start_time
 
         if time.time() - last_msg_time >= MESSAGING_FREQUENCY:
@@ -136,6 +174,8 @@ def algo_exec(
             print(f"      [{phase}] {action} {qty}  elapsed={elapsed:.0f}s  "
                   f"lmt={order.lmtPrice:.4f}  filled={filled}")
             last_msg_time = time.time()
+            if heartbeat:
+                heartbeat()
 
         if elapsed > TOTAL_TIME_OUT:
             ib.cancelOrder(order)
@@ -180,6 +220,14 @@ def algo_exec(
         else:
             raw_status = "Unfilled"
 
+    # Rejection normalisation (BUG-13): an unfilled order whose trade log carries
+    # a broker error is a REJECTION, not a mere timeout — the caller must alert,
+    # not silently retry next cycle. A partial fill keeps its fill status but
+    # still carries the reject text for the remainder.
+    reject = _reject_reason(trade)
+    if reject and filled_qty == 0:
+        raw_status = "Rejected"
+
     return FillResult(
         filled_qty    = filled_qty,
         avg_price     = avg_price,
@@ -187,6 +235,7 @@ def algo_exec(
         was_aggressive = is_aggressive,
         commission    = commission,
         order_id      = trade.order.orderId,
+        reject_reason = reject,
     )
 
 

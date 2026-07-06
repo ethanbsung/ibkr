@@ -73,6 +73,24 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ #
+# Atomic CSV write                                                     #
+# ------------------------------------------------------------------ #
+
+def _atomic_to_csv(obj, path: str, **kwargs) -> None:
+    """Write a Series/DataFrame to CSV atomically (tmp + os.replace).
+
+    Every full-file rewrite here goes through this: the Panama roll rewrites an
+    instrument's ENTIRE adjusted history in place, and the roll calendars /
+    multiple_prices are trusted by live_dynamic — a kill mid-write (OOM on the
+    1GB VPS, a watchdog kill -9, a reboot) would otherwise silently truncate a
+    file the live system trades off (BUG-18). os.replace is atomic on POSIX, so
+    readers see either the old file or the new one, never a torn write.
+    """
+    tmp = path + ".tmp"
+    obj.to_csv(tmp, **kwargs)
+    os.replace(tmp, path)
+
+# ------------------------------------------------------------------ #
 # Roll schedule helpers                                                #
 # ------------------------------------------------------------------ #
 
@@ -594,7 +612,7 @@ def update_prices(
         combined_adj = pd.concat([adj_base + hist_adj, new_adj]).sort_index()
     else:
         combined_adj = pd.concat([adj_base, new_adj]).sort_index()
-    combined_adj.to_csv(adj_fp, header=True)
+    _atomic_to_csv(combined_adj, adj_fp, header=True)
 
     # --- Write multiple prices ---
     new_multi = pd.DataFrame.from_dict(new_multi_rows, orient="index")
@@ -604,7 +622,7 @@ def update_prices(
     new_multi = new_multi[list(multi.columns)]   # match existing column order
     multi_base = multi[multi.index.normalize() < lookback_cutoff]
     combined_multi = pd.concat([multi_base, new_multi]).sort_index()
-    combined_multi.to_csv(multi_fp, header=True)
+    _atomic_to_csv(combined_multi, multi_fp, header=True)
 
     log.info(f"  {instrument}: {last_date} → {today} | {len(new_adj_rows)} bars "
              f"| hist adj {hist_adj:+.4f} ({'roll rewrite' if rewrite_history else 'lookback rewrite'}) "
@@ -699,7 +717,7 @@ def update_carry(
             mask = multi[col].isna() & multi.index.isin(update_df.index)
             multi.loc[mask, col] = update_df.loc[multi.index[mask], col]
 
-    multi.to_csv(multi_fp, header=True)
+    _atomic_to_csv(multi, multi_fp, header=True)
     filled = update_df["CARRY"].notna().sum()
     log.info(f"  {instrument} carry: filled {filled} bars with {carry_contract}")
 
@@ -765,7 +783,7 @@ def create_roll_calendar_from_history(instrument: str, roll_cfg: pd.Series) -> N
     rc_df = pd.DataFrame(rows).set_index("DATE_TIME")
     rc_df.index.name = "DATE_TIME"
     rc_df = rc_df[~rc_df.index.duplicated(keep="last")].sort_index()
-    rc_df.to_csv(rc_fp, header=True)
+    _atomic_to_csv(rc_df, rc_fp, header=True)
     log.info(f"  {instrument}: bootstrapped roll calendar from history ({len(rows)} rows)")
 
 
@@ -823,7 +841,7 @@ def advance_roll_calendar_to(instrument: str, old_current_yyyymm: str,
     combined = pd.concat([rc, new_df]).sort_index()
     combined = combined[~combined.index.duplicated(keep="last")]
     combined = combined[list(rc.columns)] if len(rc.columns) else combined
-    combined.to_csv(rc_fp, header=True)
+    _atomic_to_csv(combined, rc_fp, header=True)
     log.info(f"  {instrument} roll cal: early-roll {old_current_yyyymm}→{new_current_yyyymm} "
              f"on {roll_on} (last-hold row written)")
 
@@ -882,7 +900,7 @@ def extend_roll_calendar(instrument: str, roll_cfg: pd.Series) -> None:
     new_df.index.name = "DATE_TIME"
     combined = pd.concat([rc, new_df]).sort_index()
     combined = combined[~combined.index.duplicated(keep="last")]
-    combined.to_csv(rc_fp, header=True)
+    _atomic_to_csv(combined, rc_fp, header=True)
     log.info(f"  {instrument} roll cal: +{len(new_rows)} rows → {new_rows[-1]['DATE_TIME'].date()}")
 
 # ------------------------------------------------------------------ #
@@ -979,7 +997,7 @@ def reset_to_pst_cutoff(instruments: list[str]) -> None:
             df = pd.read_csv(fp, parse_dates=[0], index_col=0)
             df.index = pd.DatetimeIndex(df.index)
             trimmed = df[df.index <= PST_CUTOFF + pd.Timedelta(hours=23)]
-            trimmed.to_csv(fp, header=True)
+            _atomic_to_csv(trimmed, fp, header=True)
         log.info(f"  {instrument}: reset to {PST_CUTOFF.date()}")
 
 # ------------------------------------------------------------------ #

@@ -96,7 +96,8 @@ from ibkr_fut.carry_trend_signals import (
     TREND_WEIGHT as COMBINED_TREND_WEIGHT,
 )
 from ibkr_fut.dynamic_opt import optimise_positions
-from ibkr_fut.algo_execution import pre_trade_checks, algo_exec, is_contract_okay_to_trade
+from ibkr_fut.algo_execution import (pre_trade_checks, algo_exec,
+                                     is_contract_okay_to_trade, _reject_reason)
 from ibkr_fut.risk_check import (check_halt_file, check_gross_leverage,
                                  check_order_vol, check_daily_loss, raise_halt,
                                  _send_discord)
@@ -164,7 +165,6 @@ CLIENT_ID_COMPUTE = 6  # compute mode (runs concurrently with daemon)
 CONNECT_TIMEOUT = 5
 MAX_RETRIES     = 3
 RETRY_DELAY     = 10
-FALLBACK_CAPITAL = 250_000.0
 
 # Repo-relative so the same checkout works on any host (laptop, VPS).
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -687,8 +687,14 @@ def check_last_targets(path: str, current_positions: dict) -> None:
     """Warn about instruments where actual IBKR positions differ from last run's targets."""
     if not os.path.exists(path):
         return
-    with open(path) as fh:
-        last = json.load(fh)
+    try:
+        with open(path) as fh:
+            last = json.load(fh)
+    except (ValueError, OSError) as e:
+        # Diagnostic-only warning; a corrupt file must not crash the run (BUG-18).
+        print(f"[{_now()}] WARNING: could not read {path} ({e}) — "
+              f"skipping last-targets reconciliation warning")
+        return
     last_targets = last.get("targets", {})
     all_instrs = set(last_targets) | set(current_positions)
     mismatches = []
@@ -703,10 +709,27 @@ def check_last_targets(path: str, current_positions: dict) -> None:
             print(f"    {m}")
 
 
-def save_last_targets(path: str, targets: dict, today: str) -> None:
-    """Persist today's targets for reconciliation at the next execute run."""
-    with open(path, "w") as fh:
-        json.dump({"date": today, "targets": targets}, fh, indent=2)
+def save_last_targets(path: str, targets: dict, today: str,
+                      pending: set | None = None) -> None:
+    """
+    Persist today's targets for reconciliation at the next execute run.
+
+    pending: instruments whose net position was NOT brought to target this cycle
+    (orders deferred market-closed, skipped, unfilled, rejected — the
+    `unconverged` set from reconcile_and_execute). The expected-book mismatch
+    gate excludes them, so "we haven't traded yet" (e.g. Asian/Eurex names
+    deferred at 22:15) is never counted as a corrupt position read (BUG-16).
+
+    Atomic write (tmp + os.replace): this file gates every execute cycle, and a
+    kill mid-write would otherwise leave corrupt JSON that crash-loops the
+    daemon (BUG-18).
+    """
+    payload = {"date": today, "targets": targets,
+               "pending": sorted(pending) if pending else []}
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(payload, fh, indent=2)
+    os.replace(tmp, path)
 
 
 def compute_in_progress() -> bool:
@@ -724,6 +747,30 @@ def compute_in_progress() -> bool:
     return age < COMPUTING_MARKER_MAX_AGE_SECS
 
 
+def snapshot_lag(meta: dict | None) -> int:
+    """
+    How many completed CME sessions the loaded snapshot's PST data lags behind.
+    0 = fresh (tradeable); >0 = stale by that many sessions.
+
+    The snapshot's date is the last PST bar it was built from, NOT wall-clock
+    today: a CME session is named by its 18:00 ET close, and compute (run
+    ~18:00 ET) sizes off the just-settled close — so on a Sunday-evening run the
+    freshest legitimate data is the previous Friday's session (see OBS-10 /
+    trading_calendar.py). An unparseable/missing date is treated as stale (1) —
+    fail safe, never trade off data of unknown age.
+
+    Called EVERY daemon cycle, not just when a snapshot loads (BUG-15): a
+    snapshot that was fresh when loaded ages into staleness if the next compute
+    fails (e.g. Friday compute down → Thursday's daemon would otherwise keep
+    trading Thursday targets through Friday's session, silently).
+    """
+    pst_date_str = (meta or {}).get("date", "unknown")
+    try:
+        return sessions_behind(date.fromisoformat(str(pst_date_str)))
+    except (ValueError, TypeError):
+        return 1
+
+
 def expected_book_mismatch(path: str, current_positions: dict) -> tuple[bool, str]:
     """
     Compare the freshly-read broker book against the EXPECTED book persisted at the
@@ -739,13 +786,32 @@ def expected_book_mismatch(path: str, current_positions: dict) -> tuple[bool, st
 
     Returns (False, "") when there is no prior expectation yet (first run, nothing to
     reconcile against) so the gate never fires spuriously on a clean cold start.
+
+    Instruments listed in the file's `pending` set — orders deferred/unfilled at
+    the last run (see save_last_targets) — are EXCLUDED from the comparison:
+    their actual position legitimately differs from target until their market
+    opens, and counting them made a high-turnover day (many new instruments,
+    all deferred overnight) look like a corrupt read, deadlocking the gate
+    (BUG-16 interim; the durable fix is expecting positions+fills, Phase 1).
+    A phantom-flat read still trips the gate: every NON-pending held instrument
+    mismatches.
     """
     if not os.path.exists(path):
         return False, ""
-    with open(path) as fh:
-        last = json.load(fh)
-    last_targets = {k: int(v) for k, v in last.get("targets", {}).items() if int(v) != 0}
-    actual = {k: int(v) for k, v in current_positions.items() if int(v) != 0}
+    try:
+        with open(path) as fh:
+            last = json.load(fh)
+    except (ValueError, OSError) as e:
+        # A corrupt expectations file must not crash the daemon into a
+        # restart loop (BUG-18); treat as no-prior-expectation, loudly.
+        print(f"[{_now()}] WARNING: could not read expected book at {path} "
+              f"({e}) — mismatch gate off this cycle (no prior expectation)")
+        return False, ""
+    pending = set(last.get("pending", []))
+    last_targets = {k: int(v) for k, v in last.get("targets", {}).items()
+                    if int(v) != 0 and k not in pending}
+    actual = {k: int(v) for k, v in current_positions.items()
+              if int(v) != 0 and k not in pending}
     union = set(last_targets) | set(actual)
     if not union:
         return False, ""   # expected flat and read flat — nothing to reconcile
@@ -781,7 +847,7 @@ def _spread_px_ok(px) -> bool:
 
 
 def spread_roll_exec(ib, spec: dict, from_month: str, to_month: str, qty: int,
-                     is_long: bool, force: bool = False):
+                     is_long: bool, force: bool = False, heartbeat=None):
     """
     Roll qty contracts from from_month to to_month via a single IBKR BAG calendar
     spread order. Direction depends on position sign:
@@ -855,11 +921,33 @@ def spread_roll_exec(ib, spec: dict, from_month: str, to_month: str, qty: int,
     trade = ib.placeOrder(spread_contract, order)
 
     deadline = time.time() + SPREAD_PASSIVE_SECS
+    ticks = 0
     while time.time() < deadline and not trade.isDone():
+        if (trade.orderStatus.status or "") == "Inactive":
+            break   # rejected — not in DoneStates; don't wait out the clock (BUG-13)
         ib.sleep(1)
+        ticks += 1
+        if heartbeat and ticks % 30 == 0:
+            heartbeat()
 
     limit_filled = 0   # fills kept on the limit when we escalate to market
-    if not trade.isDone():
+    reject = _reject_reason(trade)
+    if reject:
+        # Broker refused the spread (margin/permission/limits). Never escalate a
+        # REJECTED order to MKT — the market order hits the same wall, or worse
+        # fills later once the condition clears, double-acting (BUG-13). Alert
+        # loudly; the position stays in the expiring month for manual review /
+        # the next cycle.
+        msg = (f"[ORDER-REJECTED] SPREAD {sym} {from_month}→{to_month} "
+               f"{bag_action} {qty}: {reject}")
+        print(f"    {msg}")
+        try:
+            _send_discord(msg)
+        except Exception as e:
+            print(f"    WARN: reject Discord alert failed: {e}")
+        if not trade.isDone():
+            ib.cancelOrder(trade.order)   # clear the inactive order
+    elif not trade.isDone():
         # Limit timed out — cancel, then (force only) escalate the remainder.
         ib.cancelOrder(trade.order)
         cancel_deadline = time.time() + SPREAD_CANCEL_CONFIRM_SECS
@@ -898,7 +986,7 @@ def spread_roll_exec(ib, spec: dict, from_month: str, to_month: str, qty: int,
 
 def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                           skip_unchanged: bool = False, capital: float = 0.0,
-                          snapshot_fresh: bool = True):
+                          snapshot_fresh: bool = True, heartbeat=None):
     """
     For each instrument with a target or current holding, roll out of old months and
     move the hold-month position to the target. Prints the plan; places orders via
@@ -912,10 +1000,22 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
         position the optimiser wanted at 0 was never closed. When the snapshot is
         NOT fresh, absence is treated as "stale and silent" → hold (never infer a
         close off untrusted data).
+    heartbeat: optional zero-arg liveness callback, invoked once per instrument
+        and threaded into algo_exec/spread_roll_exec's wait loops, so a slow
+        cycle (serial orders × up-to-600s timeouts) can't look dead to the
+        watchdog and get kill -9'd mid-order (BUG-12).
+
+    Returns (placed, skipped, dry_run, traded_instrs, unconverged) where
+    unconverged is the set of instruments whose NET position was NOT brought to
+    target this cycle (deferred market-closed, qualify/pre-trade/risk skip,
+    unfilled/partial/rejected orders). Persisted as `pending` in last_targets so
+    the expected-book mismatch gate doesn't count "haven't traded yet" as a
+    corrupt read (BUG-16 interim).
     """
     pending = {t.contract.symbol for t in ib.openTrades()}
     placed, skipped, dry_run = [], [], []
     traded_instrs: set = set()   # instruments that placed a live order this cycle (BUG-7 churn cap)
+    unconverged: set = set()     # instruments whose net didn't reach target this cycle (BUG-16)
     _mkt_open_cache: dict = {}   # conId → bool; one reqContractDetails per contract per cycle
 
     def _is_open(c) -> bool:
@@ -953,6 +1053,8 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
 
     instruments = sorted(set(targets) | set(held))
     for instr in instruments:
+        if heartbeat:
+            heartbeat()   # liveness per instrument — cycles are unbounded (BUG-12)
         spec = ib_spec(ibcfg, instr)
         if spec is None:
             print(f"  {instr}: no IB config — skipping")
@@ -973,6 +1075,7 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
         if execute and sym in pending:
             print(f"  {instr} ({sym}): SKIPPED — pending order exists for {sym}")
             skipped.append(sym)
+            unconverged.add(instr)   # position in flux until the working order resolves
             continue
 
         in_passive = (next_month is not None
@@ -1067,7 +1170,8 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                         sp_status, sp_filled, _ = spread_roll_exec(
                             ib, spec, current_month, next_month, abs(qty_to_roll),
                             is_long=qty_to_roll > 0,
-                            force=days_to_roll <= FORCE_ROLL_DAYS)
+                            force=days_to_roll <= FORCE_ROLL_DAYS,
+                            heartbeat=heartbeat)
                         # Credit fills whatever the final status — a cancelled
                         # limit can still carry partial fills, and ignoring them
                         # would mis-size this cycle's rebalance orders.
@@ -1169,6 +1273,7 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
             if not ok:
                 print(f"    [RISK] SKIP {sym} rebalance: target {desired:+d} — {reason}")
                 skipped.append(f"{sym} (risk: {reason})")
+                unconverged.add(instr)
                 risk_ok = False
 
         # ── Execute roll closes first ─────────────────────────────────────────
@@ -1176,21 +1281,24 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
             c = qualify(ib, spec, m)
             if c is None:
                 print(f"    WARNING: could not qualify {sym} {m} — skip roll close")
+                unconverged.add(instr)
                 continue
             ibmult = float(c.multiplier) if c.multiplier else 1.0
 
             if not _is_open(c):
                 print(f"    DEFERRED — {sym} {m} market closed")
                 skipped.append(f"{sym} {m} (market closed)")
+                unconverged.add(instr)
                 continue
 
             ok, reason, ticker = pre_trade_checks(ib, c, sig_px, sigma, q)
             if not ok:
                 print(f"    SKIP ROLL pre-trade [{sym} {m}]: {reason}")
                 skipped.append(f"{sym} {m} (pre-trade)")
+                unconverged.add(instr)
                 continue
 
-            result = algo_exec(ib, c, act, q, ticker)
+            result = algo_exec(ib, c, act, q, ticker, heartbeat=heartbeat)
             ib.cancelMktData(c)
 
             fp = result.avg_price or sig_px or 0.0
@@ -1207,8 +1315,22 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
             if result.status == "PartiallyFilled":
                 print(f"    WARN: partial roll fill {result.filled_qty}/{q} {sym} {m} — "
                       f"remainder stays in expiring month")
-            if result.status in ("Unfilled", "Cancelled"):
+            if result.status == "Rejected" or result.reject_reason:
+                # Broker refused the order — margin/permission/limit. This is the
+                # one broker-side failure that must page immediately: a rejection
+                # storm (e.g. margin after a vol spike) would otherwise be silent
+                # until the morning report (BUG-13).
+                rej = (f"[ORDER-REJECTED] ROLL {act} {q} {sym} {m}: "
+                       f"{result.reject_reason or result.status}")
+                print(f"    WARN: {rej}")
+                try:
+                    _send_discord(rej)
+                except Exception as e:
+                    print(f"    WARN: reject Discord alert failed: {e}")
+            elif result.status in ("Unfilled", "Cancelled"):
                 print(f"    WARN: {result.status} on ROLL {sym} {m} — no fill logged")
+            if result.status != "Filled":
+                unconverged.add(instr)
 
             placed.append((f"ROLL {act} {q} {sym} {m}", result.status, result.order_id))
             traded_instrs.add(instr)
@@ -1221,17 +1343,20 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
             if c is None:
                 print(f"    WARNING: could not qualify {sym} {om} — skip")
                 skipped.append(f"{sym} (qualify failed)")
+                unconverged.add(instr)
             elif not _is_open(c):
                 print(f"    DEFERRED — {sym} {om} market closed")
                 skipped.append(f"{sym} (market closed)")
+                unconverged.add(instr)
             else:
                 ibmult = float(c.multiplier) if c.multiplier else 1.0
                 ok, reason, ticker = pre_trade_checks(ib, c, sig_px, sigma, q)
                 if not ok:
                     print(f"    SKIP pre-trade [{sym} {om}]: {reason}")
                     skipped.append(f"{sym} (pre-trade: {reason})")
+                    unconverged.add(instr)
                 else:
-                    result = algo_exec(ib, c, act, q, ticker)
+                    result = algo_exec(ib, c, act, q, ticker, heartbeat=heartbeat)
                     ib.cancelMktData(c)
 
                     fp   = result.avg_price or sig_px or 0.0
@@ -1248,23 +1373,55 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                     if result.status == "PartiallyFilled":
                         print(f"    WARN: partial fill {result.filled_qty}/{q} — "
                               f"remainder will rebalance tomorrow")
-                    if result.status in ("Unfilled", "Cancelled"):
+                    if result.status == "Rejected" or result.reject_reason:
+                        # See the roll-close twin above — rejections page (BUG-13).
+                        rej = (f"[ORDER-REJECTED] {act} {q} {sym} {om}: "
+                               f"{result.reject_reason or result.status}")
+                        print(f"    WARN: {rej}")
+                        try:
+                            _send_discord(rej)
+                        except Exception as e:
+                            print(f"    WARN: reject Discord alert failed: {e}")
+                    elif result.status in ("Unfilled", "Cancelled"):
                         print(f"    WARN: {result.status} — no fill logged for {sym}")
+                    if result.status != "Filled":
+                        unconverged.add(instr)
 
                     placed.append((f"{act} {q} {sym} {om}",
                                    result.status, result.order_id))
                     traded_instrs.add(instr)
 
-    return placed, skipped, dry_run, traded_instrs
+    return placed, skipped, dry_run, traded_instrs, unconverged
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Informational IB error codes not worth a log line (market-data farm status
+# chatter etc.). Everything else is printed with a timestamp so a 3am post-mortem
+# can see exactly what the broker said and when — order rejections in particular
+# were previously invisible outside ib_insync's own stderr logging (BUG-13).
+_BENIGN_IB_ERRORS = {2100, 2103, 2104, 2105, 2106, 2107, 2108, 2119, 2150,
+                     2158, 2168, 2169}
+
+
+def _log_ib_error(reqId, errorCode, errorString, contract=None):
+    """errorEvent hook: timestamped, filtered broker-error log (never raises)."""
+    try:
+        if errorCode in _BENIGN_IB_ERRORS:
+            return
+        where = f" [{contract.localSymbol or contract.symbol}]" if contract else ""
+        print(f"[{_now()}] [IB-ERR] code {errorCode} reqId {reqId}{where}: "
+              f"{errorString}")
+    except Exception:
+        pass
+
+
 def _connect(client_id: int = CLIENT_ID) -> IB | None:
     """Connect to IBKR with retries. Returns IB instance or None on failure."""
     ib = IB()
+    ib.errorEvent += _log_ib_error
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             ib.connect(IB_HOST, IB_PORT, clientId=client_id, timeout=CONNECT_TIMEOUT)
@@ -1278,6 +1435,25 @@ def _connect(client_id: int = CLIENT_ID) -> IB | None:
             else:
                 print(f"ERROR: could not connect to IBKR after {MAX_RETRIES} attempts — {e}")
                 print("Make sure IB Gateway / TWS is running on port 4002.")
+    return None
+
+
+def _disconnect(ib: IB | None) -> None:
+    """
+    Tear down a connection before dropping the reference; always returns None so
+    call sites can write `ib = _disconnect(ib)`.
+
+    Setting `ib = None` WITHOUT disconnect() leaks the session (BUG-20): the
+    asyncio transport stays alive after the reference is dropped, the Gateway
+    keeps CLIENT_ID registered, and every reconnect is then rejected with
+    error 326 "client id already in use" — the daemon deadlocks against its own
+    zombie socket (2026-07-05: 3h of failed reconnects through the Sunday open).
+    """
+    if ib is not None:
+        try:
+            ib.disconnect()
+        except Exception:
+            pass   # socket may already be dead; the point is freeing the clientId
     return None
 
 
@@ -1366,6 +1542,7 @@ def run_daemon(args):
         # ── 1. Reconnect if needed (must run before snapshot flush uses ib) ───
         if ib is None or not ib.isConnected():
             print(f"[{_now()}] IB disconnected — reconnecting…")
+            ib = _disconnect(ib)   # free the old clientId session first (BUG-20)
             ib = _connect()
             if ib is None:
                 print(f"[{_now()}] Reconnect failed — sleeping 60s…")
@@ -1397,53 +1574,46 @@ def run_daemon(args):
             capital = snap["capital"]
             meta    = diag.get("_meta", {})
             trade_counts = {}   # new snapshot = new target set; reset the churn cap
-            # Staleness gate (calendar-aware). The snapshot's date is the last
-            # PST bar it was built from, NOT wall-clock today. A CME session is
-            # named by its 18:00 ET close, and the compute (run ~18:00 ET) sizes
-            # off the just-settled close — so on a Sunday-evening run the freshest
-            # legitimate data is the *previous Friday's* session. Comparing against
-            # date.today() therefore false-alarmed every weekend/holiday run.
-            #
-            # Correct test: is the snapshot behind the most recent COMPLETED CME
-            # session (sessions_behind > 0)? If so pst_updater/Gateway genuinely
-            # failed → skip + Discord-alert (once per stale date). Otherwise trade.
-            pst_date_str = meta.get("date", "unknown")
-            try:
-                pst_date = date.fromisoformat(pst_date_str)
-                lag = sessions_behind(pst_date)
-            except (ValueError, TypeError):
-                pst_date = None
-                lag = 1   # unparseable date → treat as stale, fail safe
-            if lag > 0 and compute_in_progress():
-                # Compute is mid-run (it overlaps the daemon restart: starts 22:00
-                # UTC, finishes ~22:17; daemon restarts 22:15). A fresh snapshot is
-                # imminent — wait quietly rather than false-alarm on the old snapshot
-                # and risk reading a flat book during compute's connection churn.
-                print(f"[{_now()}] snapshot from {pst_date_str} is stale but compute "
-                      f"is in progress — waiting for the fresh snapshot…")
-                snapshot_computed_at = None   # force reload next cycle
-                time.sleep(60)
-                continue
-            if lag > 0:
-                expected = last_completed_session()
-                msg = (f"snapshot PST data is from {pst_date_str}, "
-                       f"{lag} session(s) behind last completed CME session "
-                       f"({expected.isoformat()}) — pst_updater/Gateway may have "
-                       f"failed. Skipping execution until fresh compute runs.")
-                print(f"[{_now()}] WARNING: {msg}")
-                if stale_alerted_for != pst_date_str:
-                    try:
-                        _send_discord(f"[DAEMON-STALE] {msg}")
-                    except Exception as e:
-                        print(f"[{_now()}] WARNING: stale Discord alert failed: {e}")
-                    stale_alerted_for = pst_date_str
-                snapshot_computed_at = None   # force reload next cycle
-                time.sleep(60)
-                continue
-            stale_alerted_for = None   # snapshot is fresh; re-arm the alert
             print(f"[{_now()}] Snapshot loaded: {snapshot_computed_at}  "
                   f"capital ${capital:,.0f}  IDM {meta.get('idm')}  "
                   f"{meta.get('n_live')} live  target holds {meta.get('n_held_target')}")
+
+        # ── 2b. Staleness gate (calendar-aware) — EVERY cycle, not just on load ─
+        # A snapshot that was fresh when loaded ages into staleness if the next
+        # compute fails (BUG-15): before this ran per-cycle, a failed Friday
+        # compute meant Thursday's daemon kept trading Thursday targets through
+        # Friday's session with no warning (mid-week was masked only by the
+        # nightly 22:15 daemon restart re-running the load-time check).
+        # Correct test: is the snapshot behind the most recent COMPLETED CME
+        # session (snapshot_lag > 0)? If so pst_updater/Gateway/compute genuinely
+        # failed → skip + Discord-alert (once per stale date). Otherwise trade.
+        pst_date_str = str(meta.get("date", "unknown"))
+        lag = snapshot_lag(meta)
+        if lag > 0 and compute_in_progress():
+            # Compute is mid-run (it overlaps the daemon restart: starts 22:00
+            # UTC, finishes ~22:17; daemon restarts 22:15). A fresh snapshot is
+            # imminent — wait quietly rather than false-alarm on the old snapshot
+            # and risk reading a flat book during compute's connection churn.
+            print(f"[{_now()}] snapshot from {pst_date_str} is stale but compute "
+                  f"is in progress — waiting for the fresh snapshot…")
+            time.sleep(60)
+            continue
+        if lag > 0:
+            expected = last_completed_session()
+            msg = (f"snapshot PST data is from {pst_date_str}, "
+                   f"{lag} session(s) behind last completed CME session "
+                   f"({expected.isoformat()}) — pst_updater/Gateway may have "
+                   f"failed. Skipping execution until fresh compute runs.")
+            print(f"[{_now()}] WARNING: {msg}")
+            if stale_alerted_for != pst_date_str:
+                try:
+                    _send_discord(f"[DAEMON-STALE] {msg}")
+                except Exception as e:
+                    print(f"[{_now()}] WARNING: stale Discord alert failed: {e}")
+                stale_alerted_for = pst_date_str
+            time.sleep(60)
+            continue
+        stale_alerted_for = None   # snapshot is fresh; re-arm the alert
 
         # ── 3. Fetch fresh positions ──────────────────────────────────────────
         # When executing we read STRICT: a failed/timed-out reqPositions raises
@@ -1472,7 +1642,7 @@ def run_daemon(args):
                     readfail_alerted = True
                 except Exception as de:
                     print(f"[{_now()}] WARNING: READFAIL Discord alert failed: {de}")
-            ib = None   # force a clean reconnect next cycle (socket may be half-open)
+            ib = _disconnect(ib)   # force a clean reconnect next cycle (BUG-20: must free the clientId, not just drop the ref)
             time.sleep(60)
             continue
         except Exception as e:
@@ -1501,7 +1671,7 @@ def run_daemon(args):
                         readfail_alerted = True
                     except Exception as de:
                         print(f"[{_now()}] WARNING: MISMATCH Discord alert failed: {de}")
-                ib = None   # force a clean reconnect next cycle (socket may be half-open)
+                ib = _disconnect(ib)   # force a clean reconnect next cycle (BUG-20: must free the clientId, not just drop the ref)
                 time.sleep(60)
                 continue
 
@@ -1525,7 +1695,7 @@ def run_daemon(args):
                 try:
                     ib.sleep(DAEMON_SLEEP_SECS)   # pump IB event loop, not plain time.sleep
                 except Exception:
-                    ib = None
+                    ib = _disconnect(ib)
                 continue
 
             ok, reason = check_daily_loss(ib, capital)
@@ -1537,10 +1707,10 @@ def run_daemon(args):
         print(f"\n[{_now()}] {'─'*60}")
         # The cycle only reaches here after the calendar-aware staleness gate
         # above (run_daemon `continue`s on lag > 0), so the snapshot is fresh.
-        placed, skipped, dry_run, traded_instrs = reconcile_and_execute(
+        placed, skipped, dry_run, traded_instrs, unconverged = reconcile_and_execute(
             ib, ibcfg, targets, held, diag, ledger,
             execute=args.execute, skip_unchanged=True, capital=capital,
-            snapshot_fresh=True)
+            snapshot_fresh=True, heartbeat=_touch_heartbeat)
 
         market_closed = sum(1 for s in skipped if "market closed" in s)
         other_skips   = len(skipped) - market_closed
@@ -1553,7 +1723,8 @@ def run_daemon(args):
                   f"{other_skips} skipped")
 
         if args.execute:
-            save_last_targets(LAST_TARGETS_PATH, targets, snap["date"])
+            save_last_targets(LAST_TARGETS_PATH, targets, snap["date"],
+                              pending=unconverged)
 
             # ── 5b. Churn circuit-breaker (BUG-7) ─────────────────────────────
             # Count cycles each instrument placed a live order this session. A
@@ -1581,7 +1752,7 @@ def run_daemon(args):
         try:
             ib.sleep(DAEMON_SLEEP_SECS)
         except Exception:
-            ib = None   # reconnect at top of next cycle
+            ib = _disconnect(ib)   # reconnect at top of next cycle
 
 
 def main():
@@ -1650,10 +1821,30 @@ def main():
             return
         current_c = {instr: sum(m.values()) for instr, m in held_c.items()}
 
-        capital = args.capital or get_equity(ib)
+        # Capital is as load-bearing as positions: the whole book is sized off it,
+        # so substituting a guess for a failed read silently mis-sizes every
+        # position (BUG-17 — the old fallback hardcoded $250k here). Read strictly,
+        # with a short retry (account values can lag a fresh socket), and abort
+        # WITHOUT overwriting the last good snapshot on failure — the same strict
+        # pattern as the position read above.
+        capital = args.capital
         if capital is None:
-            print(f"WARNING: could not read equity — using ${FALLBACK_CAPITAL:,.0f}")
-            capital = FALLBACK_CAPITAL
+            for _ in range(5):
+                capital = get_equity(ib)
+                if capital is not None:
+                    break
+                ib.sleep(2)
+        if capital is None:
+            msg = ("compute aborting: could not read NetLiquidation after retries "
+                   "— refusing to size the book off a guessed capital. Last good "
+                   "snapshot left untouched.")
+            print(f"[{_now()}] ERROR: {msg}")
+            try:
+                _send_discord(f"[COMPUTE-ABORT] {msg}")
+            except Exception:
+                pass
+            ib.disconnect()
+            return
         capital = float(capital)
 
         print(f"\n  capital ${capital:,.0f}  |  target risk {args.target_risk:.0%}  |  "
@@ -1721,9 +1912,42 @@ def main():
                 return
             ibcfg = load_ib_config()
 
-        # Read current positions from IBKR (always fresh).
-        held, unknown = get_positions_by_instr(ib, ibcfg)
+        # Read current positions from IBKR (always fresh). When executing, read
+        # STRICT (BUG-11): this one-shot path had neither of the daemon's guards —
+        # a failed reqPositions silently fell back to the never-seeded cache →
+        # held={} → reconcile computes delta = desired − 0 and places FULL-SIZE
+        # orders on top of the real book (doubling), the exact class of read the
+        # daemon already refuses. One-shot has no retry loop, so abort — and this
+        # path is what an operator reaches for during incident recovery, i.e.
+        # exactly when the Gateway is most likely half-open.
+        try:
+            held, unknown = get_positions_by_instr(ib, ibcfg, strict=args.execute)
+        except PositionFetchError as e:
+            msg = (f"execute aborting: {e}. No orders placed; last_targets "
+                   f"left untouched.")
+            print(f"[{_now()}] ERROR: {msg}")
+            try:
+                _send_discord(f"[EXECUTE-ABORT] {msg}")
+            except Exception:
+                pass
+            ib.disconnect()
+            return
         current = {instr: sum(m.values()) for instr, m in held.items()}
+
+        # Halt-on-mismatch gate, mirroring the daemon's §3b (BUG-11): a read that
+        # "succeeds" but contradicts most of the expected book is untrustworthy
+        # (half-open socket returning a thin/partial list). Abort, don't trade.
+        if args.execute:
+            suspect, detail = expected_book_mismatch(LAST_TARGETS_PATH, current)
+            if suspect:
+                msg = f"execute aborting: {detail}"
+                print(f"[{_now()}] ERROR: [EXECUTE-ABORT] {msg}")
+                try:
+                    _send_discord(f"[EXECUTE-ABORT] {msg}")
+                except Exception:
+                    pass
+                ib.disconnect()
+                return
 
         if unknown:
             print(f"\n  ⚠ Held futures NOT in UNIVERSE (left untouched): {unknown}")
@@ -1748,11 +1972,11 @@ def main():
         print("\n" + "-" * 80)
         # Snapshot is same-day fresh here: --mode execute loads via load_snapshot
         # (hard-exits if date != today); the fall-through default mode just wrote it.
-        placed, skipped, dry_run, _ = reconcile_and_execute(
+        placed, skipped, dry_run, _, unconverged = reconcile_and_execute(
             ib, ibcfg, targets, held, diag, ledger, execute=args.execute,
             capital=capital, snapshot_fresh=True)
 
-        save_last_targets(LAST_TARGETS_PATH, targets, today)
+        save_last_targets(LAST_TARGETS_PATH, targets, today, pending=unconverged)
 
         # ── Summary ───────────────────────────────────────────────────────────
         print("\n" + "=" * 80)

@@ -659,7 +659,7 @@ def test_rne_dry_run_no_pre_trade_check(
     ib = _rne_ib()
     ledger = MagicMock()
 
-    placed, skipped, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, ledger, execute=False
     )
 
@@ -701,7 +701,7 @@ def test_rne_pending_order_skipped(
     mock_hold.return_value = ("202609", None, 9999)
     ib = _rne_ib(pending_symbols=["MES"])
 
-    placed, skipped, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -725,7 +725,7 @@ def test_rne_pre_trade_fail_skips_algo(
     mock_is_open.return_value = True   # market open → don't defer
     ib = _rne_ib()
 
-    placed, skipped, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -857,7 +857,7 @@ def test_rne_no_ib_config_skips(
     mock_spec.return_value = None  # no IB config → skip
     ib = _rne_ib()
 
-    placed, skipped, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -879,7 +879,7 @@ def test_rne_no_roll_calendar_skips(
     mock_hold.return_value = (None, None, 9999)  # no roll calendar → skip
     ib = _rne_ib()
 
-    placed, skipped, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -1048,7 +1048,7 @@ def test_rne_spread_roll_deferred_when_market_closed(
     mock_hold.return_value = ("202609", "202612", 2)
     held = {"ES": {"202609": 2}}
 
-    placed, skipped, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _ = reconcile_and_execute(
         _rne_ib(), MagicMock(), {"ES": 2}, held, _MOCK_DIAG,
         MagicMock(), execute=True)
 
@@ -1067,7 +1067,7 @@ def test_rne_risk_gate_blocks_rebalance_not_roll_close(
     mock_vol.return_value = (False, "too big")
     held = {"ES": {"202603": 2}}                     # stranded old month
 
-    placed, skipped, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _ = reconcile_and_execute(
         _rne_ib(), MagicMock(), {"ES": 100}, held, _MOCK_DIAG,
         MagicMock(), execute=True, capital=100_000.0)
 
@@ -1435,11 +1435,18 @@ def test_positions_symbol_fallback_ambiguous_goes_unknown(mock_spec):
 from ibkr_fut.preflight_check import check_contracts, check_market_data
 
 
-def _cd(tz="US/Central", hours="20260609:1700-20260610:1600"):
+def _cd(tz="US/Central", hours="20260609:1700-20260610:1600", price_magnifier=1):
     cd = MagicMock()
     cd.timeZoneId = tz
     cd.tradingHours = hours
+    cd.priceMagnifier = price_magnifier
     return cd
+
+
+def _qualified(mult="5"):
+    """Qualified-contract mock whose multiplier matches _MOCK_SPEC (5.0) by
+    default — the SPEC stage (BUG-5) compares it against the CSV value."""
+    return MagicMock(conId=1, multiplier=mult)
 
 
 @patch("ibkr_fut.preflight_check.is_contract_okay_to_trade", return_value=True)
@@ -1449,7 +1456,7 @@ def _cd(tz="US/Central", hours="20260609:1700-20260610:1600"):
 def test_preflight_all_clear(mock_spec, mock_roll, mock_qual, mock_open):
     mock_spec.return_value = _MOCK_SPEC
     mock_roll.return_value = ("202609", "202612", 200)  # far from roll
-    mock_qual.return_value = MagicMock(conId=1)
+    mock_qual.return_value = _qualified()
     ib = MagicMock()
     ib.reqContractDetails.return_value = [_cd()]
 
@@ -1484,7 +1491,7 @@ def test_preflight_checks_next_month_in_roll_window(mock_spec, mock_roll,
                                                     mock_qual, mock_open):
     mock_spec.return_value = _MOCK_SPEC
     mock_roll.return_value = ("202609", "202612", 7)   # inside passive window
-    mock_qual.return_value = MagicMock(conId=1)
+    mock_qual.return_value = _qualified()
     ib = MagicMock()
     ib.reqContractDetails.return_value = [_cd()]
 
@@ -1503,7 +1510,7 @@ def test_preflight_unmapped_tz_and_empty_hours(mock_spec, mock_roll,
                                                mock_qual, mock_open):
     mock_spec.return_value = _MOCK_SPEC
     mock_roll.return_value = ("202609", None, 9999)
-    mock_qual.return_value = MagicMock(conId=1)
+    mock_qual.return_value = _qualified()
     ib = MagicMock()
     ib.reqContractDetails.return_value = [_cd(tz="Mars/Olympus", hours="")]
 
@@ -1512,6 +1519,44 @@ def test_preflight_unmapped_tz_and_empty_hours(mock_spec, mock_roll,
     stages = [s for _, s, _ in failures]
     assert stages == ["HOURS", "HOURS"]      # unmapped tz + empty hours
     assert open_now == []                    # empty hours → never reaches md
+
+
+@patch("ibkr_fut.preflight_check.is_contract_okay_to_trade", return_value=False)
+@patch("ibkr_fut.preflight_check.qualify")
+@patch("ibkr_fut.preflight_check.get_roll_info")
+@patch("ibkr_fut.preflight_check.ib_spec")
+def test_preflight_spec_multiplier_mismatch_flagged(mock_spec, mock_roll,
+                                                    mock_qual, mock_open):
+    # BUG-5 guard: a CSV multiplier drifting from IB's authoritative value must
+    # flag SPEC (silent drift would mis-size every position in the instrument).
+    mock_spec.return_value = _MOCK_SPEC              # CSV multiplier = 5.0
+    mock_roll.return_value = ("202609", None, 9999)
+    mock_qual.return_value = _qualified(mult="50")   # IB says 50
+    ib = MagicMock()
+    ib.reqContractDetails.return_value = [_cd()]
+
+    failures, _ = check_contracts(ib, MagicMock(), {"ES": "equity"})
+
+    assert [(i, s) for i, s, _ in failures] == [("ES", "SPEC")]
+
+
+@patch("ibkr_fut.preflight_check.is_contract_okay_to_trade", return_value=False)
+@patch("ibkr_fut.preflight_check.qualify")
+@patch("ibkr_fut.preflight_check.get_roll_info")
+@patch("ibkr_fut.preflight_check.ib_spec")
+def test_preflight_spec_unset_price_magnifier_is_one(mock_spec, mock_roll,
+                                                     mock_qual, mock_open):
+    # IB reports priceMagnifier=0 when unset; effective value is 1 → must match
+    # the CSV's 1.0 without a false SPEC failure.
+    mock_spec.return_value = _MOCK_SPEC              # CSV price_magnifier = 1.0
+    mock_roll.return_value = ("202609", None, 9999)
+    mock_qual.return_value = _qualified()
+    ib = MagicMock()
+    ib.reqContractDetails.return_value = [_cd(price_magnifier=0)]
+
+    failures, _ = check_contracts(ib, MagicMock(), {"ES": "equity"})
+
+    assert failures == []
 
 
 def test_preflight_market_data_failure():
@@ -1992,3 +2037,436 @@ def test_get_positions_strict_propagates_to_fetch(monkeypatch):
     with pytest.raises(PositionFetchError):
         get_positions_by_instr(ib, MagicMock(), strict=True)
     ib.positions.assert_not_called()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Group 10 — 2026-07-01 audit hardening wave
+#   BUG-11 strict one-shot execute · BUG-15 per-cycle staleness · BUG-17 strict
+#   capital · BUG-13 rejection handling · BUG-12 heartbeat threading · BUG-18
+#   atomic writes / guarded loads · BUG-16 deferred-aware mismatch gate
+# ══════════════════════════════════════════════════════════════════════════════
+
+from ibkr_fut.algo_execution import _reject_reason
+from ibkr_fut.live_dynamic import snapshot_lag
+
+
+# ── BUG-11: one-shot execute path aborts on a bad/suspect read ─────────────────
+
+def _main_execute_patches(monkeypatch, tmp_path):
+    """Patch live_dynamic.main()'s execute-phase collaborators; return the mocks."""
+    snap = {"date": date.today().isoformat(), "computed_at": "t0",
+            "capital": 250_000.0, "targets": {"ES": 1},
+            "diag": {"_meta": {"idm": 1.0, "n_live": 1,
+                               "date": date.today().isoformat()}}}
+    ib = MagicMock()
+    mocks = {
+        "ib": ib,
+        "connect": MagicMock(return_value=ib),
+        "load_snapshot": MagicMock(return_value=snap),
+        "load_ib_config": MagicMock(return_value=MagicMock()),
+        "get_positions": MagicMock(return_value=({}, [])),
+        "mismatch": MagicMock(return_value=(False, "")),
+        "reconcile": MagicMock(return_value=([], [], [], set(), set())),
+        "save_last": MagicMock(),
+        "discord": MagicMock(),
+        "ledger": MagicMock(),
+    }
+    monkeypatch.setattr(live_dynamic, "_connect", mocks["connect"])
+    monkeypatch.setattr(live_dynamic, "load_snapshot", mocks["load_snapshot"])
+    monkeypatch.setattr(live_dynamic, "load_ib_config", mocks["load_ib_config"])
+    monkeypatch.setattr(live_dynamic, "get_positions_by_instr", mocks["get_positions"])
+    monkeypatch.setattr(live_dynamic, "expected_book_mismatch", mocks["mismatch"])
+    monkeypatch.setattr(live_dynamic, "reconcile_and_execute", mocks["reconcile"])
+    monkeypatch.setattr(live_dynamic, "save_last_targets", mocks["save_last"])
+    monkeypatch.setattr(live_dynamic, "_send_discord", mocks["discord"])
+    monkeypatch.setattr(live_dynamic, "check_last_targets", MagicMock())
+    monkeypatch.setattr(live_dynamic, "DynLedger", MagicMock(return_value=mocks["ledger"]))
+    return mocks
+
+
+def _run_main(monkeypatch, argv):
+    monkeypatch.setattr(sys, "argv", ["live_dynamic.py"] + argv)
+    live_dynamic.main()
+
+
+def test_execute_oneshot_reads_strict_when_live(monkeypatch, tmp_path):
+    m = _main_execute_patches(monkeypatch, tmp_path)
+    _run_main(monkeypatch, ["--mode", "execute", "--execute"])
+    assert m["get_positions"].call_args.kwargs.get("strict") is True
+    m["reconcile"].assert_called_once()
+
+
+def test_execute_oneshot_dry_run_reads_lenient(monkeypatch, tmp_path):
+    m = _main_execute_patches(monkeypatch, tmp_path)
+    _run_main(monkeypatch, ["--mode", "execute"])
+    assert m["get_positions"].call_args.kwargs.get("strict") is False
+
+
+def test_execute_oneshot_aborts_on_read_failure(monkeypatch, tmp_path):
+    # BUG-11: a failed position read must abort BEFORE reconcile — the old
+    # lenient read fell back to an empty cache and DOUBLED the book.
+    m = _main_execute_patches(monkeypatch, tmp_path)
+    m["get_positions"].side_effect = PositionFetchError("Socket disconnect")
+    _run_main(monkeypatch, ["--mode", "execute", "--execute"])
+    m["reconcile"].assert_not_called()
+    m["save_last"].assert_not_called()
+    assert any("[EXECUTE-ABORT]" in c.args[0] for c in m["discord"].call_args_list)
+    m["ib"].disconnect.assert_called()
+
+
+def test_execute_oneshot_aborts_on_suspect_book(monkeypatch, tmp_path):
+    # BUG-11: a read that "succeeds" but contradicts the expected book aborts too.
+    m = _main_execute_patches(monkeypatch, tmp_path)
+    m["mismatch"].return_value = (True, "4/4 instruments disagree")
+    _run_main(monkeypatch, ["--mode", "execute", "--execute"])
+    m["reconcile"].assert_not_called()
+    assert any("[EXECUTE-ABORT]" in c.args[0] for c in m["discord"].call_args_list)
+
+
+def test_execute_oneshot_dry_run_skips_mismatch_gate(monkeypatch, tmp_path):
+    m = _main_execute_patches(monkeypatch, tmp_path)
+    _run_main(monkeypatch, ["--mode", "execute"])
+    m["mismatch"].assert_not_called()
+
+
+# ── BUG-15: snapshot_lag (per-cycle staleness helper) ──────────────────────────
+
+@patch("ibkr_fut.live_dynamic.sessions_behind", return_value=0)
+def test_snapshot_lag_fresh(mock_sb):
+    assert snapshot_lag({"date": "2026-06-30"}) == 0
+    mock_sb.assert_called_once_with(date(2026, 6, 30))
+
+
+@patch("ibkr_fut.live_dynamic.sessions_behind", return_value=2)
+def test_snapshot_lag_behind(mock_sb):
+    assert snapshot_lag({"date": "2026-06-27"}) == 2
+
+
+@patch("ibkr_fut.live_dynamic.sessions_behind")
+def test_snapshot_lag_unparseable_date_is_stale(mock_sb):
+    # fail safe: unknown data age must read as stale, never as fresh
+    assert snapshot_lag({"date": "garbage"}) == 1
+    assert snapshot_lag({}) == 1
+    assert snapshot_lag(None) == 1
+    mock_sb.assert_not_called()
+
+
+# ── BUG-17: compute aborts (keeps last snapshot) when equity can't be read ─────
+
+def _main_compute_patches(monkeypatch):
+    ib = MagicMock()
+    mocks = {
+        "ib": ib,
+        "connect": MagicMock(return_value=ib),
+        "get_positions": MagicMock(return_value=({}, [])),
+        "get_equity": MagicMock(return_value=None),
+        "tradable": MagicMock(return_value=(set(), [])),   # empty → early return
+        "save_snapshot": MagicMock(),
+        "discord": MagicMock(),
+    }
+    monkeypatch.setattr(live_dynamic, "_connect", mocks["connect"])
+    monkeypatch.setattr(live_dynamic, "load_ib_config", MagicMock())
+    monkeypatch.setattr(live_dynamic, "get_positions_by_instr", mocks["get_positions"])
+    monkeypatch.setattr(live_dynamic, "get_equity", mocks["get_equity"])
+    monkeypatch.setattr(live_dynamic, "build_tradable_set", mocks["tradable"])
+    monkeypatch.setattr(live_dynamic, "save_snapshot", mocks["save_snapshot"])
+    monkeypatch.setattr(live_dynamic, "_send_discord", mocks["discord"])
+    return mocks
+
+
+def test_compute_aborts_when_equity_unreadable(monkeypatch):
+    # BUG-17: no more silent $250k fallback — abort, alert, keep the snapshot.
+    m = _main_compute_patches(monkeypatch)
+    _run_main(monkeypatch, ["--mode", "compute"])
+    assert m["get_equity"].call_count > 1            # retried before giving up
+    m["save_snapshot"].assert_not_called()
+    assert any("[COMPUTE-ABORT]" in c.args[0] for c in m["discord"].call_args_list)
+    m["ib"].disconnect.assert_called()
+
+
+def test_compute_capital_override_bypasses_equity_read(monkeypatch):
+    m = _main_compute_patches(monkeypatch)
+    _run_main(monkeypatch, ["--mode", "compute", "--capital", "200000"])
+    m["get_equity"].assert_not_called()
+    # aborts later on the empty tradable set — but NOT via the capital path
+    assert not any("[COMPUTE-ABORT]" in c.args[0]
+                   for c in m["discord"].call_args_list)
+
+
+# ── BUG-13: rejection handling ─────────────────────────────────────────────────
+
+def _log_entry(code, message="rejected"):
+    e = MagicMock()
+    e.errorCode = code
+    e.message = message
+    return e
+
+
+def test_reject_reason_reads_error_from_trade_log():
+    trade = MagicMock()
+    trade.log = [_log_entry(0, "submitted"), _log_entry(201, "margin insufficient")]
+    assert "201" in _reject_reason(trade)
+    assert "margin" in _reject_reason(trade)
+
+
+def test_reject_reason_ignores_own_cancel_202():
+    # Our own cancelOrder produces an errorCode 202 entry — not a rejection.
+    trade = MagicMock()
+    trade.log = [_log_entry(202, "Order Canceled")]
+    assert _reject_reason(trade) == ""
+
+
+@patch("ibkr_fut.algo_execution.time")
+def test_algo_inactive_exits_promptly_as_rejected(mock_time):
+    # BUG-13: 'Inactive' is not in ib_insync DoneStates — pre-fix the aggressive
+    # chase spun for the full TOTAL_TIME_OUT re-submitting a rejected order.
+    mock_time.time.return_value = 0.0
+    trade = _make_trade(status="Inactive", filled=0, avg_price=0.0)
+    trade.log = [_log_entry(201, "margin insufficient")]
+    ticker = _ticker(100.0, 100.25)
+    ib = _make_ib_for_algo(trade, ticker)
+
+    result = algo_exec(ib, MagicMock(), "BUY", 1, ticker)
+
+    assert result.status == "Rejected"
+    assert "201" in result.reject_reason
+    assert ib.placeOrder.call_count == 1     # no aggressive chase of a rejection
+    ib.cancelOrder.assert_not_called()       # never reached the timeout path
+
+
+@patch("ibkr_fut.algo_execution.time")
+def test_algo_timeout_cancel_not_misreported_as_rejected(mock_time):
+    # A timed-out limit we cancel ourselves (log carries 202) stays Cancelled.
+    mock_time.time.side_effect = [0.0] + [601.0] * 100
+    trade = _make_trade(status="Cancelled", filled=0, avg_price=0.0)
+    trade.log = [_log_entry(202, "Order Canceled")]
+    ticker = _ticker(100.0, 100.25)
+    ib = _make_ib_for_algo(trade, ticker)
+
+    result = algo_exec(ib, MagicMock(), "BUY", 1, ticker)
+
+    assert result.status == "Cancelled"
+    assert result.reject_reason == ""
+
+
+@patch("ibkr_fut.live_dynamic._send_discord")
+@_roll_patches
+def test_rne_rejected_order_alerts_discord(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol,
+    mock_discord
+):
+    # BUG-13: a broker rejection must page immediately (margin storm was silent).
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result(
+        filled_qty=0, avg_price=0.0, status="Rejected",
+        reject_reason="IB error 201: margin insufficient")
+    ledger = MagicMock()
+
+    _, _, _, _, unconverged = reconcile_and_execute(
+        _rne_ib(), MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, ledger, execute=True)
+
+    ledger.log_fill.assert_not_called()
+    assert any("ORDER-REJECTED" in c.args[0] for c in mock_discord.call_args_list)
+    assert "ES" in unconverged
+
+
+@patch("ibkr_fut.live_dynamic._send_discord")
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_rejected_never_escalates_to_market(mock_time, mock_qual,
+                                                        mock_discord):
+    # BUG-13: a REJECTED spread limit must not escalate to MKT even when forced —
+    # the market order hits the same wall, or fills later and double-acts.
+    mock_time.time.side_effect = [0.0] + [100.0] * 50
+    mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
+                             MagicMock(conId=2, currency="USD")]
+    ib = _spread_ib()
+    trade = _spread_trade(filled_on_limit=0, status="Inactive",
+                          confirm_cancel=False, ib=ib)
+    trade.log = [_log_entry(201, "margin insufficient")]
+    ib.placeOrder.return_value = trade
+
+    status, filled, _ = spread_roll_exec(ib, _MOCK_SPEC, "202609", "202612",
+                                         5, is_long=True, force=True)
+
+    assert ib.placeOrder.call_count == 1              # limit only, never MKT
+    ib.cancelOrder.assert_called_once()               # inactive order cleared
+    assert any("ORDER-REJECTED" in c.args[0] for c in mock_discord.call_args_list)
+
+
+# ── BUG-12: heartbeat threading ────────────────────────────────────────────────
+
+@_roll_patches
+def test_rne_heartbeat_called_per_instrument(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    hb = MagicMock()
+    held = {"ES": {"202609": 1}, "NQ": {"202609": 1}}
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 1, "NQ": 1}, held,
+                          _MOCK_DIAG, MagicMock(), execute=True, heartbeat=hb)
+
+    assert hb.call_count >= 2   # once per instrument
+
+
+@_roll_patches
+def test_rne_heartbeat_threaded_into_algo_exec(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    hb = MagicMock()
+
+    reconcile_and_execute(_rne_ib(), MagicMock(), {"ES": 1}, {}, _MOCK_DIAG,
+                          MagicMock(), execute=True, heartbeat=hb)
+
+    assert mock_exec.call_args.kwargs.get("heartbeat") is hb
+
+
+@patch("ibkr_fut.algo_execution.time")
+def test_algo_heartbeat_on_progress_tick(mock_time):
+    # The 30s progress tick must also touch the heartbeat so a slow order can't
+    # look dead to the watchdog (kill -9 mid-order).
+    mock_time.time.side_effect = [0.0] + [31.0] * 100   # past MESSAGING_FREQUENCY
+    trade = _make_trade(status="Filled", filled=1, avg_price=100.10)
+    trade.log = []
+    ticker = _ticker(100.0, 100.25)
+    ib = _make_ib_for_algo(trade, ticker)
+    ib.sleep.side_effect = _fill_on_sleep(trade, fill_at=3)
+    hb = MagicMock()
+
+    algo_exec(ib, MagicMock(), "BUY", 1, ticker, heartbeat=hb)
+
+    assert hb.call_count >= 1
+
+
+# ── BUG-18: guarded loads + atomic writes ──────────────────────────────────────
+
+def test_mismatch_corrupt_file_treated_as_no_prior(tmp_path, capsys):
+    # A torn/corrupt last_targets.json must NOT raise (pre-fix: JSONDecodeError
+    # crashed the daemon into a watchdog restart loop).
+    p = os.path.join(str(tmp_path), "last_targets.json")
+    with open(p, "w") as fh:
+        fh.write('{"date": "2026-06-30", "targ')   # truncated mid-write
+    suspect, detail = expected_book_mismatch(p, {"ES": 1})
+    assert suspect is False
+    assert "could not read" in capsys.readouterr().out
+
+
+def test_check_last_targets_corrupt_file_no_raise(tmp_path, capsys):
+    p = os.path.join(str(tmp_path), "last_targets.json")
+    with open(p, "w") as fh:
+        fh.write("not json")
+    check_last_targets(p, {"ES": 1})   # must not raise
+    assert "could not read" in capsys.readouterr().out
+
+
+def test_save_last_targets_atomic_no_tmp_left(tmp_path):
+    p = os.path.join(str(tmp_path), "last.json")
+    save_last_targets(p, {"ES": 1}, "2026-07-01")
+    assert os.path.exists(p)
+    assert not os.path.exists(p + ".tmp")
+
+
+def test_atomic_to_csv_writes_and_cleans_tmp(tmp_path):
+    import pandas as pd
+    from ibkr_fut.pst_updater import _atomic_to_csv
+    p = os.path.join(str(tmp_path), "data.csv")
+    _atomic_to_csv(pd.Series([1.0, 2.0], name="price"), p, header=True)
+    assert os.path.exists(p)
+    assert not os.path.exists(p + ".tmp")
+
+
+def test_atomic_to_csv_failure_preserves_original(tmp_path):
+    from ibkr_fut.pst_updater import _atomic_to_csv
+    p = os.path.join(str(tmp_path), "data.csv")
+    with open(p, "w") as fh:
+        fh.write("original\n")
+    bad = MagicMock()
+    bad.to_csv.side_effect = OSError("disk full")
+    with pytest.raises(OSError):
+        _atomic_to_csv(bad, p)
+    with open(p) as fh:
+        assert fh.read() == "original\n"   # torn write never touched the original
+
+
+# ── BUG-16: deferred-aware mismatch gate ───────────────────────────────────────
+
+def _write_last_targets_pending(tmp_path, targets, pending, day="2026-07-01"):
+    p = os.path.join(tmp_path, "last_targets.json")
+    with open(p, "w") as fh:
+        json.dump({"date": day, "targets": targets, "pending": pending}, fh)
+    return p
+
+
+def test_mismatch_pending_instruments_excluded(tmp_path):
+    # A big rebalance whose new names were all deferred overnight (Asia/Eurex
+    # closed) must NOT gate — pre-fix this deadlocked trading: skipping the cycle
+    # prevents the very fills that would clear the mismatch.
+    p = _write_last_targets_pending(
+        str(tmp_path), {"ES": 1, "NQ": -1, "GC": 2, "CL": 1},
+        pending=["NQ", "GC", "CL"])
+    suspect, _ = expected_book_mismatch(p, {"ES": 1})   # only ES filled so far
+    assert suspect is False
+
+
+def test_mismatch_phantom_flat_still_gates_with_pending(tmp_path):
+    # Safety: excluding pending must not blind the gate — a phantom-flat read
+    # still mismatches every NON-pending instrument.
+    p = _write_last_targets_pending(
+        str(tmp_path), {"ES": 1, "NQ": -1, "GC": 2, "CL": 1}, pending=["CL"])
+    suspect, detail = expected_book_mismatch(p, {})
+    assert suspect is True
+    assert "3/3" in detail
+
+
+def test_mismatch_backward_compat_no_pending_key(tmp_path):
+    # Old-format last_targets.json (no `pending`) keeps working unchanged.
+    p = _write_last_targets(str(tmp_path), {"ES": 1, "NQ": -1})
+    suspect, _ = expected_book_mismatch(p, {"ES": 1, "NQ": -1})
+    assert suspect is False
+
+
+def test_save_last_targets_persists_pending(tmp_path):
+    p = os.path.join(str(tmp_path), "last.json")
+    save_last_targets(p, {"ES": 1, "NQ": 2}, "2026-07-01", pending={"NQ"})
+    with open(p) as fh:
+        data = json.load(fh)
+    assert data["pending"] == ["NQ"]
+
+
+@patch("ibkr_fut.live_dynamic.spread_roll_exec")
+@_roll_patches
+def test_rne_deferred_instrument_reported_unconverged(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol,
+    mock_roll
+):
+    # Market closed → orders deferred → the instrument must be reported
+    # unconverged so the mismatch gate excludes it until it actually fills.
+    mock_open.return_value = False
+    mock_hold.return_value = ("202609", None, 9999)
+    held = {"ES": {"202609": 1}}
+
+    _, _, _, _, unconverged = reconcile_and_execute(
+        _rne_ib(), MagicMock(), {"ES": 3}, held, _MOCK_DIAG,
+        MagicMock(), execute=True)
+
+    assert unconverged == {"ES"}
+
+
+@_roll_patches
+def test_rne_filled_instrument_not_unconverged(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open, mock_vol
+):
+    # A fully-filled rebalance converged — must NOT be excluded from the gate.
+    mock_hold.return_value = ("202609", None, 9999)
+    mock_exec.return_value = _default_fill_result()
+    held = {"ES": {"202609": 1}}
+
+    _, _, _, _, unconverged = reconcile_and_execute(
+        _rne_ib(), MagicMock(), {"ES": 3}, held, _MOCK_DIAG,
+        MagicMock(), execute=True)
+
+    assert unconverged == set()

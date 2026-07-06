@@ -38,18 +38,18 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # run_execution.sh if the heartbeat (ibkr_fut/daemon_heartbeat.txt) is stale
 # >25 min; never restarts while ibkr_fut/risk_halt.txt exists (kill switch).
 # Alerts Discord (rate-limited to one per 2 h); exits silently when fresh.
-*/15 * * * * cd /home/ethan/ibkr && source venv/bin/activate && python3 ibkr_fut/watchdog.py >> /home/ethan/ibkr/ibkr_fut/watchdog_cron.log 2>&1
+*/15 * * * * cd /home/ethan/ibkr && venv/bin/python3 ibkr_fut/watchdog.py >> /home/ethan/ibkr/ibkr_fut/watchdog_cron.log 2>&1
 
 # Regional preflight — exercises live bid/ask (MKTDATA) for instruments whose
 # exchange is open NOW; the 6 PM run inside run_dynamic.sh only covers US
 # sessions. preflight_check.py alerts Discord on failures itself.
 #   Asia  ~9:30 PM ET Sun–Thu (01:30 UTC EDT Mon–Fri)
 #   Eurex ~3:30 AM ET Mon–Fri (07:30 UTC EDT Mon–Fri)
-30 1 * * 1-5 cd /home/ethan/ibkr && source venv/bin/activate && python3 ibkr_fut/preflight_check.py >> /home/ethan/ibkr/ibkr_fut/preflight_cron.log 2>&1
-30 7 * * 1-5 cd /home/ethan/ibkr && source venv/bin/activate && python3 ibkr_fut/preflight_check.py >> /home/ethan/ibkr/ibkr_fut/preflight_cron.log 2>&1
+30 1 * * 1-5 cd /home/ethan/ibkr && venv/bin/python3 ibkr_fut/preflight_check.py >> /home/ethan/ibkr/ibkr_fut/preflight_cron.log 2>&1
+30 7 * * 1-5 cd /home/ethan/ibkr && venv/bin/python3 ibkr_fut/preflight_check.py >> /home/ethan/ibkr/ibkr_fut/preflight_cron.log 2>&1
 
 # Data health check — 6:15 PM ET (22:15 UTC EDT) weekdays, after pst_updater completes.
-15 22 * * 1-5 cd /home/ethan/ibkr && source venv/bin/activate && python3 scripts/data_health_check.py >> /home/ethan/ibkr/scripts/data_health.log 2>&1
+15 22 * * 1-5 cd /home/ethan/ibkr && venv/bin/python3 scripts/data_health_check.py >> /home/ethan/ibkr/scripts/data_health.log 2>&1
 
 # Crypto trend paper trading — 6 AM ET (10:00 UTC EDT) daily.
 0 10 * * * /home/ethan/ibkr/paper/run_paper.sh >> /home/ethan/ibkr/paper/paper_cron.log 2>&1
