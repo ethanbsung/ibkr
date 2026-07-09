@@ -42,4 +42,21 @@ python3 ibkr_fut/preflight_check.py || echo "WARN: preflight reported failures (
 # 4. Run the combined carry+trend dynamic-optimisation executor — compute phase only.
 #    Order execution is handled by the daemon (run_execution.sh), which picks up
 #    the new snapshot automatically.
-python3 ibkr_fut/live_dynamic.py --mode compute
+#    Alert on failure: an OOM SIGKILL here (BUG-21, 2026-07-07: "line 45: Killed")
+#    otherwise leaves no Discord trace until the daemon's stale alert the NEXT
+#    evening — the snapshot silently stays a session behind.
+python3 ibkr_fut/live_dynamic.py --mode compute || {
+    rc=$?
+    python3 - "$rc" <<'PYEOF' || true
+import sys
+sys.path.insert(0, ".")
+from datetime import date
+from ibkr_fut.risk_check import _send_discord
+rc = sys.argv[1]
+_send_discord(f"[COMPUTE-FAILED] live_dynamic --mode compute exited rc={rc} "
+              f"({date.today().isoformat()}) — rc=137 usually means OOM-killed. "
+              f"Snapshot NOT refreshed; daemon will skip execution until a fresh "
+              f"compute runs.")
+PYEOF
+    exit "$rc"
+}

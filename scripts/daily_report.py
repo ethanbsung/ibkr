@@ -549,6 +549,10 @@ def section_daemon_summary() -> tuple[list[str], list[str]]:
         r"\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z\] Cycle done \(DRY-RUN\): (\d+) checked"
     )
     ts_re    = re.compile(r"\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})Z\]")
+    # ib_insync / logging-module lines stamp "YYYY-MM-DD HH:MM:SS,mmm" (UTC host).
+    # Without parsing this too, every ERROR the library ever logged bypasses the
+    # 24h cutoff and is re-reported forever.
+    py_ts_re = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}")
     # Exclude routine noise: reconnects, mkt data sub errors, brief gateway outage
     # Error 354 = no mkt data subscription; Error 300 = cascade cancel after 354
     _BENIGN = ("Peer closed connection", "Disconnecting", "Connection lost",
@@ -560,16 +564,25 @@ def section_daemon_summary() -> tuple[list[str], list[str]]:
     cycles = placed = deferred = errors = 0
     error_lines: list[str] = []
 
+    last_ts = None   # untimestamped lines (tracebacks, wrapped output) inherit this
     for line in content:
-        # Gate by timestamp if present
+        # Gate by timestamp: daemon's own [ISO Z] stamps or logging-module stamps
+        ts = None
         m = ts_re.search(line)
         if m:
+            fmt = "%Y-%m-%dT%H:%M:%S"
+        else:
+            m = py_ts_re.search(line)
+            fmt = "%Y-%m-%d %H:%M:%S"
+        if m:
             try:
-                ts = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=UTC)
-                if ts < cutoff:
-                    continue
+                ts = datetime.strptime(m.group(1), fmt).replace(tzinfo=UTC)
             except ValueError:
                 pass
+        if ts is not None:
+            last_ts = ts
+        if last_ts is not None and last_ts < cutoff:
+            continue
 
         if dry_re.search(line):
             cycles += 1

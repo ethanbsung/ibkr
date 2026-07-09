@@ -18,6 +18,8 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 
 | ID | Sev | Status | One-line |
 |----|-----|--------|----------|
+| BUG-21 | HIGH | OPEN | 1 GB no-swap VPS OOM-kills compute (07-07) or the Gateway (07-08) during the 22:00 UTC run → stale snapshot, daemon skips whole sessions |
+| BUG-22 | LOW | FIXED (working tree) | daily_report daemon-error scan only time-gates `[…Z]` stamps → month-old ib_insync ERROR lines re-reported every morning |
 | BUG-20 | HIGH | FIXED (working tree) | `ib = None` without disconnect() leaks the clientId → error-326 reconnect deadlock (2026-07-05: 3h dead during Sunday open) |
 | BUG-2  | HIGH | OPEN | No visibility into full optimisation output |
 | BUG-14 | MED+ | OPEN | Fills landing after algo_exec gives up are never captured; no execution reconciliation (reqExecutions/orderRef) — Phase 1 |
@@ -52,6 +54,44 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 ## OPEN
 
 ### HIGH
+
+#### [BUG-21] VPS memory exhaustion OOM-kills compute or the Gateway during the nightly 22:00 UTC run — snapshot goes stale, daemon skips entire sessions
+
+**Found 2026-07-08 (live incident, recurring since ~06-18).** The droplet has 957 MB RAM
+and **no swap**. Standing load: IB Gateway java (`-Xmx768m`, RSS 350 MB+ and growing
+through the day), daemon python (~115 MB), Xvfb, tailscaled, snapd. When
+`live_dynamic.py --mode compute` starts (~22:14 UTC, after pst_updater/preflight) and
+loads the 105-instrument × 40-year PST history (grew with commit f468e07, 07-01), the
+box runs out of memory and the kernel kills the largest-RSS process:
+
+- **2026-07-07:** compute itself killed (`run_dynamic.sh: line 45: 982290 Killed`) —
+  no snapshot written, no error alert (cron log only).
+- **2026-07-08:** the **Gateway** killed instead (~22:15 UTC; session log stops, IBC
+  auto-restarts it 22:32) → compute got `ConnectionRefusedError` ×3 → aborted. Same
+  connection-refused signature on 06-18, 06-24, 07-01, 07-02.
+
+**Impact.** Snapshot stayed at 07-06 for two days; the daemon's staleness gate (BUG-15
+fix) correctly refused to trade → `[DAEMON-STALE]` alerts and two skipped sessions.
+The gate failed safe, but the system silently loses whole sessions and the only
+same-night signal is the stale alert at 22:15, after the operator's evening.
+
+**Fix direction.** (1) More memory: swapfile or droplet resize. (2) Optionally trim
+compute's footprint (load PST closes as float32 / only the columns used) and/or lower
+the Gateway heap (IBC `-Xmx768m` is generous for a headless API gateway). (3)
+run_dynamic.sh should alert Discord when compute exits nonzero/killed — the 07-07 kill
+produced no alert at all; the staleness alert only fires the *next* evening's daemon
+cycle. Manual recovery: re-run `--mode compute` once memory is free (raise its
+`oom_score_adj` so a re-kill never takes the Gateway down with it).
+
+**Decision 2026-07-08:** operator will resize the droplet to more RAM (no swapfile).
+(3) implemented in the working tree: run_dynamic.sh now sends `[COMPUTE-FAILED]` with
+the exit code when compute dies. **Verification owed after the resize:** next 22:00 UTC
+run writes a same-day snapshot and the daemon trades it; no `Killed` / ConnectionRefused
+in dynamic_cron.log for a week. Related decision: IBEX_mini stays unsubscribed (MEFF
+data not worth the fee) — its MKTDATA preflight failure is muted via `MKTDATA_MUTED`
+in preflight_check.py; R1000 / TWD-mini (illiquid empty books, OBS-4) still alert.
+
+---
 
 #### [BUG-20] Daemon drops the IB connection without disconnect() — leaked clientId 5 deadlocks every reconnect with error 326
 
@@ -393,6 +433,19 @@ The adverse-price check fires when the market moves against the passive limit si
 ---
 
 ### LOW
+
+#### [BUG-22] daily_report daemon-error scan re-reports month-old errors forever — FIXED (working tree)
+
+**Found 2026-07-08 (user report: June 8–9 errors in every morning report).**
+`section_daemon_summary` (scripts/daily_report.py) gates log lines out of the 24 h
+window only when they carry the daemon's own `[YYYY-MM-DDTHH:MM:SSZ]` stamp. Lines
+logged by ib_insync / the logging module stamp `YYYY-MM-DD HH:MM:SS,mmm` — those never
+match, skip the cutoff, and every non-benign `ERROR` the library ever wrote (e.g. the
+2026-06-08/09 `Error 200` / `Error 1100` burst) is re-counted and re-printed daily; the
+backlog only grows. **Fix (working tree):** parse both stamp formats; untimestamped
+lines (tracebacks, wrapped output) inherit the last seen timestamp so an old entry's
+continuation lines are excluded with it. Verified against the live 65k-line
+`daemon_cron.log`: June errors gone, cycle counts unchanged.
 
 #### [OBS-16] Mass-liquidation guard: un-gated alert spam during an event, and a logical asymmetry
 

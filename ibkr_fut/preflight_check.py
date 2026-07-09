@@ -54,6 +54,13 @@ CLIENT_ID_PREFLIGHT = 7      # daemon=5, compute=6
 MKT_DATA_WAIT_SECS  = 12     # per chunk, matches pre_trade_checks' 10s + margin
 MKT_DATA_CHUNK      = 30     # concurrent market-data lines per batch
 
+# Known/accepted MKTDATA failures, muted from the Discord alert (still printed).
+# The executor fails safe regardless (no order without a live bid/ask), so for
+# instruments we've decided not to fix, the nightly alert is pure noise.
+# Structural checks (CONFIG/ROLLCAL/QUALIFY/HOURS/SPEC) still run and alert.
+#   IBEX_mini — no MEFF market-data subscription, by choice (2026-07-08).
+MKTDATA_MUTED = {"IBEX_mini"}
+
 
 def check_contracts(ib, ibcfg, universe: dict) -> tuple[list, list]:
     """
@@ -146,9 +153,13 @@ def check_market_data(ib, open_now: list) -> list:
         ib.sleep(MKT_DATA_WAIT_SECS)
         for instr, c, t in tickers:
             if not (_valid(t.bid) and _valid(t.ask) and t.bid < t.ask):
-                failures.append((instr, "MKTDATA",
-                                 f"no valid bid/ask while market open "
-                                 f"(bid={t.bid} ask={t.ask}) — check subscription"))
+                if instr in MKTDATA_MUTED:
+                    print(f"    [MKTDATA] {instr}: no valid bid/ask "
+                          f"(bid={t.bid} ask={t.ask}) — muted, known/accepted")
+                else:
+                    failures.append((instr, "MKTDATA",
+                                     f"no valid bid/ask while market open "
+                                     f"(bid={t.bid} ask={t.ask}) — check subscription"))
             ib.cancelMktData(c)
     return failures
 
