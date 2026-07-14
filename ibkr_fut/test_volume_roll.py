@@ -47,6 +47,21 @@ def test_forward_liquid_dead_priced_contract_rolls():
     assert pu.forward_is_liquid(0, 50) is True
 
 
+def test_forward_liquid_weak_rule_gated_by_calendar():
+    # OBS-22: the weak rule (rel > 1%, abs > 100) must not initiate a roll far
+    # from the calendar roll date — CORN rolled Dec26→Dec27 in June off 1.6%
+    # relative volume.
+    assert pu.forward_is_liquid(172766, 2826, near_roll=False) is False
+    assert pu.forward_is_liquid(172766, 2826, near_roll=True) is True
+
+
+def test_forward_liquid_strong_rule_ignores_calendar():
+    # Forward more liquid than front → the market has moved on; roll even if
+    # the calendar date is far (dying-front escape hatch).
+    assert pu.forward_is_liquid(100, 101, near_roll=False) is True
+    assert pu.forward_is_liquid(0, 50, near_roll=False) is True
+
+
 # ── smoothed_volume: EWMA span=3, ignore >14d old, 0.0 when none recent ─────────
 
 def test_smoothed_volume_recent_flat():

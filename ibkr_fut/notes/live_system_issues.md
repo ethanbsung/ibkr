@@ -18,12 +18,17 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 
 | ID | Sev | Status | One-line |
 |----|-----|--------|----------|
+| BUG-25 | CRIT | FIXED (working tree) + data repaired | Volume early roll never persists (splice==today writes no forward rows) → re-fires nightly, re-applying the Panama gap to ALL history each night; 42 instruments corrupted (CORN +482, NIKKEI −2190, WHEAT +228, LEANHOG −127); every forecast since ~mid-June suspect |
+| BUG-23 | HIGH | FIXED (working tree) | Pre-trade divergence check divides PST close by priceMagnifier → every pm≠1 instrument (all CBOT grains, livestock, softs, …) is permanently untradable; CORN -1 unfilled since 06-29 |
+| BUG-24 | MED | FIXED (working tree) | Ledger log_fill uses raw IB multiplier (and pm-divided signal_price) → fill_value/slippage 100× wrong for pm≠1 instruments (latent: no pm≠1 fill yet) |
+| OBS-22 | MED | FIXED (working tree) | Volume rule alone triggers PST early roll (rel>1% + abs>100, no calendar condition) → CORN rolled Dec26→Dec27 ~3.5 months before its RollOffsetDays date; weak rule now gated to EARLY_ROLL_WINDOW_DAYS=30 of roll_date |
 | BUG-21 | HIGH | OPEN | 1 GB no-swap VPS OOM-kills compute (07-07) or the Gateway (07-08) during the 22:00 UTC run → stale snapshot, daemon skips whole sessions |
 | BUG-22 | LOW | FIXED (working tree) | daily_report daemon-error scan only time-gates `[…Z]` stamps → month-old ib_insync ERROR lines re-reported every morning |
 | BUG-20 | HIGH | FIXED (working tree) | `ib = None` without disconnect() leaks the clientId → error-326 reconnect deadlock (2026-07-05: 3h dead during Sunday open) |
 | BUG-2  | HIGH | OPEN | No visibility into full optimisation output |
 | BUG-14 | MED+ | OPEN | Fills landing after algo_exec gives up are never captured; no execution reconciliation (reqExecutions/orderRef) — Phase 1 |
 | BUG-19 | MED | OPEN | Volume-driven early roll becomes a same-night FORCED spread roll with MKT escalation (no passive window) |
+| OBS-23 | LOW | OPEN | Ledger/log commission and fill_value are currency-naive — KR10 fill logged "comm $4212.80" (KRW ≈ $3); non-USD fill_values misstated in trades.csv |
 | OBS-14 | MED | OPEN | DST handled by a crontab comment ("in November add 1h") — silent 1-hour schedule shift twice a year |
 | OBS-15 | MED | OPEN | Daemon loop has no top-level exception guard; crash loses churn counts / alert streaks / day's fill buffer — Phase 1 |
 | SPEED / OBS-1,2,3*,6,7,8,9 | MED | OPEN | Nightly pipeline + execution speed (serial IB round-trips); *OBS-3 resolved |
@@ -53,7 +58,85 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 
 ## OPEN
 
+### CRITICAL
+
+#### [BUG-25] Volume early roll never persists — re-fires every night and re-applies the Panama gap to the entire adjusted history each time
+
+**Found 2026-07-13 (while chasing the CORN mismatch, BUG-23/OBS-22).** When the
+volume rule fires on the open segment, the splice lands on the latest common
+front/forward bar — which during a live session is **today**. The appended
+forward segment is then `[tomorrow, today]` — an empty range — so **no rows are
+ever written under the new contract**: `PRICE_CONTRACT` never advances, and the
+next night the whole roll re-fires. Each firing rewrites the entire adjusted
+history by that day's roll gap (`combined_adj = adj_base + hist_adj`,
+pst_updater.py:612), so the gap **compounds nightly**.
+
+**Measured damage (2026-07-13 audit, adj − PRICE on the final contract segment):**
+CORN +482.25 on a ~463 price (16 nights, forecast pegged −20 = pure artifact);
+NIKKEI −2190; WHEAT +228.50; REDWHEAT +170.75; LEANHOG −127 (on a 75 price);
+SOYBEAN −109.75; GOLD_micro +171.6; PLAT +86; SOYMEAL +48.6 (a **held** short);
+SILVER +4.9; COPPER, HEATOIL, GASOILINE, BRENT-LAST, V2X, FED, SOFR, EURIBOR,
+BITCOIN, FTSECHINAA and more — **42 instruments** with corrupted adjusted
+series. Some loops self-resolved (WHEAT/SOYBEAN/SILVER tails clean) but left the
+accumulated shift baked into history. Every optimiser run since ~mid-June sized
+positions off these series.
+
+**Fix (working tree).** Two-part: (1) the splice now lands strictly before the
+forward's last bar so the appended segment always writes ≥1 forward row and the
+roll persists (pst_updater.py update_prices); (2) the weak liquidity rule is
+calendar-gated (see OBS-22 / EARLY_ROLL_WINDOW_DAYS). Tests in
+test_volume_roll.py extended.
+
+**Data repair (applied on VPS 2026-07-13/14 night).** Backup
+`~/pst_backup_2026-07-13.tar.gz`; all 105 live instruments truncated to
+2026-06-01 with retained history de-shifted by the measured per-instrument K
+(adj − PRICE at the anchor row, e.g. CORN 482.25, NIKKEI −2060+legit-roll);
+roll calendars truncated to pre-June rows; June 1 → today replayed through the
+patched updater (`/tmp/replay_driver.py`); snapshot recomputed off clean data.
+Repair scripts: `/tmp/audit_pst.py`, `/tmp/repair_truncate.py` on the VPS.
+
+**Detection gap.** 16 consecutive nights of `hist adj +NN (roll rewrite)` for
+the same instrument is loud in the log but nothing alerts on it. Add a
+data-health rule: same instrument logging `roll rewrite` >2 consecutive runs, or
+|adj_last − multi.PRICE_last| > 0 after a run, → Discord alert.
+
+---
+
 ### HIGH
+
+#### [BUG-23] Pre-trade divergence check divides the PST close by priceMagnifier — every pm≠1 instrument is permanently untradable
+
+**Found 2026-07-13 (live incident: CORN target -1 never fills, mismatch alerted since
+~06-29).** `reconcile_and_execute` computes the signal price for pre-trade checks as
+`sig_px = raw_px / pm` (live_dynamic.py:1143, `pm` = ib_config `priceMagnifier`). But PST
+prices come straight from IB historical bars (pst_updater stores them unscaled), so
+`raw_px` is **already in IB quote units** — the same units as the live bid/ask that
+`pre_trade_checks` compares against. `priceMagnifier` exists only to convert
+price × IBMultiplier into currency value (effective mult = IBMultiplier / pm — which the
+sizing/diag path already uses correctly: snapshot diag CORN mult=50 = 5000/100).
+
+For CORN (pm=100): sig_px = 463.25/100 = 4.63 vs live ZC ≈ 487 → "price diverged
+~10,400% vs threshold ~15%" → order skipped, every cycle, forever. 31 instruments in
+ib_config have pm≠1 (all CBOT grains incl. CORN/WHEAT/SOYBEAN/REDWHEAT/OATIES, livestock
+LEANHOG/LIVECOW/FEEDCOW, softs COFFEE/COTTON2/SUGAR11/OJ, SOYOIL, FTSE100, INR pm=10000,
+THB/TWD pm=1000, …). None can ever pass pre-trade checks. Latent since the pre-trade
+checks landed (57d0813); never seen before because no pm≠1 instrument had been targeted
+— trades.csv has zero pm≠1 fills.
+
+**Masking.** Outside CBOT grain hours the daemon logs only "DEFERRED — market closed"
+for the same order, so the morning report shows a bare target/held mismatch with no
+divergence reason; the `SKIP pre-trade` lines only appear in overnight cycles nobody
+reads. A SKIP-streak alert (or counting pre-trade skips as unconverged with a reason in
+the report) would have surfaced this in one session instead of ten.
+
+**Fix (working tree, 2026-07-13).** `sig_px = raw_px` (division deleted,
+live_dynamic.py). The same unit error in the ledger call is BUG-24 (also fixed).
+Verification owed: after deploy, the CORN order (whatever the clean-data target is)
+must pass pre-trade and fill during grain hours. NOTE: the −20 CORN forecast that
+drove the −1 target was a BUG-25 artifact — the post-repair recompute decides the
+real target.
+
+---
 
 #### [BUG-21] VPS memory exhaustion OOM-kills compute or the Gateway during the nightly 22:00 UTC run — snapshot goes stale, daemon skips entire sessions
 
@@ -205,6 +288,65 @@ The snapshot `diag` only stores entries for instruments with `target != 0 or cur
 ---
 
 ### MEDIUM
+
+#### [BUG-24] Ledger log_fill gets the raw IB multiplier and the pm-divided signal price — fill_value/slippage 100× wrong for pm≠1 instruments
+
+**Found 2026-07-13 (while diagnosing BUG-23; latent — no pm≠1 fill has ever occurred).**
+Both `ledger.log_fill` call sites (live_dynamic.py:1310, :1368) pass
+`multiplier=ibmult` where `ibmult = float(c.multiplier)` is the **raw IB multiplier**
+(ZC → 5000), and `signal_price=(sig_px or …)` where sig_px carries the BUG-23 division.
+`DynLedger.log_fill` computes `fill_value = fill_price × qty × multiplier` — for a CORN
+fill at 487 (cents) that's $2.4M instead of $24k; `slippage_usd` inherits the same 100×,
+and `slippage_bps` is computed against a signal_price 100× too small. trades.csv is
+currently clean (all historical fills are pm=1 symbols), but the first grain/livestock
+fill after the BUG-23 fix will corrupt the slippage record.
+
+**Fix (working tree, 2026-07-13).** Both log_fill call sites now pass
+`ibmult = float(c.multiplier) / pm`, and signal_price is the undivided PST close
+(BUG-23 fix). Still worth a preflight assert: diag mult ≈ IB multiplier / pm (BUG-5's
+SPEC stage already fetches both).
+
+---
+
+#### [OBS-22] PST volume rule triggers early rolls with no calendar condition — CORN rolled Dec26→Dec27 ~3.5 months early into a 60×-thinner contract
+
+**Found 2026-07-13 (while diagnosing BUG-23).** `pst_updater` rolls the open segment
+whenever `forward_is_liquid(priced_v, fwd_v)` alone says so (pst_updater.py:522-527):
+rel vol > 1% AND abs smoothed vol > 100 (or rel > 1.0). There is no "are we near the
+calendar roll date" condition — `roll_date()` (RollOffsetDays) is consulted only in the
+expiry-backstop branch. In pysystemtrade the liquidity check *gates* a roll the calendar
+already wants; here it *initiates* the roll.
+
+For Dec-only hold cycles this fires absurdly early: CORN (HoldRollCycle=Z,
+RollOffsetDays=-60 → intended roll ~mid-Oct 2026) volume-rolled 202612→202712 in late
+June 2026 the moment Dec-27 crossed 1.6% of Dec-26's volume (smoothed 2,826 vs 172,766).
+Live consequence: the optimiser's CORN short is quoted in Dec-2027 — ~60× thinner, wider
+spread, worse fills — for the next ~15 months. 2026-07-13 alone also volume-rolled
+SOYMEAL/SOYOIL 202610→202612, REDWHEAT 202612→202703 (fwd_v 1,849 < priced_v 8,243),
+LEANHOG/LIVECOW 202610→202612, FEEDCOW 202610→202611, RUBBER 202609→202610 — several
+into *less* liquid months. Compounds BUG-19 (early roll → same-night forced spread roll).
+
+**Fix (working tree, 2026-07-13).** `forward_is_liquid` takes `near_roll`: the weak
+rule (rel > 1% + abs > 100) only fires within `EARLY_ROLL_WINDOW_DAYS = 30` of the
+calendar `roll_date`; the strong rule (forward more liquid than front) still fires
+any time, as does the expiry backstop. Already-rolled calendars/PSTs were repaired as
+part of the BUG-25 data repair (see that entry) — CORN quotes 202612 again. Tests
+added in test_volume_roll.py.
+
+---
+
+#### [OBS-23] Commission and fill_value logging is currency-naive
+
+**Found 2026-07-14 (post-BUG-25 restart cycle).** The daemon logged
+`ORDER SELL 1 FLKTB 202609 → Filled … comm $4212.80` — that is 4,212.80 **KRW**
+(≈ $3) from fill.commissionReport, printed with a dollar sign and written to
+trades.csv unconverted. fill_value for non-USD instruments has the same issue
+(price × multiplier in local currency, no fx). Low priority: position truth and
+sizing are unaffected; only the ledger's cost/slippage records for non-USD
+instruments are misstated. Fix direction: multiply by the instrument fx (already
+in snapshot diag) at log time, or record the currency alongside.
+
+---
 
 #### [BUG-14] Fills landing after algo_exec gives up are never captured; no execution reconciliation
 

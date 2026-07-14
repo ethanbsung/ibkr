@@ -55,6 +55,13 @@ MIN_ABS_VOL          = 100    # smoothed forward volume (contracts) must exceed 
 VOL_IGNORE_DAYS      = 14     # ignore volume bars older than this (stale)
 VOL_EWMA_SPAN        = 3      # exponential smoothing span
 NOTIONALLY_ZERO_VOL  = 0.0001 # avoid div-by-zero when priced volume is ~0
+# The weak liquidity rule (MIN_REL_VOL/MIN_ABS_VOL) *gates* a roll the calendar
+# already wants — it must not initiate one. Without a calendar condition, a
+# Dec-cycle instrument rolls the moment next December picks up 1% relative
+# volume, months early (OBS-22: CORN rolled Dec26→Dec27 in June). Only the
+# strong rule (forward MORE liquid than front, AUTO_ROLL_REL_VOL) may roll
+# regardless of the calendar — that means the market has already moved on.
+EARLY_ROLL_WINDOW_DAYS = 30   # weak-rule rolls allowed this many days before roll_date
 
 # Log to the repo root (this is `~/ibkr/pst_updater.log` on the VPS, which is what
 # scripts/daily_report.py reads for staleness). Resolve against _REPO so it works on
@@ -281,7 +288,8 @@ def _alert_stale(instrument: str, contract: str, last_bar, seg_end: date, action
         log.warning(f"  {instrument}: staleness alert failed ({e})")
 
 
-def forward_is_liquid(priced_vol: float, forward_vol: float) -> bool:
+def forward_is_liquid(priced_vol: float, forward_vol: float,
+                      near_roll: bool = True) -> bool:
     """True when the forward contract is liquid enough to roll into, using
     Carver's rule (check_if_forward_liquid): roll if relative volume is very
     high, OR if it clears a smaller relative bar AND an absolute floor.
@@ -289,12 +297,16 @@ def forward_is_liquid(priced_vol: float, forward_vol: float) -> bool:
     relative_volume normalises the forward to the priced contract; when the
     priced contract has gone no-trade (smoothed ~0) the ratio explodes, which
     is exactly how Carver rolls out of a dying contract.
+
+    near_roll: whether today is within EARLY_ROLL_WINDOW_DAYS of the calendar
+    roll date. The weak rule only *gates* a roll the calendar wants (OBS-22);
+    the strong rule (forward more liquid than front) may fire regardless.
     """
     denom = priced_vol if priced_vol > 0 else NOTIONALLY_ZERO_VOL
     rel = forward_vol / denom
     if rel > AUTO_ROLL_REL_VOL:
         return True
-    if rel > MIN_REL_VOL and forward_vol > MIN_ABS_VOL:
+    if near_roll and rel > MIN_REL_VOL and forward_vol > MIN_ABS_VOL:
         return True
     return False
 
@@ -519,13 +531,24 @@ def update_prices(
         if is_final and not rolled_this_run:
             priced_v = smoothed_volume(front_vol, today) if front_vol is not None else 0.0
             forward_v = smoothed_volume(forward_vol, today) if forward_vol is not None else 0.0
-            vol_roll = (not forward.empty) and forward_is_liquid(priced_v, forward_v)
-            past_roll = roll_date(cy_, cm_, expiry_off, roll_off) <= today
+            r_date = roll_date(cy_, cm_, expiry_off, roll_off)
+            near_roll = (r_date - timedelta(days=EARLY_ROLL_WINDOW_DAYS)) <= today
+            vol_roll = (not forward.empty) and forward_is_liquid(priced_v, forward_v,
+                                                                 near_roll=near_roll)
+            past_roll = r_date <= today
             front_stale = front.empty or (not front.empty
                           and (seg_end - front.index.max()).days > VOL_IGNORE_DAYS)
 
             if vol_roll or (past_roll and front_stale):
                 common = front.index.intersection(forward.index)
+                # Splice strictly before the forward's last bar, so the appended
+                # segment contains at least one forward row. Splicing on the very
+                # last common bar (= today) wrote NO rows under the new contract:
+                # PRICE_CONTRACT never advanced, the roll re-fired every night,
+                # and each night re-applied the Panama gap to the entire adjusted
+                # history (BUG-25 — CORN drifted +482 points in 16 sessions).
+                if len(common) and not forward.empty:
+                    common = common[common < forward.index.max()]
                 if len(common) and not forward.empty:
                     splice = max(common)
                     # Keep the front segment through the splice date; append the

@@ -1140,7 +1140,11 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
         raw_px  = d.get("raw_price")
         fx      = d.get("fx", 1.0)
         dmult   = d.get("mult")
-        sig_px  = (raw_px / pm) if raw_px else None
+        # PST closes come from IB historical bars, so raw_px is already in IB
+        # quote units — same units as the live bid/ask. priceMagnifier only
+        # converts price×IBMultiplier into currency value (BUG-23: dividing here
+        # made every pm≠1 instrument fail the pre-trade divergence check).
+        sig_px  = raw_px if raw_px else None
 
         # ── SPREAD PHASE: roll only the portion that must survive into next month ──
         # Passive rolling (routing rebalance orders to the right leg) is always
@@ -1283,7 +1287,9 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                 print(f"    WARNING: could not qualify {sym} {m} — skip roll close")
                 unconverged.add(instr)
                 continue
-            ibmult = float(c.multiplier) if c.multiplier else 1.0
+            # Effective multiplier: IB quotes pm≠1 instruments in magnified units
+            # (ZC cents), so USD value = price × IBMultiplier / priceMagnifier (BUG-24).
+            ibmult = (float(c.multiplier) if c.multiplier else 1.0) / pm
 
             if not _is_open(c):
                 print(f"    DEFERRED — {sym} {m} market closed")
@@ -1349,7 +1355,7 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                 skipped.append(f"{sym} (market closed)")
                 unconverged.add(instr)
             else:
-                ibmult = float(c.multiplier) if c.multiplier else 1.0
+                ibmult = (float(c.multiplier) if c.multiplier else 1.0) / pm  # BUG-24
                 ok, reason, ticker = pre_trade_checks(ib, c, sig_px, sigma, q)
                 if not ok:
                     print(f"    SKIP pre-trade [{sym} {om}]: {reason}")
