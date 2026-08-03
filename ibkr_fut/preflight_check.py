@@ -59,7 +59,8 @@ MKT_DATA_CHUNK      = 30     # concurrent market-data lines per batch
 # instruments we've decided not to fix, the nightly alert is pure noise.
 # Structural checks (CONFIG/ROLLCAL/QUALIFY/HOURS/SPEC) still run and alert.
 #   IBEX_mini — no MEFF market-data subscription, by choice (2026-07-08).
-MKTDATA_MUTED = {"IBEX_mini"}
+#   R1000 — RSV barely trades; kept for optimiser diversification only (OBS-4).
+MKTDATA_MUTED = {"IBEX_mini", "R1000"}
 
 
 def check_contracts(ib, ibcfg, universe: dict) -> tuple[list, list]:

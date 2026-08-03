@@ -82,7 +82,7 @@ and only trading instruments whose exchange is currently open.
   [`ibkr_fut/notes/live_system_issues.md`](ibkr_fut/notes/live_system_issues.md),
   and each becomes a regression test.
 
-- **Tested.** ~200 automated tests in the futures system alone (≈130 in the
+- **Tested.** 230+ automated tests in the futures system alone (160 in the
   execution suite), covering the optimiser, execution/reconciliation, contract
   rolls, the trading calendar, and each of the failure-mode guards above.
 
@@ -147,8 +147,13 @@ ibkr_fut/          # PRIMARY: live multi-strategy futures system (IBKR)
 etf/live/          # ETF EWMAC strategy executed via Alpaca
 paper/             # crypto trend + carry paper-trading engine (Coinbase)
 research/          # backtests & research (Carver framework, per-instrument studies)
+archive/           # retired live modules + failed experiments, kept deliberately
 Data/              # market-data warehouse (gitignored on the live host)
 ```
+
+`archive/` is kept on purpose rather than deleted: `archive/failed/` is the record of
+strategies that were tested and rejected, and `archive/retired/` holds superseded live
+modules (the IBS strategy that `live_dynamic.py` replaced). Neither is on cron.
 
 ### Key technologies
 

@@ -37,7 +37,7 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 | OBS-18 | LOW | OPEN | Daemon reads roll calendars while pst_updater rewrites them (mostly closed by BUG-18's atomic writes) |
 | OBS-19 | LOW | OPEN | Nightly daemon restart is kill / kill -9 of a possibly-mid-cycle process |
 | OBS-20 | LOW | OPEN | Live/backtest parity of the glue (compute_targets vs _simulate) asserted, not test-enforced |
-| OBS-21 | LOW | OPEN | ~4,800 lines of retired strategy code sit live-looking in ibkr_fut/ (live_port*.py, live_signals.py) |
+| OBS-21 | LOW | RESOLVED | ~4,800 lines of retired strategy code sat live-looking in ibkr_fut/ → moved to archive/retired/ |
 | OBS-4  | LOW | OPEN | R1000 illiquid; RUSSELL_mini never sizes at current capital |
 | OBS-5  | LOW | OPEN | Spread-roll limit rounded to hardcoded 4 decimals, not IB minTick |
 | BUG-10 | CRIT | VERIFY | Gateway restarted at midnight UTC in-window + cold re-auth (jts.ini TZ fix applied 2026-07-01; P1.3 check owed 07-02) |
@@ -637,18 +637,27 @@ does) is asserted in comments and was verified by hand during BUG-9 — no test 
 it. **Fix direction:** a frozen-fixture test — same panel in, assert live
 `compute_targets` == the backtest step's positions — converts "argued" into "checked".
 
-#### [OBS-21] Retired strategy code sits live-looking in ibkr_fut/
-
-**Found 2026-07-01 (audit).** ~4,800 lines of retired code (`live_port.py`,
-`live_port_pc.py`, `live_signals.py` — the last still carrying the known-wrong `[:6]`
-month bug noted in BUG-1) sit alongside the live system. Dead-weight confusion risk for
-any future maintainer/tooling. **Fix direction:** move to `archive/`.
-
 #### [OBS-4] R1000 (RSV) illiquid; RUSSELL_mini too large to ever size at current capital
 
 R1000 maps to symbol RSV (E-mini Russell 1000) on CME. Preflight confirms no bid/ask while market is open — the contract barely trades. Large-cap US is already covered by SP500_micro, NASDAQ_micro, DOW_mini.
 
 **Note**: RUSSELL_mini (RTY, E-mini Russell 2000) at $50 multiplier sizes to an ideal of ~0.11 contracts at $250k capital — perpetually rounds to 0. M2K (E-micro Russell 2000, $5 mult) would size to ~1 contract. Kept in the universe deliberately (diversification in the optimizer even when never traded); no action for now.
+
+**Alert muted 2026-07-16.** The keep-it decision above was made weeks ago, but the
+nightly preflight MKTDATA alert on R1000 kept firing regardless — user reported
+"the same R1000 error for weeks". A permanently-firing alert on an instrument we
+have deliberately chosen never to trade is pure noise, and it trains us to skim
+past the preflight report that also carries real failures (same class of problem
+as BUG-22). R1000 added to `MKTDATA_MUTED` in preflight_check.py, alongside the
+existing IBEX_mini mute and matching that mechanism's stated purpose. The
+executor still fails safe (no order without a live bid/ask), and R1000's
+structural checks (CONFIG/ROLLCAL/QUALIFY/HOURS/SPEC) still run and still alert.
+RUSSELL_mini deliberately **not** muted: RTY quotes fine and would only fail
+MKTDATA if something genuinely broke; its issue is sizing, not data.
+
+Status → effectively closed as "working as intended, alert silenced". Reopen only
+if capital grows enough that RUSSELL_mini sizes (~$2.3M for 1 contract), at which
+point revisit M2K as the better vehicle.
 
 **Related (BUG-4 postscript):** TWD-mini has a genuine forward-data gap at SGX (no TRADES
 or MIDPOINT for forward months) — removal candidate pending a front-month tradability
@@ -799,6 +808,26 @@ Two hygiene gaps: (1) there was **no at-a-glance view of Gateway restart frequen
 ---
 
 ## RESOLVED
+
+#### [OBS-21] Retired strategy code sat live-looking in ibkr_fut/
+
+**Resolved 2026-08-02** (working tree). Verification: the four modules are no longer
+under `ibkr_fut/`; `grep -rn "live_port\|live_signals"` over the repo shows no importer
+outside `archive/` and `research/es/` (the latter are standalone dry-run tests for the
+retired module, which moved with it in spirit — they import by `sys.path`, not package).
+`crontab_vps.txt` has no `run_ibs.sh` / `live_signals.py` entry, confirming nothing on
+cron invoked them.
+
+**Found 2026-07-01 (audit).** ~4,800 lines of retired code (`live_port.py`,
+`live_port_pc.py`, `live_signals.py` — the last still carrying the known-wrong `[:6]`
+month bug noted in BUG-1) sat alongside the live system. Dead-weight confusion risk for
+any future maintainer/tooling.
+
+**Fix.** Moved to `archive/retired/` (`live_port.py`, `live_port_pc.py`,
+`live_signals.py`, plus the `run_ibs.sh` launcher that invoked the last one). The `[:6]`
+bug ships with the archived copy rather than being fixed — the module is retired, and
+BUG-1's note that it "still exists in the retired `live_signals.py`" now reads as
+archived rather than live.
 
 #### [BUG-8] `pst_updater` PST-STALE Discord alerts silently swallowed (`No module named 'ibkr_fut'`)
 
