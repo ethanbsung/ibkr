@@ -171,11 +171,43 @@ omitting `for_date` still dates to today (daemon back-compat).
 `Daily ledger row written for …` line and that daily.csv gains exactly one row per
 weekday thereafter (and that the 22:15 daemon flush no-ops rather than duplicating).
 
-**Backfill still owed (separate step, deliberately not done here).** The 24 already-
-missing rows (06-11 → 08-04) remain absent; cumulative NAV is correct but every
-pre-08-05 risk statistic stays unusable until they are reconstructed from IBKR
-account history. Rewriting the track record is irreversible, so it was scoped as its
-own reviewed change rather than folded into this fix.
+**Backfill DONE 2026-08-05 — rebuilt all 39 rows from IBKR Flex.**
+`scripts/backfill_daily_ledger.py` (new) pulls an Activity Flex statement
+(`EquitySummaryByReportDateInBase.total`, account DUA295747/USD) and rewrites
+daily.csv end-to-end.
+
+*Why a full rebuild rather than inserting the 24.* The planned reconciliation gate
+**failed**: Flex disagreed with all 15 surviving rows (mean −$294, median −$265, worst
+$3,456 = 1.4%, sign 5+/10− i.e. random). Diagnosed as **not** a scoping/parsing error
+— account, currency and best-fit column were verified, lag-0 confirmed — but a genuine
+*measurement-basis* difference: Flex `reportDate` is IBKR's settled end-of-day NAV,
+while the ledger's rows were `NetLiquidation` read at 22:1x UTC (6:1x PM ET), just
+after the futures reopen while Asian/European positions are still moving. Keeping the
+15 and splicing in 24 would have mixed two bases in one column with a ~$300 step at
+every boundary — the exact corruption the gate exists to catch. Flex covers all 39
+days, so it was taken wholesale for a single authoritative basis.
+
+*Result (restatement is intended, not data loss).* 15 → **39 rows**; cumulative
+**−1.8813% → −1.5248%**; annual vol **27.78% → 13.55%** (the old figure was inflated
+by multi-day returns labelled daily). The new cumulative matches the same-period
+backtest's −1.52% almost exactly — corroboration that the settled-close basis is the
+right one. Verification that ran: ChangeInNAV vs EquitySummary cross-check (64 dates
+agree within $1), 39/39 coverage, restatement-distribution gate against the probe,
+chain integrity, and `report()` + `daily_report.py` rendering clean.
+
+*Caveat recorded for future readers:* the cumulative-return check is **necessary but
+not sufficient** — the chain telescopes to `E_n/E_0`, so corrupted intermediate rows
+still land on the correct final NAV (verified: 10 deliberately corrupted rows gave an
+identical −1.8813%, only vol moved 0.13% → 11.55%). Value correctness came from the
+cross-check and restatement gates, never from the cumulative assertion.
+
+*Schema.* daily.csv gained a `source` column (`live` | `flex`), added to `DAILY_COLS`
+in the same commit as the rebuild, plus a `_check_daily_header()` guard that aborts
+`log_daily` if the on-disk header ever drifts from `DAILY_COLS` — without both halves
+a half-deploy silently misaligns the CSV (it caught exactly that during testing).
+
+*Backups:* `~/ledger_backups/ibkr_dynamic_pre_flex_backfill_20260805_214848Z.tar.gz`
+on the VPS plus an off-box copy, and the raw Flex XML.
 
 #### [BUG-23] Pre-trade divergence check divides the PST close by priceMagnifier — every pm≠1 instrument is permanently untradable
 

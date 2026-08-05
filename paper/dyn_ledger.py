@@ -46,6 +46,12 @@ DAILY_COLS = [
     "date", "equity", "daily_pnl_usd", "ret",
     "nav", "n_trades", "commission", "slippage_usd",
     "n_positions", "gross_leverage",
+    # Provenance. "live" = written by log_daily during normal operation;
+    # "flex" = reconstructed from an IBKR Flex statement by
+    # scripts/backfill_daily_ledger.py (the BUG-26 backfill). Keep last: the
+    # column was appended to an existing schema, and _check_header below refuses
+    # to append if the on-disk header ever drifts from this list.
+    "source",
 ]
 TRADE_COLS = [
     "timestamp", "date", "symbol", "contract", "action", "qty", "multiplier",
@@ -87,6 +93,33 @@ def _read_csv(path, cols):
     if not os.path.exists(path):
         return pd.DataFrame(columns=cols)
     return pd.read_csv(path)
+
+def _check_daily_header():
+    """
+    Refuse to append if daily.csv's header has drifted from DAILY_COLS.
+
+    _append_csv writes a header ONLY when the file is new, and csv.DictWriter
+    silently omits keys the row dict lacks. So a half-deploy corrupts the ledger
+    quietly in either direction: adding a column to DAILY_COLS without rewriting
+    the file appends N+1 fields under an N-field header (misalignment), while
+    rewriting the file without updating DAILY_COLS writes N fields under an N+1
+    header (the new column silently blank). Failing loudly here beats either.
+    """
+    if not os.path.exists(DAILY_PATH) or os.path.getsize(DAILY_PATH) == 0:
+        return
+    with open(DAILY_PATH) as fh:
+        header = (fh.readline() or "").strip()
+    if not header:
+        return
+    on_disk = [c.strip() for c in header.split(",")]
+    if on_disk != DAILY_COLS:
+        raise RuntimeError(
+            f"daily.csv header does not match DAILY_COLS — refusing to append.\n"
+            f"  on disk: {on_disk}\n"
+            f"  expected: {DAILY_COLS}\n"
+            f"Rebuild the file (scripts/backfill_daily_ledger.py) or align the schema."
+        )
+
 
 def _fills_on(day: str):
     """
@@ -197,6 +230,8 @@ class DynLedger:
         """
         today = for_date or date_t.today().isoformat()
 
+        _check_daily_header()
+
         if os.path.exists(DAILY_PATH):
             tail = pd.read_csv(DAILY_PATH).tail(1)
             if not tail.empty and str(tail["date"].iloc[-1]) >= today:
@@ -263,6 +298,7 @@ class DynLedger:
             "slippage_usd":   round(slippage, 2),
             "n_positions":    n_positions if n_positions is not None else "",
             "gross_leverage": round(gross_leverage, 3) if gross_leverage is not None else "",
+            "source":         "live",
         }])
 
         pos_rows = []

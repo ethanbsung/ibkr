@@ -61,13 +61,16 @@ CRONS = {
     "pst_updater":  ("pst_updater.log",              {0,1,2,3,4},      22,   6,    True),
     "compute":      ("ibkr_fut/dynamic_cron.log",    {0,1,2,3,4},      22,   6,    True),
     "daemon":       ("ibkr_fut/daemon_cron.log",     None,             None, 24,   False),
-    "etf_daily":    ("paper/etf_daily.log",          {0,1,2,3,4},      19,   6,    True),
+    # etf_daily retired 2026-08-05 — its cron is disabled, so health-checking it
+    # would alert every morning about a job that is meant to be gone.
     "crypto_paper": ("paper/paper_cron.log",         None,             10,   16,   False),
 }
 
 LEDGERS = {
     "ibkr_dynamic": REPO / "paper" / "ledgers" / "ibkr_dynamic",
-    "etf_ewmac":    REPO / "paper" / "ledgers" / "etf_ewmac",
+    # etf_ewmac retired 2026-08-05 — strategy discontinued, cron disabled. Its
+    # ledger stays on disk as the historical record but is no longer reported
+    # (it would otherwise show a frozen NAV forever).
     "crypto_trend": REPO / "paper" / "ledgers" / "crypto_trend",
     "crypto_carry": REPO / "paper" / "ledgers" / "crypto_carry",
 }
