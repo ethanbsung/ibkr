@@ -88,6 +88,31 @@ def _read_csv(path, cols):
         return pd.DataFrame(columns=cols)
     return pd.read_csv(path)
 
+def _fills_on(day: str):
+    """
+    (n_trades, commission, slippage_usd) from trades.csv for one ISO date.
+
+    Process-independent: reads the on-disk fill record rather than any single
+    run's in-memory buffer, so the daily row is correct no matter which process
+    executed the fills or flushed the row (BUG-26). Returns zeros if the file is
+    missing or unreadable — the caller falls back to its own buffer.
+    """
+    try:
+        if not os.path.exists(TRADES_PATH) or os.path.getsize(TRADES_PATH) == 0:
+            return 0, 0.0, 0.0
+        df = pd.read_csv(TRADES_PATH)
+        if df.empty or "date" not in df.columns:
+            return 0, 0.0, 0.0
+        rows = df[df["date"].astype(str) == str(day)]
+        if rows.empty:
+            return 0, 0.0, 0.0
+        comm = pd.to_numeric(rows["commission"],   errors="coerce").fillna(0).sum()
+        slip = pd.to_numeric(rows["slippage_usd"], errors="coerce").fillna(0).sum()
+        return len(rows), float(comm), float(slip)
+    except Exception:
+        return 0, 0.0, 0.0
+
+
 def _return_metrics(rets):
     r = rets.dropna()
     if len(r) < 5:
@@ -155,13 +180,22 @@ class DynLedger:
         _append_csv(TRADES_PATH, TRADE_COLS, [row])
         self._fills_today.append(row)
 
-    def log_daily(self, ib, *, n_positions=None, gross_leverage=None):
+    def log_daily(self, ib, *, n_positions=None, gross_leverage=None,
+                  for_date=None):
         """
         Snapshot account equity + positions from a live IB connection.
-        Idempotent — skips if today already has a daily entry.
+        Idempotent — skips if `for_date` already has a daily entry.
         Call once per trading day, at the end of the execution run.
+
+        for_date — ISO date string the row is stamped with (default: today).
+            Callers on the VPS run at ~22:0x UTC = ~6:0x PM ET, which is the ET
+            session that just settled, so the UTC date is the correct anchor.
+
+        Safe to call from more than one process (BUG-26): the compute phase owns
+        the flush, the daemon keeps calling it as a backstop, and whichever runs
+        first wins — the date guard below makes the second call a no-op.
         """
-        today = date_t.today().isoformat()
+        today = for_date or date_t.today().isoformat()
 
         if os.path.exists(DAILY_PATH):
             tail = pd.read_csv(DAILY_PATH).tail(1)
@@ -195,15 +229,28 @@ class DynLedger:
             )
             init_equity = equity - open_unrealized
 
+        # A header-only daily.csv is non-empty on disk but has no rows, so guard
+        # on the frame rather than the file size (else .iloc[-1] IndexErrors on
+        # the very first flush of a fresh/reset ledger).
+        prev_nav = 1.0
         if os.path.exists(DAILY_PATH) and os.path.getsize(DAILY_PATH) > 0:
-            prev_nav = pd.read_csv(DAILY_PATH)["nav"].iloc[-1]
-        else:
-            prev_nav = 1.0
+            _prev = pd.read_csv(DAILY_PATH)
+            if not _prev.empty and "nav" in _prev.columns:
+                prev_nav = float(_prev["nav"].iloc[-1])
         nav = prev_nav * (1 + ret)
 
-        n_trades   = len(self._fills_today)
-        commission = sum(f["commission"]   for f in self._fills_today)
-        slippage   = sum(f["slippage_usd"] for f in self._fills_today)
+        # Cost columns come from trades.csv filtered to this date, NOT from the
+        # in-memory buffer (BUG-26): _fills_today only holds the fills seen by
+        # *this* process, so a flush from the compute phase — or from a daemon
+        # restarted mid-session — would otherwise report 0 trades for a day that
+        # actually traded. trades.csv is appended at fill time by whichever
+        # process executed, so it is the complete record.
+        n_trades, commission, slippage = _fills_on(today)
+        if n_trades == 0 and self._fills_today:
+            # trades.csv unreadable/absent — fall back to what this process saw.
+            n_trades   = len(self._fills_today)
+            commission = sum(f["commission"]   for f in self._fills_today)
+            slippage   = sum(f["slippage_usd"] for f in self._fills_today)
 
         _append_csv(DAILY_PATH, DAILY_COLS, [{
             "date":           today,

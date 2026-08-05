@@ -1895,6 +1895,30 @@ def main():
         print(f"\n  Snapshot saved → {SNAPSHOT_PATH}")
 
         if args.mode == "compute":
+            # ── Daily ledger flush (BUG-26) ───────────────────────────────────
+            # The compute phase owns the daily row, NOT the daemon. The daemon is
+            # killed and restarted by cron at 22:15 UTC, which resets its
+            # in-memory snapshot_computed_at to None; its flush is then suppressed
+            # by the `is not None` guard, so on the normal path the row was never
+            # written (24 of 39 business days missing, 06-11 → 08-04).
+            #
+            # Running here fixes that: compute is a plain Mon–Fri cron job whose
+            # flush cannot be lost to a restart, and it runs at ~22:0x UTC =
+            # ~6:0x PM ET, so date_t.today() names the ET session that just
+            # settled — the same anchor the surviving rows already use.
+            # log_daily is idempotent per date, so the daemon's own flush (kept
+            # as a backstop) is a harmless no-op once this has run.
+            try:
+                DynLedger().log_daily(ib,
+                                      n_positions=meta.get("n_held_target"),
+                                      gross_leverage=meta.get("gross_lev"))
+                print(f"  Daily ledger row written for {date.today().isoformat()}")
+            except Exception as e:
+                # Never let a bookkeeping failure abort compute — the snapshot is
+                # already saved and the daemon must be free to trade it.
+                print(f"  WARNING: daily ledger flush failed: {e}\n"
+                      f"{traceback.format_exc()}")
+
             ib.disconnect()
             print(f"\n  Compute done. Run --mode execute --execute to place orders.")
             return

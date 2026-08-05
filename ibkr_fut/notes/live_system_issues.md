@@ -25,6 +25,8 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 | BUG-21 | HIGH | OPEN | 1 GB no-swap VPS OOM-kills compute (07-07) or the Gateway (07-08) during the 22:00 UTC run → stale snapshot, daemon skips whole sessions |
 | BUG-22 | LOW | FIXED (working tree) | daily_report daemon-error scan only time-gates `[…Z]` stamps → month-old ib_insync ERROR lines re-reported every morning |
 | BUG-20 | HIGH | FIXED (working tree) | `ib = None` without disconnect() leaks the clientId → error-326 reconnect deadlock (2026-07-05: 3h dead during Sunday open) |
+| BUG-26 | HIGH | FIXED (working tree) — VERIFICATION OWED + backfill owed | Daily ledger only flushes on a snapshot *change seen by a live daemon*; the 22:15 restart resets `snapshot_computed_at=None` so the post-restart load never flushes → 24 of 39 business days missing from daily.csv; each surviving `ret` is a multi-day return mislabelled as daily (vol/Sharpe/drawdown all wrong). Flush moved to the compute phase; cost columns now read from trades.csv |
+| BUG-27 | MED | OPEN | algo_exec chases `ticker.ask` while IB caps the limit (error 2161) → 30 min of unfillable aggressive orders (SXPP 08-05, lmt 842 vs cap 826.5); also reports `avg_price` 823.9 on a 0-filled Cancelled order |
 | BUG-2  | HIGH | OPEN | No visibility into full optimisation output |
 | BUG-14 | MED+ | OPEN | Fills landing after algo_exec gives up are never captured; no execution reconciliation (reqExecutions/orderRef) — Phase 1 |
 | BUG-19 | MED | OPEN | Volume-driven early roll becomes a same-night FORCED spread roll with MKT escalation (no passive window) |
@@ -100,9 +102,80 @@ the same instrument is loud in the log but nothing alerts on it. Add a
 data-health rule: same instrument logging `roll rewrite` >2 consecutive runs, or
 |adj_last − multi.PRICE_last| > 0 after a run, → Discord alert.
 
+**Verification 2026-08-05 (holds).** Swept all 105 UNIVERSE instruments comparing
+the adjusted series to `multiple_prices.PRICE` on the *current* contract segment
+(where back-adjustment anchors, so K should be ~0): **every instrument clean**, no
+offset >0.5% of price. Post-repair `roll rewrite` lines are now isolated genuine
+rolls on non-tradable monthlies (V2X 5 dates, CHEESE 3, HEATOIL/GASOILINE/FED/
+EURIBOR/GAS-LAST 2 each) with sign-alternating sub-1% adjustments — not the
+compounding same-instrument-every-night signature. The detection gap above is
+still unimplemented.
+
 ---
 
 ### HIGH
+
+#### [BUG-26] Daily ledger misses 62% of trading days — the flush is tied to a snapshot change *observed by a living daemon*, and the nightly restart destroys that state
+
+**Found 2026-08-05 (return audit, 06-11 → 08-04).** `daily.csv` has **15 rows over 39
+business days — 24 missing**. Not a logging failure: the flush never runs.
+
+`run_daemon` initialises `snapshot_computed_at = None` (live_dynamic.py:1513) and only
+flushes when a *changed* `computed_at` is seen by an already-running daemon
+(`if snapshot_computed_at is not None`, :1566). But cron kills and restarts the daemon
+at 22:15 UTC nightly, while compute writes the new snapshot at ~22:10 — so on the
+normal path the fresh daemon's **first** load is the new snapshot, hits the
+`is not None` guard, and yesterday's ledger row is silently dropped. A row only
+survives when a daemon happens to be alive *across* a snapshot write (compute ran late,
+or an intraday recompute) — which is exactly the 14 flushes seen against 43 restarts.
+
+**Why it matters beyond bookkeeping.** `log_daily` derives `daily_pnl` from
+`equity - prev_equity` when IB's `DailyPnL` tag is absent, so each surviving row
+carries the P&L of *every* skipped day. 2026-07-10→07-17 is logged as one +0.010%
+"day" spanning 5 sessions; 07-31→08-03 as −3.61% spanning 1. Consequently `ret`/`nav`
+are a series of multi-day returns labelled daily: cumulative NAV is still correct
+(−1.88%, ties to equity), but **every risk statistic computed from this file — daily
+vol, Sharpe, drawdown, the live-vs-backtest tracking comparison — is wrong**, and
+`n_trades`/`commission`/`slippage` only count the fills buffered by the one daemon
+instance that happened to flush.
+
+**Fix (working tree, 2026-08-05).** Ownership of the daily row moved from the daemon
+to the **compute phase**, which cannot lose it to a restart:
+
+1. `live_dynamic.py` — compute mode calls `DynLedger().log_daily(ib, …)` after
+   `save_snapshot`, while its own IB connection (`CLIENT_ID_COMPUTE=6`, distinct from
+   the daemon's 5) is still open, wrapped so a bookkeeping failure can never abort
+   compute. Compute is a plain Mon–Fri 22:00 UTC cron job; at ~22:0x UTC = ~6:0x PM
+   ET, `date.today()` names the ET session that just settled — the *same* anchor the
+   13 surviving rows already use, so history stays continuous with no date-semantics
+   break. The daemon's flush is deliberately **kept** as a backstop (it still covers
+   intraday recomputes like 07-09 02:32); `log_daily`'s existing `tail["date"] >=
+   today` guard makes whichever runs second a no-op.
+2. `dyn_ledger.py` — `log_daily` takes an explicit `for_date`, and
+   `n_trades`/`commission`/`slippage_usd` now come from a new `_fills_on(day)` that
+   reads **trades.csv** filtered to the date instead of the in-memory `_fills_today`.
+   That buffer only ever held the fills seen by *one* process, so a compute-phase
+   flush would otherwise report 0 trades for a day that traded; the buffer remains as
+   a fallback when trades.csv is unreadable. Also fixed an adjacent latent crash: a
+   header-only daily.csv passes `getsize > 0` but has no rows, so `["nav"].iloc[-1]`
+   raised IndexError on the first flush of a fresh ledger.
+
+**Test (scratchpad, 11 assertions, all pass).** Against a copy of the real ledger:
+row written for the target date; a second flush from a *fresh* DynLedger does not
+duplicate (idempotent); `n_trades=2 / comm=4.85` sourced from trades.csv where the
+old code would have written 0; `ret` computed off prior equity and `nav` chained from
+prior nav; no-trade day writes zeros; trades.csv absent falls back to the buffer;
+omitting `for_date` still dates to today (daemon back-compat).
+
+**Verification owed.** Confirm tonight's 22:00 UTC compute writes the
+`Daily ledger row written for …` line and that daily.csv gains exactly one row per
+weekday thereafter (and that the 22:15 daemon flush no-ops rather than duplicating).
+
+**Backfill still owed (separate step, deliberately not done here).** The 24 already-
+missing rows (06-11 → 08-04) remain absent; cumulative NAV is correct but every
+pre-08-05 risk statistic stays unusable until they are reconstructed from IBKR
+account history. Rewriting the track record is irreversible, so it was scoped as its
+own reviewed change rather than folded into this fix.
 
 #### [BUG-23] Pre-trade divergence check divides the PST close by priceMagnifier — every pm≠1 instrument is permanently untradable
 
@@ -288,6 +361,39 @@ The snapshot `diag` only stores entries for instruments with `target != 0 or cur
 ---
 
 ### MEDIUM
+
+#### [BUG-27] Aggressive chase fights IB's regulatory limit cap (error 2161) — 30 min of unfillable orders; Cancelled results also report a phantom avg_price
+
+**Found 2026-08-05 (live, EU-BASIC/SXPP buy-to-close).** Three consecutive cycles
+placed `BUY 1 SXPP 202609`, switched to AGGRESSIVE, and chased `ticker.ask` (~842) for
+the full 600 s `TOTAL_TIME_OUT` with `filled=0` every tick. IB had replied with
+**error 2161** on each: *"we will initially cap the price of your Limit Order to
+826.5 … If your order is not immediately executable … you will not receive a fill."*
+The quoted ask was ~16 points beyond the cap, so the chase was unfillable by
+construction; ~30 minutes and 3 order cycles were burned before the 4th attempt
+happened to fill **passively** at 835.7.
+
+Two distinct defects:
+1. **2161 is ignored.** `algo_exec` (algo_execution.py:199-203) re-prices to
+   `ticker.ask`/`ticker.bid` with no awareness of the broker's cap, so it repeats a
+   limit IB has already said it will not honour. `_reject_reason` doesn't treat 2161
+   as terminal either (correctly — it's a warning, not a rejection), so nothing
+   escalates. Fix direction: parse the cap out of the 2161 text (or track
+   `order.lmtPrice` vs the effective limit IB echoes back) and clamp the chase to it;
+   if the cap makes the order unfillable for N ticks, stop re-placing and defer to the
+   next cycle instead of holding a dead order for 10 minutes.
+2. **Phantom `avg_price` on a 0-fill.** The same cancelled orders logged
+   `→ Cancelled  fill 823.9000` while `filled_qty == 0`. `avg_price` is read straight
+   from `trade.orderStatus.avgFillPrice` (:209), which IB populates with a reference
+   price here. The caller is saved only by the `result.avg_price > 0 and status in
+   (Filled, PartiallyFilled)` guard at the `log_fill` sites — but the printed log line
+   is actively misleading (it reads like a fill at 823.9). Zero `avg_price` whenever
+   `filled_qty == 0`.
+
+Cost this instance: bounded (the position closed 1 h later at 835.7 vs an ~826.5 cap
+— roughly 9 points × 50 mult ≈ **$460** worse than the capped price, plus the
+directional drift over the delay). Recurs whenever the offside quote sits outside IB's
+cap band — thin/fast European books most likely.
 
 #### [BUG-24] Ledger log_fill gets the raw IB multiplier and the pm-divided signal price — fill_value/slippage 100× wrong for pm≠1 instruments
 
