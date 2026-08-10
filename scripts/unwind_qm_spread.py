@@ -83,14 +83,19 @@ def plan_legs(front, back, target):
     wants. Both are pure reductions toward zero; neither can flip a sign.
     """
     legs = []
-    if back != 0:
-        # Close the short far leg (it exists only as an artifact of the loop).
-        legs.append((BACK_CONID, "BUY" if back < 0 else "SELL", abs(back),
-                     f"close phantom back leg ({back:+d} → 0)"))
+    # ORDER MATTERS. The two legs offset each other for margin purposes, so
+    # removing the SHORT leg first would strip that offset and leave a naked +64
+    # long — spiking initial margin exactly when AvailableFunds is the binding
+    # constraint (the same wall that rejected the daemon's rolls). Reduce the
+    # oversized LONG leg first: every chunk frees margin and makes the rest safer.
     delta = target - front
     if delta != 0:
         legs.append((FRONT_CONID, "BUY" if delta > 0 else "SELL", abs(delta),
                      f"reduce front leg to target ({front:+d} → {target:+d})"))
+    if back != 0:
+        # Then close the short far leg (an artifact of the roll loop).
+        legs.append((BACK_CONID, "BUY" if back < 0 else "SELL", abs(back),
+                     f"close phantom back leg ({back:+d} → 0)"))
     return legs
 
 

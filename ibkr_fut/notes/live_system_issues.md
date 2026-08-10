@@ -26,7 +26,7 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 | BUG-22 | LOW | FIXED (working tree) | daily_report daemon-error scan only time-gates `[…Z]` stamps → month-old ib_insync ERROR lines re-reported every morning |
 | BUG-20 | HIGH | FIXED (working tree) | `ib = None` without disconnect() leaks the clientId → error-326 reconnect deadlock (2026-07-05: 3h dead during Sunday open) |
 | BUG-26 | HIGH | FIXED (working tree) — VERIFICATION OWED + backfill owed | Daily ledger only flushes on a snapshot *change seen by a live daemon*; the 22:15 restart resets `snapshot_computed_at=None` so the post-restart load never flushes → 24 of 39 business days missing from daily.csv; each surviving `ret` is a multi-day return mislabelled as daily (vol/Sharpe/drawdown all wrong). Flush moved to the compute phase; cost columns now read from trades.csv |
-| BUG-28 | CRIT | FIXED (working tree) — UNWIND OWED | Poisoned delivery-month cache mis-filed QM one month early → daemon rolled a phantom calendar spread 1→2→4→8→16→32→64 and spammed IB with 115 rejected 64-lot rolls / 372 error-201s over ~36h; live book left at +64 QMV6 / −63 QMX6 against a 1-lot target. Churn breaker never fired (spread-roll path never registered a trade) |
+| BUG-28 | CRIT | FIXED + DEPLOYED + UNWOUND (090d536, 2026-08-10) | Poisoned delivery-month cache mis-filed QM one month early → daemon rolled a phantom calendar spread 1→2→4→8→16→32→64 and spammed IB with 115 rejected 64-lot rolls / 372 error-201s over ~36h; live book left at +64 QMV6 / −63 QMX6 against a 1-lot target. Churn breaker never fired (spread-roll path never registered a trade) |
 | BUG-27 | MED | OPEN | algo_exec chases `ticker.ask` while IB caps the limit (error 2161) → 30 min of unfillable aggressive orders (SXPP 08-05, lmt 842 vs cap 826.5); also reports `avg_price` 823.9 on a 0-filled Cancelled order |
 | BUG-2  | HIGH | OPEN | No visibility into full optimisation output |
 | BUG-14 | MED+ | OPEN | Fills landing after algo_exec gives up are never captured; no execution reconciliation (reqExecutions/orderRef) — Phase 1 |
@@ -135,10 +135,34 @@ Regression tests in `test_execution.py`: fallback-not-cached + self-correction, 
 skip vs non-energy fallback retained, churn registration, oversized-roll halt, and the
 `min(64, 1−(−63)) = 64` arithmetic itself. 170 pass.
 
-**Still owed.** The live +64/−63 spread must be unwound —
-`scripts/unwind_qm_spread.py` (dry-run by default, chunked, refuses to run unless the
-daemon is halted). Separately, `targets_snapshot.json` is stale at 2026-08-07; compute
-has not produced a fresh snapshot in 3 days and may share the connectivity root cause.
+**Deployed + remediated 2026-08-10 (commit 090d536).** Daemon halted 17:25Z (exited
+cleanly on the kill switch, ending ~36h of rejections), fix deployed, position unwound,
+halt file removed.
+
+The unwind was **not** clean and the sequencing lesson matters. `plan_legs` originally
+closed the short back leg first; that strips the calendar spread's margin offset and
+leaves a naked long, so the order was reversed to reduce the oversized LONG leg first
+(each chunk frees margin). Even so, with `AvailableFunds` at only $85k the front-leg
+reduction was rejected mid-run ("MARGIN DEFICIT") after 32 of 63 lots, while the back
+leg then closed in full — leaving a **naked +32 QMV6 and AvailableFunds at −$55,128,
+ExcessLiquidity $9,053**, i.e. near forced liquidation. A follow-up reduce-only pass in
+4-lot chunks brought the front leg to +1 and restored the account.
+
+| | pre-unwind | mid-unwind (deficit) | final |
+|---|---|---|---|
+| QMV6 | +64 | +32 | **+1** |
+| QMX6 | −63 | 0 | **0** |
+| AvailableFunds | 85,552 | **−55,128** | **217,601** |
+| FullInitMarginReq | 161,222 | 297,815 | **25,453** |
+
+Verified post-fix: `get_positions_by_instr` returns `CRUDE_W_mini -> {'202610': 1}` —
+the true delivery month, matching the roll calendar.
+
+**Follow-up owed.** `unwind_qm_spread.py` should interleave the two legs (alternate
+chunks) rather than draining one before the other, so the spread's margin offset is
+preserved throughout; as written, a mid-run stop can leave a *more* dangerous naked
+position than it started with. Also note `scripts/` has no pytest on the VPS, so the
+suite only runs locally.
 
 #### [BUG-25] Volume early roll never persists — re-fires every night and re-applies the Panama gap to the entire adjusted history each time
 
