@@ -126,6 +126,13 @@ PASSIVE_ROLL_DAYS = 10   # days before roll date: start routing rebalance orders
 SPREAD_ROLL_DAYS  = 3    # days before roll date: roll residual via BAG spread order
 FORCE_ROLL_DAYS   = 1    # ≤ this many days to roll date: position MUST leave the
                          # expiring month — a failed spread limit escalates to MKT
+# Sanity bound on a computed spread-roll size (BUG-28). A roll moves an EXISTING
+# position between months, so it can never legitimately dwarf the target. If the
+# computed roll exceeds both of these, the month accounting is corrupt — halt
+# rather than send the order (the QM runaway sent 64 lots against a 1-lot target
+# 115 times before IB's margin check, not our own code, stopped it).
+MAX_ROLL_VS_TARGET   = 10   # roll may not exceed this multiple of |target|
+MAX_ROLL_ABS_SLACK   = 5    # …and only bites above this absolute size
 SPREAD_PASSIVE_SECS = 60 # seconds to work the spread limit before cancelling
 SPREAD_CANCEL_CONFIRM_SECS = 30  # max wait for cancel-ack before abandoning MKT escalation
 
@@ -191,7 +198,7 @@ pst = PSTLoader()
 _CONID_MONTH_CACHE: dict[int, str] = {}
 
 
-def delivery_month(ib, contract) -> str:
+def delivery_month(ib, contract) -> tuple[str, bool]:
     """
     True delivery month (YYYYMM) for a futures contract.
 
@@ -201,23 +208,35 @@ def delivery_month(ib, contract) -> str:
     so [:6] would mis-map it to 202608. ContractDetails.contractMonth is the canonical
     delivery month and matches the roll-calendar YYYYMM codes, so positions reconcile
     against the right roll-calendar month instead of triggering phantom rolls.
-    Falls back to the expiry-date prefix only if contractMonth is unavailable.
+    Returns (month, authoritative). `authoritative` is True only when the month
+    came from ContractDetails.contractMonth; False means the value is the guessed
+    expiry-prefix fallback, which is WRONG BY ONE MONTH for energy.
+
+    A guessed month is never cached (BUG-28). The old code cached it for the
+    daemon's lifetime, so one transient reqContractDetails failure during a
+    gateway drop permanently mis-filed QM's +1 under a phantom month, corrupting
+    every subsequent roll calculation until the position hit 64 lots.
     """
     cid = getattr(contract, "conId", 0)
     if cid and cid in _CONID_MONTH_CACHE:
-        return _CONID_MONTH_CACHE[cid]
+        return _CONID_MONTH_CACHE[cid], True
     month = ""
     try:
         cds = ib.reqContractDetails(contract)
         if cds and cds[0].contractMonth:
             month = str(cds[0].contractMonth)[:6]
-    except Exception:
+    except Exception as e:
+        print(f"[{_now()}] WARNING: reqContractDetails failed for "
+              f"{getattr(contract, 'localSymbol', '') or contract.symbol} ({e}) "
+              f"— delivery month unresolved")
         month = ""
-    if not month:                                   # safe fallback
-        month = (contract.lastTradeDateOrContractMonth or "")[:6]
-    if cid:
-        _CONID_MONTH_CACHE[cid] = month
-    return month
+    if month:
+        if cid:
+            _CONID_MONTH_CACHE[cid] = month         # cache ONLY the authoritative value
+        return month, True
+    # Guessed fallback: correct for most families, off by one for energy. Return it
+    # for the caller to judge, but do NOT cache — the next cycle must retry.
+    return (contract.lastTradeDateOrContractMonth or "")[:6], False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -570,7 +589,18 @@ def get_positions_by_instr(ib, ibcfg: pd.DataFrame,
         if instr is None:
             unknown.append((c.symbol, c.exchange, qty))
             continue
-        month = delivery_month(ib, c)
+        month, authoritative = delivery_month(ib, c)
+        if not authoritative and UNIVERSE.get(instr) == "Energy":
+            # Energy expiry PRECEDES delivery by a month, so the expiry-prefix
+            # fallback is knowably wrong here. Filing the position under a guessed
+            # month corrupts roll accounting far worse than skipping a cycle does
+            # (BUG-28: a mis-filed QM +1 compounded into a 64-lot phantom spread).
+            # Report it unknown so the caller skips the instrument and alerts.
+            print(f"[{_now()}] [RISK] {c.symbol} {getattr(c, 'localSymbol', '')}: "
+                  f"delivery month unresolved and expiry-prefix fallback is unsafe "
+                  f"for Energy — refusing to guess; instrument skipped this cycle")
+            unknown.append((c.symbol, c.exchange, qty))
+            continue
         by_month = held.setdefault(instr, {})
         by_month[month] = by_month.get(month, 0) + qty
     return held, unknown
@@ -1161,6 +1191,26 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
             else:
                 qty_to_roll = min(0, max(qty_current, desired - qty_next))
 
+            # Corrupt month accounting shows up here first: a roll that dwarfs the
+            # target means qty_current/qty_next disagree with reality (BUG-28).
+            # Halt loudly at the FIRST oversized roll instead of retrying it every
+            # 10 minutes until the broker's margin check intervenes.
+            roll_cap = max(MAX_ROLL_ABS_SLACK,
+                           abs(int(desired)) * MAX_ROLL_VS_TARGET)
+            if abs(qty_to_roll) > roll_cap:
+                msg = (f"ROLL SANITY BREACH: {sym} {current_month}→{next_month} "
+                       f"computed roll {qty_to_roll:+d} exceeds cap {roll_cap} "
+                       f"(target {desired:+d}, cur {qty_current:+d}, "
+                       f"nxt {qty_next:+d}) — month accounting is suspect. "
+                       f"NOT rolling.")
+                print(f"    [RISK] {msg}")
+                if execute:
+                    raise_halt(msg, alert=(
+                        f"[ibkr_fut] {msg}\nVerify the held months against IB, "
+                        f"remove ibkr_fut/risk_halt.txt, then restart."))
+                    sys.exit(1)
+                qty_to_roll = 0
+
             if qty_to_roll != 0:
                 if execute:
                     c_near = qualify(ib, spec, current_month)
@@ -1176,6 +1226,12 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                             is_long=qty_to_roll > 0,
                             force=days_to_roll <= FORCE_ROLL_DAYS,
                             heartbeat=heartbeat)
+                        # This path placed a LIVE order, so it must count toward
+                        # the BUG-7 churn cap. Previously only the rebalance /
+                        # algo_exec legs called traded_instrs.add(), so a roll that
+                        # re-issued every cycle never tripped the breaker — BUG-28
+                        # ran 115 QM roll attempts with the cap at 6 and never fired.
+                        traded_instrs.add(instr)
                         # Credit fills whatever the final status — a cancelled
                         # limit can still carry partial fills, and ignoring them
                         # would mis-size this cycle's rebalance orders.
@@ -1183,6 +1239,8 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                             direction = 1 if qty_to_roll > 0 else -1
                             qty_next    += direction * sp_filled
                             qty_current -= direction * sp_filled
+                        if sp_status != "Filled":
+                            unconverged.add(instr)
                         # Any remainder stays in current_month; closed directly via algo_exec
                 else:
                     force_tag = ("  [FORCE — MKT fallback]"
@@ -1653,6 +1711,29 @@ def run_daemon(args):
             continue
         except Exception as e:
             print(f"[{_now()}] ERROR fetching positions: {e} — sleeping 60s")
+            time.sleep(60)
+            continue
+
+        # ── 3a. Unmappable held futures ───────────────────────────────────────
+        # A held future we could not map to an instrument+month is a HOLE in the
+        # book: it silently disappears from `held`, so the daemon would reconcile
+        # as if that exposure did not exist (the BUG-9 phantom-flat class). The
+        # Energy delivery-month guard routes here deliberately (BUG-28) rather
+        # than filing a position under a guessed month. Never trade a partial book.
+        if args.execute and unknown:
+            readfail_streak += 1
+            detail = ", ".join(f"{sym}@{exch}:{q:+d}" for sym, exch, q in unknown)
+            print(f"[{_now()}] [RISK] [DAEMON-UNMAPPED] held futures not mapped to "
+                  f"an instrument/month: {detail} — skipping cycle "
+                  f"(streak {readfail_streak})")
+            if readfail_streak >= READFAIL_ALERT_AFTER and not readfail_alerted:
+                try:
+                    _send_discord(f"[DAEMON-UNMAPPED] {detail} — refusing to trade "
+                                  f"against an incomplete book "
+                                  f"(persisted {readfail_streak} cycles)")
+                    readfail_alerted = True
+                except Exception as de:
+                    print(f"[{_now()}] WARNING: UNMAPPED Discord alert failed: {de}")
             time.sleep(60)
             continue
 

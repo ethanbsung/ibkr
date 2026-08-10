@@ -26,6 +26,7 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 | BUG-22 | LOW | FIXED (working tree) | daily_report daemon-error scan only time-gates `[…Z]` stamps → month-old ib_insync ERROR lines re-reported every morning |
 | BUG-20 | HIGH | FIXED (working tree) | `ib = None` without disconnect() leaks the clientId → error-326 reconnect deadlock (2026-07-05: 3h dead during Sunday open) |
 | BUG-26 | HIGH | FIXED (working tree) — VERIFICATION OWED + backfill owed | Daily ledger only flushes on a snapshot *change seen by a live daemon*; the 22:15 restart resets `snapshot_computed_at=None` so the post-restart load never flushes → 24 of 39 business days missing from daily.csv; each surviving `ret` is a multi-day return mislabelled as daily (vol/Sharpe/drawdown all wrong). Flush moved to the compute phase; cost columns now read from trades.csv |
+| BUG-28 | CRIT | FIXED (working tree) — UNWIND OWED | Poisoned delivery-month cache mis-filed QM one month early → daemon rolled a phantom calendar spread 1→2→4→8→16→32→64 and spammed IB with 115 rejected 64-lot rolls / 372 error-201s over ~36h; live book left at +64 QMV6 / −63 QMX6 against a 1-lot target. Churn breaker never fired (spread-roll path never registered a trade) |
 | BUG-27 | MED | OPEN | algo_exec chases `ticker.ask` while IB caps the limit (error 2161) → 30 min of unfillable aggressive orders (SXPP 08-05, lmt 842 vs cap 826.5); also reports `avg_price` 823.9 on a 0-filled Cancelled order |
 | BUG-2  | HIGH | OPEN | No visibility into full optimisation output |
 | BUG-14 | MED+ | OPEN | Fills landing after algo_exec gives up are never captured; no execution reconciliation (reqExecutions/orderRef) — Phase 1 |
@@ -61,6 +62,83 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 ## OPEN
 
 ### CRITICAL
+
+#### [BUG-28] Poisoned delivery-month cache mis-files QM one month early — daemon rolls a phantom calendar spread to 64 lots and spams IB with 372 margin rejections
+
+**Found 2026-08-10** from Discord "insufficient margin" alerts firing on a ~10-minute
+interval. `daemon_cron.log` shows **115 `SPREAD ROLL … QM 202610→202611` attempts and
+372 error-201 rejections** since 2026-08-08, sizes escalating **1 → 2 → 4 → 8 → 16 →
+32 → 64** and then pinned at 64. IB's rejection text: NetLiq `245,472` must exceed a
+new initial margin of `454,447`. Target for `CRUDE_W_mini` was **1 contract**.
+
+Live book when diagnosed:
+
+| conId | localSymbol | expiry | true `contractMonth` | position |
+|---|---|---|---|---|
+| 455805553 | QMV6 | 20260921 | **202610** | **+64** |
+| 455805546 | QMX6 | 20261019 | **202611** | **−63** |
+
+Net was still +1 — the *directional* exposure was right. What ballooned was **gross**:
+a 64-lot phantom calendar spread, consuming the entire commodities margin line.
+
+**Root cause.** `delivery_month()` (live_dynamic.py:194) resolves the true delivery
+month from `ContractDetails.contractMonth`, falling back to
+`lastTradeDateOrContractMonth[:6]` on failure — then **caches whichever it got, for the
+daemon's lifetime** ("conId ↔ delivery month is immutable"). For NYMEX energy the
+expiry *precedes* delivery by a month, so the fallback is wrong by one; the function's
+own docstring warns about this using QM as the example.
+
+At 2026-08-08T04:52 the gateway dropped (error 1100, 250 occurrences in the log).
+`reqContractDetails` responses arrived after their requests were abandoned, raising
+`KeyError` inside ib_insync's decoder (416 occurrences). `delivery_month` swallowed the
+exception, fell back to `20260921[:6]` = **202609**, and cached that permanently for
+conId 455805553. From then on the daemon's month accounting was corrupt: with the roll
+calendar saying hold `202610` → roll into `202611`,
+
+```
+qty_to_roll = min(qty_current, desired − qty_next) = min(64, 1 − (−63)) = 64
+```
+
+which reproduces the logged size exactly. Each completed roll drove `qty_next` further
+negative, enlarging `desired − qty_next` for the next cycle — self-amplifying, hence
+the clean doubling. Nothing internal stopped it; **IB's margin check did**, at 64.
+
+**Why the churn breaker didn't fire.** `MAX_INSTR_TRADES_PER_SESSION = 6` exists for
+precisely this failure — it is the BUG-7 fix, and BUG-7's origin trace is the *same* QM
+churn ("a 27-lot phantom calendar spread"). But `traded_instrs.add(instr)` was only
+called on the rebalance/`algo_exec` legs (:1342, :1398). The spread-roll branch never
+registered a trade, so 115 attempts never incremented the counter.
+
+**Blast radius.** Audited every held future against its true `contractMonth`: only QM
+was offset — the other seven holdings' expiry prefixes happen to be correct, which is
+why this presented as QM-specific rather than systemic. Latent for every NYMEX energy
+contract (crude, Brent, NatGas, HeatOil, Gasoline).
+
+**Fix (working tree, 2026-08-10).**
+
+1. **Never cache a guess.** `delivery_month` now returns `(month, authoritative)` and
+   caches *only* the ContractDetails-sourced value. A fallback is returned for the
+   current call but not persisted, so the next cycle retries and self-corrects.
+2. **Never guess for energy.** `get_positions_by_instr` treats an unresolved month on
+   an `UNIVERSE[instr] == "Energy"` contract as unmappable and reports it in `unknown`
+   rather than filing it under a phantom month.
+3. **Unmapped holdings block the cycle.** The daemon previously discarded `unknown`
+   entirely — a held position simply vanished from the book (the BUG-9 phantom-flat
+   class). New `[DAEMON-UNMAPPED]` gate skips the cycle and alerts.
+4. **Spread rolls count toward the churn cap.** `traded_instrs.add(instr)` (plus
+   `unconverged`) added to the spread-roll branch.
+5. **Roll sanity bound.** A computed roll exceeding `max(5, 10×|target|)` now halts +
+   alerts instead of being sent, so future accounting corruption fails at attempt 1
+   rather than attempt 115.
+
+Regression tests in `test_execution.py`: fallback-not-cached + self-correction, energy
+skip vs non-energy fallback retained, churn registration, oversized-roll halt, and the
+`min(64, 1−(−63)) = 64` arithmetic itself. 170 pass.
+
+**Still owed.** The live +64/−63 spread must be unwound —
+`scripts/unwind_qm_spread.py` (dry-run by default, chunked, refuses to run unless the
+daemon is halted). Separately, `targets_snapshot.json` is stale at 2026-08-07; compute
+has not produced a fresh snapshot in 3 days and may share the connectivity root cause.
 
 #### [BUG-25] Volume early roll never persists — re-fires every night and re-applies the Panama gap to the entire adjusted history each time
 

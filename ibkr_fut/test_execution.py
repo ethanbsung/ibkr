@@ -2470,3 +2470,217 @@ def test_rne_filled_instrument_not_unconverged(
         MagicMock(), execute=True)
 
     assert unconverged == set()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BUG-28 — QM runaway roll: poisoned delivery-month cache
+# ══════════════════════════════════════════════════════════════════════════════
+
+from ibkr_fut.live_dynamic import delivery_month
+
+
+def _fut(symbol, expiry, con_id, local=""):
+    c = MagicMock()
+    c.secType = "FUT"
+    c.symbol = symbol
+    c.conId = con_id
+    c.localSymbol = local or symbol
+    c.lastTradeDateOrContractMonth = expiry
+    return c
+
+
+def _details(contract_month):
+    cd = MagicMock()
+    cd.contractMonth = contract_month
+    return [cd]
+
+
+def test_delivery_month_authoritative_is_cached():
+    """A month from ContractDetails is authoritative and cached (one call ever)."""
+    live_dynamic._CONID_MONTH_CACHE.clear()
+    ib = MagicMock()
+    ib.reqContractDetails.return_value = _details("202610")
+    c = _fut("QM", "20260921", 455805553, "QMV6")
+
+    assert delivery_month(ib, c) == ("202610", True)
+    assert delivery_month(ib, c) == ("202610", True)
+    # Second call served from cache.
+    assert ib.reqContractDetails.call_count == 1
+
+
+def test_delivery_month_fallback_is_not_cached():
+    """BUG-28: a guessed month must NEVER be cached.
+
+    The old code cached the expiry-prefix fallback for the daemon's lifetime, so
+    a single reqContractDetails failure during a gateway drop permanently
+    mis-filed QM one month early. Once the connection recovers the authoritative
+    month must win.
+    """
+    live_dynamic._CONID_MONTH_CACHE.clear()
+    ib = MagicMock()
+    c = _fut("QM", "20260921", 455805553, "QMV6")
+
+    # Transient failure → guessed fallback, flagged non-authoritative.
+    ib.reqContractDetails.side_effect = RuntimeError("socket disconnect")
+    month, authoritative = delivery_month(ib, c)
+    assert (month, authoritative) == ("202609", False)   # wrong month, correctly flagged
+    assert 455805553 not in live_dynamic._CONID_MONTH_CACHE, "fallback must not be cached"
+
+    # Connection recovers → the TRUE delivery month is resolved and cached.
+    ib.reqContractDetails.side_effect = None
+    ib.reqContractDetails.return_value = _details("202610")
+    assert delivery_month(ib, c) == ("202610", True)
+
+
+@patch("ibkr_fut.live_dynamic.ib_spec")
+@patch("ibkr_fut.live_dynamic.UNIVERSE", {"CRUDE_W_mini": "Energy"})
+def test_energy_unresolved_month_goes_unknown_not_guessed(mock_spec):
+    """BUG-28: never file an Energy position under a guessed month.
+
+    QMV6 expires 20260921 but delivers 202610. The expiry-prefix fallback yields
+    202609 — a phantom month that corrupts every roll calculation. The position
+    must be reported unknown (caller skips + alerts), not silently mis-filed.
+    """
+    live_dynamic._CONID_MONTH_CACHE.clear()
+    mock_spec.side_effect = lambda cfg, instr: _spec_for("QM", "NYMEX")
+    ib = MagicMock()
+    pos = MagicMock()
+    pos.contract = _fut("QM", "20260921", 455805553, "QMV6")
+    pos.contract.exchange = "NYMEX"
+    pos.contract.primaryExchange = ""
+    pos.position = 1
+    ib.run.side_effect = _ib_run_returns([pos])
+    ib.reqContractDetails.side_effect = RuntimeError("socket disconnect")
+
+    held, unknown = get_positions_by_instr(ib, MagicMock())
+
+    assert held == {}, "must not file the position under the guessed 202609"
+    assert unknown == [("QM", "NYMEX", 1)]
+
+
+@patch("ibkr_fut.live_dynamic.ib_spec")
+@patch("ibkr_fut.live_dynamic.UNIVERSE", {"ALPHA": "equity"})
+def test_non_energy_still_uses_fallback(mock_spec):
+    """Non-energy expiry prefixes are correct, so the fallback stays usable —
+    the guard must not make the daemon blind to the rest of the book."""
+    live_dynamic._CONID_MONTH_CACHE.clear()
+    mock_spec.side_effect = lambda cfg, instr: _spec_for("MES", "CME")
+    ib = MagicMock()
+    pos = MagicMock()
+    pos.contract = _fut("MES", "20260918", 111, "MESU6")
+    pos.contract.exchange = "CME"
+    pos.contract.primaryExchange = ""
+    pos.position = 2
+    ib.run.side_effect = _ib_run_returns([pos])
+    ib.reqContractDetails.side_effect = RuntimeError("socket disconnect")
+
+    held, unknown = get_positions_by_instr(ib, MagicMock())
+
+    assert held == {"ALPHA": {"202609": 2}}
+    assert unknown == []
+
+
+def test_roll_qty_matches_the_observed_runaway():
+    """The arithmetic that produced SPREAD ROLL 64 against a 1-lot target.
+
+    With the cache poisoned, the daemon read cur(202610)=+64 / nxt(202611)=-63:
+        qty_to_roll = min(qty_current, desired - qty_next)
+                    = min(64, 1 - (-63)) = 64
+    Each roll drove qty_next further negative, so the next cycle computed a
+    LARGER roll — the 1→2→4→8→16→32→64 escalation in the live log.
+    """
+    desired = 1
+    def roll_qty(cur, nxt):
+        if cur > 0:
+            return max(0, min(cur, desired - nxt))
+        return min(0, max(cur, desired - nxt))
+
+    assert roll_qty(64, -63) == 64          # the state that spammed IB
+    # Self-amplification: a more-negative far leg demands a bigger roll.
+    assert roll_qty(2, -1) == 2
+    assert roll_qty(4, -3) == 4
+    assert roll_qty(8, -7) == 8
+    # Healthy book converges to a single 1-lot roll.
+    assert roll_qty(1, 0) == 1
+
+
+@patch("ibkr_fut.live_dynamic.is_contract_okay_to_trade", return_value=True)
+@patch("ibkr_fut.live_dynamic.spread_roll_exec")
+@patch("ibkr_fut.live_dynamic.algo_exec")
+@patch("ibkr_fut.live_dynamic.pre_trade_checks")
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
+@patch("ibkr_fut.live_dynamic.ib_spec")
+def test_spread_roll_registers_with_churn_cap(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_spread, mock_open
+):
+    """BUG-28: a spread roll must count toward the BUG-7 churn cap.
+
+    traded_instrs was only populated by the rebalance/algo_exec legs, so the QM
+    roll loop ran 115 times against a cap of 6 without ever tripping it.
+    """
+    mock_spec.return_value = _MOCK_SPEC
+    mock_hold.return_value = ("202609", "202610", 1)   # inside the force-roll window
+    mock_ptc.return_value = (True, "", 5210.0)
+    mock_spread.return_value = ("Filled", 1, -1.25)
+    mock_exec.return_value = _default_fill_result()
+
+    _, _, _, traded_instrs, _ = reconcile_and_execute(
+        _rne_ib(), MagicMock(), {"ES": 1}, {"ES": {"202609": 1}},
+        _MOCK_DIAG, MagicMock(), execute=True)
+
+    mock_spread.assert_called_once()
+    assert "ES" in traded_instrs, "spread roll must register for the churn cap"
+
+
+@patch("ibkr_fut.live_dynamic.raise_halt")
+@patch("ibkr_fut.live_dynamic.spread_roll_exec")
+@patch("ibkr_fut.live_dynamic.algo_exec")
+@patch("ibkr_fut.live_dynamic.pre_trade_checks")
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
+@patch("ibkr_fut.live_dynamic.ib_spec")
+def test_oversized_roll_halts_instead_of_trading(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_spread, mock_halt
+):
+    """BUG-28: the exact QM state (+64 near / -63 far vs a 1-lot target) must
+    halt on the FIRST attempt rather than send a 64-lot spread 115 times."""
+    mock_spec.return_value = _MOCK_SPEC
+    mock_hold.return_value = ("202609", "202610", 1)
+    mock_ptc.return_value = (True, "", 5210.0)
+    mock_halt.side_effect = SystemExit(1)
+
+    with pytest.raises(SystemExit):
+        reconcile_and_execute(
+            _rne_ib(), MagicMock(), {"ES": 1},
+            {"ES": {"202609": 64, "202610": -63}},
+            _MOCK_DIAG, MagicMock(), execute=True)
+
+    mock_spread.assert_not_called(), "must not send the oversized roll"
+    mock_halt.assert_called_once()
+    assert "ROLL SANITY BREACH" in mock_halt.call_args[0][0]
+
+
+@patch("ibkr_fut.live_dynamic.is_contract_okay_to_trade", return_value=True)
+@patch("ibkr_fut.live_dynamic.spread_roll_exec")
+@patch("ibkr_fut.live_dynamic.algo_exec")
+@patch("ibkr_fut.live_dynamic.pre_trade_checks")
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
+@patch("ibkr_fut.live_dynamic.ib_spec")
+def test_normal_roll_passes_sanity_guard(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_spread, mock_open
+):
+    """A legitimate roll must not be blocked by the sanity cap."""
+    mock_spec.return_value = _MOCK_SPEC
+    mock_hold.return_value = ("202609", "202610", 1)
+    mock_ptc.return_value = (True, "", 5210.0)
+    mock_spread.return_value = ("Filled", 3, -1.25)
+    mock_exec.return_value = _default_fill_result()
+
+    reconcile_and_execute(
+        _rne_ib(), MagicMock(), {"ES": 3}, {"ES": {"202609": 3}},
+        _MOCK_DIAG, MagicMock(), execute=True)
+
+    mock_spread.assert_called_once()
+    assert mock_spread.call_args[0][4] == 3    # qty rolled
