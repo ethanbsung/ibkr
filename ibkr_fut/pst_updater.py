@@ -253,6 +253,20 @@ def smoothed_volume(vol: pd.Series, asof: date,
     return float(recent.ewm(span=span).mean().iloc[-1])
 
 
+# Instruments whose front contract is chronically illiquid: they trade a handful
+# of bars a month and the forward routinely fails the liquidity test, so the
+# no-roll [PST-STALE] path fires every single day. None of them can reach the
+# book — the daemon independently drops them as stale, as SR-cost-expensive, and
+# as having no eligible signal — so the daily Discord ping is pure noise.
+#
+# Muting is DISCORD-ONLY and per-instrument: the warning still goes to the log,
+# and every other instrument still escalates, so a genuine new data gap is not
+# hidden by this.
+STALE_ALERT_MUTED: frozenset[str] = frozenset({
+    "TWD-mini",     # SGX mini TWD: ~3 bars/month, forward never clears liquidity
+})
+
+
 def _alert_stale(instrument: str, contract: str, last_bar, seg_end: date, action: str) -> None:
     """Report on the live front contract's series at a roll boundary.
 
@@ -281,7 +295,8 @@ def _alert_stale(instrument: str, contract: str, last_bar, seg_end: date, action
         log.warning("  " + msg)
         # Only the genuine data-gap case escalates to Discord; a successful roll
         # is routine and would otherwise alert on every instrument every cycle.
-        if not is_roll:
+        # Chronically-illiquid instruments are logged but never pinged.
+        if not is_roll and instrument not in STALE_ALERT_MUTED:
             from ibkr_fut.risk_check import _send_discord
             _send_discord(msg)
     except Exception as e:

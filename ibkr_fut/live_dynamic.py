@@ -903,11 +903,17 @@ def spread_roll_exec(ib, spec: dict, from_month: str, to_month: str, qty: int,
     sym      = spec["symbol"]
     exchange = spec["exchange"]
 
-    # Direction: a long position is rolled by SELLing the spread (sell near, buy far);
-    # a short position requires the opposite (buy near, sell far).
-    bag_action  = "SELL" if is_long else "BUY"
+    # Direction: a long position is rolled by selling the near month and buying the
+    # far month; a short position requires the opposite.
+    #
+    # The COMBO LEGS carry the direction. IB applies the parent order's action on
+    # top of the leg actions multiplicatively, so a parent SELL inverts every leg.
+    # Encoding direction in BOTH places double-negates it and rolls the position
+    # BACKWARDS — deeper into the expiring month, further short the incoming one
+    # (BUG-29). The parent is therefore always BUY: "execute this combo as defined".
     from_action = "SELL" if is_long else "BUY"
     to_action   = "BUY"  if is_long else "SELL"
+    bag_action  = "BUY"
 
     c_from = qualify(ib, spec, from_month)
     c_to   = qualify(ib, spec, to_month)
@@ -933,10 +939,13 @@ def spread_roll_exec(ib, spec: dict, from_month: str, to_month: str, qty: int,
 
     valid_quote = (_spread_px_ok(bid) and _spread_px_ok(ask) and bid <= ask)
     if valid_quote:
-        # Offside limit, same as algo_exec: bid when buying the spread, ask when
-        # selling — don't pay the spread. Unfilled non-force rolls retry next
+        # Offside limit, same as algo_exec: don't pay the spread. Key off the
+        # economic direction (is_long), NOT bag_action — the parent action is now
+        # always BUY, so it no longer identifies which way we're going (BUG-29).
+        # Rolling a long sells the spread as defined (rest at the ask); rolling a
+        # short buys it (rest at the bid). Unfilled non-force rolls retry next
         # daemon cycle; the force path guarantees completion at expiry.
-        limit_px = round(bid if bag_action == "BUY" else ask, 4)
+        limit_px = round(ask if is_long else bid, 4)
         order = LimitOrder(bag_action, qty, limit_px, tif="DAY")
         price_str = f"lmt {limit_px:.4f}  (bid {bid:.4f} / ask {ask:.4f})"
     elif force:

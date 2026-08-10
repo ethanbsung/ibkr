@@ -1243,6 +1243,10 @@ def test_spread_roll_long_sells_at_offside_ask(mock_time, mock_qual):
     # Calendar spreads legitimately trade at zero/negative prices, and rolling a
     # long SELLs the spread: the passive limit sits at the ask (offside), so we
     # never pay the spread.
+    #
+    # The parent action is BUY ("execute the combo as defined") — the SELL lives
+    # in the combo legs. This assertion previously read SELL, which encoded the
+    # BUG-29 double-negation and is why the reversed roll passed the suite.
     mock_time.time.side_effect = [0.0] + [100.0] * 50
     mock_qual.side_effect = [MagicMock(conId=1, currency="USD"),
                              MagicMock(conId=2, currency="USD")]
@@ -1254,7 +1258,7 @@ def test_spread_roll_long_sells_at_offside_ask(mock_time, mock_qual):
 
     order = ib.placeOrder.call_args.args[1]
     assert order.orderType == "LMT"
-    assert order.action == "SELL"
+    assert order.action == "BUY"
     assert order.lmtPrice == -0.4
 
 
@@ -2684,3 +2688,77 @@ def test_normal_roll_passes_sanity_guard(
 
     mock_spread.assert_called_once()
     assert mock_spread.call_args[0][4] == 3    # qty rolled
+
+
+# ── BUG-29: spread roll direction (leg actions vs parent BAG action) ──────────
+#
+# spread_roll_exec encoded direction TWICE — in the combo legs AND in the parent
+# order's action. IB applies the parent action on top of the legs
+# multiplicatively, so a parent SELL inverted every leg and rolled the position
+# backwards: it bought the expiring month and sold the incoming one. The live
+# QM book reached +16 Oct / -15 Nov before the roll-sanity cap halted it.
+#
+# These assert the ACTUAL order composition, which the pre-existing spread tests
+# never did (they only checked status/fill counts, so all 170 passed with the
+# roll firing in reverse).
+
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_long_sells_near_buys_far(mock_time, mock_qual):
+    """Rolling a LONG must SELL the expiring month and BUY the incoming one."""
+    mock_time.time.side_effect = [0.0] + [100.0] * 50
+    mock_qual.side_effect = [MagicMock(conId=111, currency="USD"),   # from/near
+                             MagicMock(conId=222, currency="USD")]   # to/far
+    ib = _spread_ib()
+    ib.placeOrder.return_value = _spread_trade(filled_on_limit=5, ib=ib)
+
+    spread_roll_exec(ib, _MOCK_SPEC, "202610", "202611", 5, is_long=True)
+
+    bag, order = ib.placeOrder.call_args[0]
+    legs = {leg.conId: leg.action for leg in bag.comboLegs}
+    assert legs[111] == "SELL", "long roll must sell the expiring month"
+    assert legs[222] == "BUY",  "long roll must buy the incoming month"
+    # The legs carry the direction; a parent SELL would invert both of them.
+    assert order.action == "BUY", "parent BAG action must not re-negate the legs"
+
+
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_short_buys_near_sells_far(mock_time, mock_qual):
+    """Rolling a SHORT must BUY the expiring month and SELL the incoming one."""
+    mock_time.time.side_effect = [0.0] + [100.0] * 50
+    mock_qual.side_effect = [MagicMock(conId=111, currency="USD"),
+                             MagicMock(conId=222, currency="USD")]
+    ib = _spread_ib()
+    ib.placeOrder.return_value = _spread_trade(filled_on_limit=5, ib=ib)
+
+    spread_roll_exec(ib, _MOCK_SPEC, "202610", "202611", 5, is_long=False)
+
+    bag, order = ib.placeOrder.call_args[0]
+    legs = {leg.conId: leg.action for leg in bag.comboLegs}
+    assert legs[111] == "BUY",  "short roll must buy back the expiring month"
+    assert legs[222] == "SELL", "short roll must sell the incoming month"
+    assert order.action == "BUY", "parent BAG action must not re-negate the legs"
+
+
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.time")
+def test_spread_roll_passive_limit_rests_offside_by_direction(mock_time, mock_qual):
+    """Passive limit keys off is_long, not the (now constant) parent action.
+
+    Selling the spread (long roll) rests at the ask; buying it (short roll)
+    rests at the bid. Keying off bag_action after the fix would always pick the
+    bid and cross the market on every long roll.
+    """
+    for is_long, expected_px in ((True, 0.6), (False, 0.5)):
+        mock_time.time.side_effect = [0.0] + [100.0] * 50
+        mock_qual.side_effect = [MagicMock(conId=111, currency="USD"),
+                                 MagicMock(conId=222, currency="USD")]
+        ib = _spread_ib(ticker_bid=0.5, ticker_ask=0.6)
+        ib.placeOrder.return_value = _spread_trade(filled_on_limit=5, ib=ib)
+
+        spread_roll_exec(ib, _MOCK_SPEC, "202610", "202611", 5, is_long=is_long)
+
+        _, order = ib.placeOrder.call_args[0]
+        assert order.lmtPrice == expected_px, (
+            f"is_long={is_long} must rest at {expected_px}, got {order.lmtPrice}")

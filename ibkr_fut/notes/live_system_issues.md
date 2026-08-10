@@ -26,7 +26,8 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 | BUG-22 | LOW | FIXED (working tree) | daily_report daemon-error scan only time-gates `[…Z]` stamps → month-old ib_insync ERROR lines re-reported every morning |
 | BUG-20 | HIGH | FIXED (working tree) | `ib = None` without disconnect() leaks the clientId → error-326 reconnect deadlock (2026-07-05: 3h dead during Sunday open) |
 | BUG-26 | HIGH | FIXED (working tree) — VERIFICATION OWED + backfill owed | Daily ledger only flushes on a snapshot *change seen by a live daemon*; the 22:15 restart resets `snapshot_computed_at=None` so the post-restart load never flushes → 24 of 39 business days missing from daily.csv; each surviving `ret` is a multi-day return mislabelled as daily (vol/Sharpe/drawdown all wrong). Flush moved to the compute phase; cost columns now read from trades.csv |
-| BUG-28 | CRIT | FIXED + DEPLOYED + UNWOUND (090d536, 2026-08-10) | Poisoned delivery-month cache mis-filed QM one month early → daemon rolled a phantom calendar spread 1→2→4→8→16→32→64 and spammed IB with 115 rejected 64-lot rolls / 372 error-201s over ~36h; live book left at +64 QMV6 / −63 QMX6 against a 1-lot target. Churn breaker never fired (spread-roll path never registered a trade) |
+| BUG-28 | CRIT | FIXED + DEPLOYED (090d536) — but SUPERSEDED as root cause by BUG-29; re-ran after restart | Poisoned delivery-month cache mis-filed QM one month early → daemon rolled a phantom calendar spread 1→2→4→8→16→32→64 and spammed IB with 115 rejected 64-lot rolls / 372 error-201s over ~36h; live book left at +64 QMV6 / −63 QMX6 against a 1-lot target. Churn breaker never fired (spread-roll path never registered a trade) |
+| BUG-29 | CRIT | FIXED (working tree) — DEPLOY + UNWIND OWED | Spread roll encodes direction TWICE (combo legs AND parent BAG action); IB applies the parent multiplicatively so a parent SELL inverts every leg → every roll fired BACKWARDS, buying the expiring month and selling the incoming one. Re-ran the 1→2→4→8→16 escalation 45 min after the BUG-28 restart; live book +16 QMV6 / −15 QMX6 against a +1 target. This — not the month cache — is the true root cause of the BUG-28 runaway |
 | BUG-27 | MED | OPEN | algo_exec chases `ticker.ask` while IB caps the limit (error 2161) → 30 min of unfillable aggressive orders (SXPP 08-05, lmt 842 vs cap 826.5); also reports `avg_price` 823.9 on a 0-filled Cancelled order |
 | BUG-2  | HIGH | OPEN | No visibility into full optimisation output |
 | BUG-14 | MED+ | OPEN | Fills landing after algo_exec gives up are never captured; no execution reconciliation (reqExecutions/orderRef) — Phase 1 |
@@ -62,6 +63,82 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 ## OPEN
 
 ### CRITICAL
+
+#### [BUG-29] Calendar spread roll double-negates its direction → every roll fires BACKWARDS (true root cause of the BUG-28 runaway)
+
+**Found 2026-08-10**, ~45 minutes after the BUG-28 fix (`090d536`) was deployed and the
+daemon restarted at 18:00 UTC. The escalation **immediately restarted from scratch**:
+
+```
+18:01  SPREAD ROLL 1  QM 202610→202611  → Filled 1/1
+18:12  SPREAD ROLL 2  QM 202610→202611  → Filled 2/2
+18:23  SPREAD ROLL 4  QM 202610→202611  → Filled 2/4
+18:35  SPREAD ROLL 8  QM 202610→202611  → Filled 2/8
+18:45  [RISK] ROLL SANITY BREACH: computed roll +16 exceeds cap 10
+       (target +1, cur +16, nxt −15) — NOT rolling.  → halt
+```
+
+The BUG-28 sanity bound worked exactly as designed: it stopped the run at 16 instead of
+64 and halted the daemon. But the *underlying* defect was never the delivery-month cache.
+
+**Root cause.** `spread_roll_exec` encoded the roll direction in **two** places:
+
+```python
+bag_action  = "SELL" if is_long else "BUY"   # parent BAG order
+from_action = "SELL" if is_long else "BUY"   # near leg
+to_action   = "BUY"  if is_long else "SELL"  # far leg
+```
+
+IB applies the parent order's action **on top of** the combo-leg actions, multiplicatively.
+The legs were already correct (SELL near / BUY far for a long roll); submitting the parent
+as `SELL` then **inverted both legs**. Confirmed against `reqExecutions` — every roll filled:
+
+```
+BOT 20260921 (Oct, the EXPIRING month)
+SLD 20261019 (Nov, the INCOMING month)
+```
+
+i.e. the exact opposite of a roll. So each cycle pushed the position *deeper* into the
+expiring contract and *further short* the new one. That is what drove the doubling, via
+`qty_to_roll = min(qty_current, desired − qty_next)`: each backwards roll made `qty_next`
+more negative, so `desired − qty_next` grew, so the next roll was larger — 1 → 2 → 4 → 8 → 16.
+
+**Why BUG-28's diagnosis looked right but was incomplete.** The poisoned month cache was
+real and worth fixing, but it was a *contributing* mis-read, not the engine of the runaway.
+The self-amplifying loop is entirely explained by the inverted legs, which is why fixing the
+cache alone let the identical escalation restart on the very next daemon run.
+
+**Why 170 tests missed it.** Every pre-existing `spread_roll_exec` test asserted only
+status/fill counts. `test_spread_roll_long_sells_at_offside_ask` did assert
+`order.action == "SELL"` — but on the *parent* only, never on the legs, so it actively
+encoded the double-negation as expected behaviour.
+
+**Fix (working tree, `live_dynamic.py`).**
+1. The combo legs carry the direction; the parent BAG action is now **always `BUY`**
+   ("execute this combo as defined"), so it can never re-negate the legs.
+2. The passive limit now keys off `is_long` rather than `bag_action` — with the parent
+   pinned to BUY, the old `bid if bag_action == "BUY" else ask` would have rested every
+   long roll at the bid and crossed the market.
+
+**Tests.** 3 new regression tests assert the actual order composition — long roll = SELL
+near / BUY far, short roll = BUY near / SELL far, parent BUY in both — plus offside limit
+selection per direction. `test_spread_roll_long_sells_at_offside_ask`'s stale parent-action
+assertion corrected to `BUY` (its price assertion, the real intent, is unchanged).
+**173 `ibkr_fut/test_execution.py` tests pass.**
+
+**Live state at time of writing (daemon halted, no working orders).**
+`+16 QM 202610 (conId 455805553) / −15 QM 202611 (conId 455805546)`, target `+1`.
+AvailableFunds 198,022 / ExcessLiquidity 208,814 / NetLiq 243,659 — margin is healthy,
+the spread is nearly flat net, so there is no forced urgency. **Unwind owed** (see BUG-28's
+remediation note on leg sequencing: reduce the oversized long leg first so each chunk frees
+margin). 202610 expires 2026-09-21 and the roll date is 2026-08-11, so this must be resolved
+before the position is rolled or held into expiry.
+
+**Deploy owed:** push + pull to VPS, restart the daemon, then remove `risk_halt.txt`.
+Do **not** clear the halt before the fix is deployed — the current code would re-run the
+escalation on its next cycle.
+
+---
 
 #### [BUG-28] Poisoned delivery-month cache mis-files QM one month early — daemon rolls a phantom calendar spread to 64 lots and spams IB with 372 margin rejections
 
