@@ -4,14 +4,14 @@ scripts/unwind_qm_spread.py
 
 One-off remediation for the BUG-28 QM runaway roll.
 
-The daemon's delivery-month cache was poisoned during a gateway drop on
-2026-08-08, mis-filing QM's +1 lot under a phantom month. Every subsequent
-cycle recomputed a larger roll (1→2→4→8→16→32→64) until IB's margin check
-started rejecting. The account was left holding a large phantom calendar
-spread against a 1-lot target:
+The spread roll encoded its direction twice — in the combo legs and in the parent
+BAG action — so IB inverted every leg and each "roll" bought the expiring month
+and sold the incoming one (BUG-29). That made qty_next more negative every cycle,
+so each roll was larger than the last: 1→2→4→8→16. The account is left holding a
+phantom calendar spread against a 1-lot target:
 
-    QMV6 (conId 455805553, delivery 202610)   +64
-    QMX6 (conId 455805546, delivery 202611)   -63
+    QMV6 (conId 455805553, delivery 202610)   +16
+    QMX6 (conId 455805546, delivery 202611)   -15
 
 This script unwinds that spread down to the target position. It is DELIBERATELY
 narrow: it only touches QM, it verifies the live book matches what it expects
@@ -50,8 +50,18 @@ HALT_FILE = Path(__file__).resolve().parent.parent / "ibkr_fut" / "risk_halt.txt
 
 # Refuse to run if the live book is wildly different from what we diagnosed —
 # the operator should re-check rather than let this script improvise.
-EXPECTED_FRONT = 64
-EXPECTED_BACK  = -63
+#
+# Updated 2026-08-10 for the BUG-29 re-run. The first remediation took the book
+# to +1/0, but the daemon restart re-ran the escalation (the real root cause was
+# the inverted spread legs, not the month cache) and rebuilt it to +16/-15 before
+# the roll sanity bound halted at 16.
+#
+# The +16/-15 unwind then filled the front leg fully and 13 of 15 on the back leg
+# (thin overnight Globex liquidity), leaving +1/-2. These expectations track that
+# residual so the drift guard still protects the final cleanup pass rather than
+# being bypassed with --force.
+EXPECTED_FRONT = 1
+EXPECTED_BACK  = -2
 TOLERANCE      = 10       # allow drift if some legs filled/expired since diagnosis
 
 

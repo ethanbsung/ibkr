@@ -27,7 +27,7 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 | BUG-20 | HIGH | FIXED (working tree) | `ib = None` without disconnect() leaks the clientId → error-326 reconnect deadlock (2026-07-05: 3h dead during Sunday open) |
 | BUG-26 | HIGH | FIXED (working tree) — VERIFICATION OWED + backfill owed | Daily ledger only flushes on a snapshot *change seen by a live daemon*; the 22:15 restart resets `snapshot_computed_at=None` so the post-restart load never flushes → 24 of 39 business days missing from daily.csv; each surviving `ret` is a multi-day return mislabelled as daily (vol/Sharpe/drawdown all wrong). Flush moved to the compute phase; cost columns now read from trades.csv |
 | BUG-28 | CRIT | FIXED + DEPLOYED (090d536) — but SUPERSEDED as root cause by BUG-29; re-ran after restart | Poisoned delivery-month cache mis-filed QM one month early → daemon rolled a phantom calendar spread 1→2→4→8→16→32→64 and spammed IB with 115 rejected 64-lot rolls / 372 error-201s over ~36h; live book left at +64 QMV6 / −63 QMX6 against a 1-lot target. Churn breaker never fired (spread-roll path never registered a trade) |
-| BUG-29 | CRIT | FIXED (working tree) — DEPLOY + UNWIND OWED | Spread roll encodes direction TWICE (combo legs AND parent BAG action); IB applies the parent multiplicatively so a parent SELL inverts every leg → every roll fired BACKWARDS, buying the expiring month and selling the incoming one. Re-ran the 1→2→4→8→16 escalation 45 min after the BUG-28 restart; live book +16 QMV6 / −15 QMX6 against a +1 target. This — not the month cache — is the true root cause of the BUG-28 runaway |
+| BUG-29 | CRIT | FIXED + DEPLOYED + UNWOUND + VERIFIED LIVE (491bc04, 2026-08-10) | Spread roll encodes direction TWICE (combo legs AND parent BAG action); IB applies the parent multiplicatively so a parent SELL inverts every leg → every roll fired BACKWARDS, buying the expiring month and selling the incoming one. Re-ran the 1→2→4→8→16 escalation 45 min after the BUG-28 restart; live book +16 QMV6 / −15 QMX6 against a +1 target. This — not the month cache — is the true root cause of the BUG-28 runaway |
 | BUG-27 | MED | OPEN | algo_exec chases `ticker.ask` while IB caps the limit (error 2161) → 30 min of unfillable aggressive orders (SXPP 08-05, lmt 842 vs cap 826.5); also reports `avg_price` 823.9 on a 0-filled Cancelled order |
 | BUG-2  | HIGH | OPEN | No visibility into full optimisation output |
 | BUG-14 | MED+ | OPEN | Fills landing after algo_exec gives up are never captured; no execution reconciliation (reqExecutions/orderRef) — Phase 1 |
@@ -134,9 +134,33 @@ remediation note on leg sequencing: reduce the oversized long leg first so each 
 margin). 202610 expires 2026-09-21 and the roll date is 2026-08-11, so this must be resolved
 before the position is rolled or held into expiry.
 
-**Deploy owed:** push + pull to VPS, restart the daemon, then remove `risk_halt.txt`.
-Do **not** clear the halt before the fix is deployed — the current code would re-run the
-escalation on its next cycle.
+**Remediation completed 2026-08-10 (deployed, unwound, verified live).**
+
+1. **Deployed** commit `491bc04` to the VPS and confirmed `bag_action = "BUY"` and the
+   `is_long`-keyed limit are present in the running tree.
+2. **Unwound** via `scripts/unwind_qm_spread.py --execute --chunk 5` (halt file in place,
+   zero working orders). Chunks of 5 rather than 8 because this ran in the thin overnight
+   Globex session. Front leg reduced first (margin-freeing order, per BUG-28's note):
+   `SELL 15 QMV6` filled at 81.05–81.07, then `BUY 15 QMX6` filled at 79.83–79.86.
+   Margin requirement fell 45,553 → 25,390; AvailableFunds 198,022 → 217,061.
+3. **Halt cleared**, daemon restarted (PID 563765).
+4. **Verified the fix in production.** At 22:23 the daemon rolled the remaining 1 lot and
+   `reqExecutions` confirms it finally went the RIGHT way:
+
+   ```
+   SLD 1  Oct/EXPIRING (20260921) @ 80.975
+   BOT 1  Nov/INCOMING (20261019) @ 79.675
+   combo  BOT 1 @ -1.30
+   ```
+
+   The parent filled as BOT (no longer inverting the legs). Book is a clean **+1 QM 202611**
+   — the roll completed instead of doubling. The following 22:33 cycle placed nothing, which
+   is where the old code would have fired the "2 lot" roll.
+
+**Status: RESOLVED pending one more roll observation.** QM is now in the new front month;
+the next natural roll (202611→202612, ~2026-09-11) is the final confirmation that the
+direction fix holds on a fresh cycle rather than a cleanup. BUG-28's roll sanity bound
+proved its worth here — it converted a second runaway into a halt at 16 instead of 64.
 
 ---
 
