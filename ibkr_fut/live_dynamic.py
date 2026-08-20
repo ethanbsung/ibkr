@@ -114,12 +114,18 @@ DAEMON_SLEEP_SECS = 600   # seconds between daemon cycles (~10 min)
 # reqPositions await — and the whole daemon — forever. Cap it and fall back to the
 # cache on timeout so a stuck connection degrades to "possibly stale", not "hung".
 POSITIONS_TIMEOUT_SECS = 15
-# Per-instrument churn circuit-breaker (BUG-7): if any one instrument is traded in
+# Per-instrument churn circuit-breaker (BUG-7): if any one instrument FILLS in
 # more than this many cycles within a single daemon session, something is looping
 # (stale positions, a roll that won't settle, …). Halt + alert instead of bleeding
 # capital. A genuine roll touches an instrument a handful of times over a few days;
 # 6 trades in one *session* is already pathological.
+# Counts FILLS, not attempts (BUG-30): a passive limit that never fills is retried
+# every cycle by design and moves neither position nor capital, so it is not churn.
 MAX_INSTR_TRADES_PER_SESSION = 6
+# A no-fill retry loop is not a capital risk, but it does mean we're persistently
+# mispricing an illiquid market (or the roll is stuck). Warn once per instrument
+# per session at this many consecutive no-fill order attempts — alert, never halt.
+MAX_INSTR_NOFILL_ATTEMPTS = 8
 
 # ── Contract rolling windows ───────────────────────────────────────────────────
 PASSIVE_ROLL_DAYS = 10   # days before roll date: start routing rebalance orders to new month
@@ -1044,7 +1050,11 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
         cycle (serial orders × up-to-600s timeouts) can't look dead to the
         watchdog and get kill -9'd mid-order (BUG-12).
 
-    Returns (placed, skipped, dry_run, traded_instrs, unconverged) where
+    Returns (placed, skipped, dry_run, traded_instrs, unconverged, attempted_instrs)
+    where traded_instrs is the set of instruments that actually FILLED (≥1 contract)
+    this cycle and attempted_instrs is the set that placed a live order at all,
+    filled or not (BUG-30: the churn cap counts the former, the no-fill warning the
+    latter), and
     unconverged is the set of instruments whose NET position was NOT brought to
     target this cycle (deferred market-closed, qualify/pre-trade/risk skip,
     unfilled/partial/rejected orders). Persisted as `pending` in last_targets so
@@ -1053,7 +1063,8 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
     """
     pending = {t.contract.symbol for t in ib.openTrades()}
     placed, skipped, dry_run = [], [], []
-    traded_instrs: set = set()   # instruments that placed a live order this cycle (BUG-7 churn cap)
+    traded_instrs: set = set()   # instruments that FILLED this cycle (BUG-7 churn cap; BUG-30)
+    attempted_instrs: set = set()  # instruments that placed a live order, filled or not (BUG-30)
     unconverged: set = set()     # instruments whose net didn't reach target this cycle (BUG-16)
     _mkt_open_cache: dict = {}   # conId → bool; one reqContractDetails per contract per cycle
 
@@ -1235,16 +1246,22 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                             is_long=qty_to_roll > 0,
                             force=days_to_roll <= FORCE_ROLL_DAYS,
                             heartbeat=heartbeat)
-                        # This path placed a LIVE order, so it must count toward
-                        # the BUG-7 churn cap. Previously only the rebalance /
-                        # algo_exec legs called traded_instrs.add(), so a roll that
-                        # re-issued every cycle never tripped the breaker — BUG-28
-                        # ran 115 QM roll attempts with the cap at 6 and never fired.
-                        traded_instrs.add(instr)
+                        # Count toward the BUG-7 churn cap only if the roll
+                        # actually MOVED contracts. Before BUG-28 this path didn't
+                        # count at all (115 QM roll attempts, cap 6, never fired);
+                        # counting every attempt then over-corrected — a passive
+                        # spread limit that never fills is retried every cycle BY
+                        # DESIGN (see spread_roll_exec docstring), so an illiquid
+                        # instrument burned the cap in ~70 min and halted the whole
+                        # daemon having traded nothing (BUG-30, MSCISING 2026-08-20).
+                        # Fills are the thing that churns capital, so gate on them:
+                        # the QM runaway was filling and would still trip this.
+                        attempted_instrs.add(instr)
                         # Credit fills whatever the final status — a cancelled
                         # limit can still carry partial fills, and ignoring them
                         # would mis-size this cycle's rebalance orders.
                         if sp_filled > 0:
+                            traded_instrs.add(instr)
                             direction = 1 if qty_to_roll > 0 else -1
                             qty_next    += direction * sp_filled
                             qty_current -= direction * sp_filled
@@ -1406,7 +1423,9 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
                 unconverged.add(instr)
 
             placed.append((f"ROLL {act} {q} {sym} {m}", result.status, result.order_id))
-            traded_instrs.add(instr)
+            attempted_instrs.add(instr)
+            if result.filled_qty > 0:
+                traded_instrs.add(instr)   # fills churn capital; no-fill retries don't (BUG-30)
 
         # ── Execute rebalance orders (blocked on a risk-gate breach) ──────────
         for om, delta in (rebalance_orders if risk_ok else []):
@@ -1462,9 +1481,11 @@ def reconcile_and_execute(ib, ibcfg, targets, held, diag, ledger, execute: bool,
 
                     placed.append((f"{act} {q} {sym} {om}",
                                    result.status, result.order_id))
-                    traded_instrs.add(instr)
+                    attempted_instrs.add(instr)
+                    if result.filled_qty > 0:
+                        traded_instrs.add(instr)   # see BUG-30 note above
 
-    return placed, skipped, dry_run, traded_instrs, unconverged
+    return placed, skipped, dry_run, traded_instrs, unconverged, attempted_instrs
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1584,6 +1605,8 @@ def run_daemon(args):
     # Resets when a fresh snapshot loads (a new trading day's legitimate rebalances
     # should not be charged against yesterday's count).
     trade_counts: dict = {}
+    nofill_counts: dict = {}    # instr → consecutive no-fill order attempts (BUG-30)
+    nofill_alerted: set = set()  # instruments already warned about this session
     # Alert hygiene (P2.3): a single transient read failure / book mismatch is
     # log-only — the Gateway's daily restart and brief blips routinely produce one
     # that self-heals next cycle (e.g. the 2026-06-29 18:45 READFAIL recovered by
@@ -1647,6 +1670,8 @@ def run_daemon(args):
             capital = snap["capital"]
             meta    = diag.get("_meta", {})
             trade_counts = {}   # new snapshot = new target set; reset the churn cap
+            nofill_counts = {}      # …and the no-fill streaks (BUG-30)
+            nofill_alerted = set()
             print(f"[{_now()}] Snapshot loaded: {snapshot_computed_at}  "
                   f"capital ${capital:,.0f}  IDM {meta.get('idm')}  "
                   f"{meta.get('n_live')} live  target holds {meta.get('n_held_target')}")
@@ -1803,7 +1828,7 @@ def run_daemon(args):
         print(f"\n[{_now()}] {'─'*60}")
         # The cycle only reaches here after the calendar-aware staleness gate
         # above (run_daemon `continue`s on lag > 0), so the snapshot is fresh.
-        placed, skipped, dry_run, traded_instrs, unconverged = reconcile_and_execute(
+        placed, skipped, dry_run, traded_instrs, unconverged, attempted_instrs = reconcile_and_execute(
             ib, ibcfg, targets, held, diag, ledger,
             execute=args.execute, skip_unchanged=True, capital=capital,
             snapshot_fresh=True, heartbeat=_touch_heartbeat)
@@ -1823,11 +1848,13 @@ def run_daemon(args):
                               pending=unconverged)
 
             # ── 5b. Churn circuit-breaker (BUG-7) ─────────────────────────────
-            # Count cycles each instrument placed a live order this session. A
+            # Count cycles each instrument FILLED an order this session. A
             # legitimate roll/rebalance touches an instrument a handful of times;
             # exceeding the cap means we're looping (stale positions, a roll that
             # never settles). Halt + alert rather than keep bleeding capital — the
             # exact failure that turned a clean +1 QM into a 27-lot phantom spread.
+            # Attempts that fill nothing move no capital and are counted separately
+            # below as a warn-only signal (BUG-30).
             for instr in traded_instrs:
                 trade_counts[instr] = trade_counts.get(instr, 0) + 1
             runaway = {i: n for i, n in trade_counts.items()
@@ -1842,6 +1869,30 @@ def run_daemon(args):
                     f"[ibkr_fut] {msg}\nRemove ibkr_fut/risk_halt.txt after "
                     f"investigating + reconciling positions, then restart."))
                 sys.exit(1)
+
+            # ── 5c. No-fill retry warning (BUG-30) ────────────────────────────
+            # An instrument that keeps placing orders that never fill isn't
+            # churning capital, so it must NOT halt the book — but it does mean we
+            # are persistently mispricing an illiquid market, or a roll is stuck
+            # and will hit the forced-MKT escalation. Warn once per instrument per
+            # session so it's visible the same night, not in the morning report.
+            for instr in attempted_instrs:
+                if instr not in traded_instrs:
+                    nofill_counts[instr] = nofill_counts.get(instr, 0) + 1
+                else:
+                    nofill_counts.pop(instr, None)   # a fill breaks the streak
+            for instr, n in sorted(nofill_counts.items()):
+                if n >= MAX_INSTR_NOFILL_ATTEMPTS and instr not in nofill_alerted:
+                    nofill_alerted.add(instr)
+                    warn = (f"[NO-FILL-LOOP] {instr}: {n} consecutive order "
+                            f"attempts with zero fills this session — passive "
+                            f"limit is not being hit (illiquid quote / stuck "
+                            f"roll). Not halting; position unchanged.")
+                    print(f"[{_now()}] WARNING: {warn}")
+                    try:
+                        _send_discord(f"[ibkr_fut] {warn}")
+                    except Exception as e:
+                        print(f"[{_now()}] WARNING: NO-FILL Discord alert failed: {e}")
 
         # ── 6. Sleep until next cycle ─────────────────────────────────────────
         print(f"[{_now()}] Next cycle in {DAEMON_SLEEP_SECS // 60}m…")
@@ -2092,7 +2143,7 @@ def main():
         print("\n" + "-" * 80)
         # Snapshot is same-day fresh here: --mode execute loads via load_snapshot
         # (hard-exits if date != today); the fall-through default mode just wrote it.
-        placed, skipped, dry_run, _, unconverged = reconcile_and_execute(
+        placed, skipped, dry_run, _, unconverged, _ = reconcile_and_execute(
             ib, ibcfg, targets, held, diag, ledger, execute=args.execute,
             capital=capital, snapshot_fresh=True)
 

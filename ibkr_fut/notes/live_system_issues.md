@@ -28,6 +28,7 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 | BUG-26 | HIGH | FIXED (working tree) — VERIFICATION OWED + backfill owed | Daily ledger only flushes on a snapshot *change seen by a live daemon*; the 22:15 restart resets `snapshot_computed_at=None` so the post-restart load never flushes → 24 of 39 business days missing from daily.csv; each surviving `ret` is a multi-day return mislabelled as daily (vol/Sharpe/drawdown all wrong). Flush moved to the compute phase; cost columns now read from trades.csv |
 | BUG-28 | CRIT | FIXED + DEPLOYED (090d536) — but SUPERSEDED as root cause by BUG-29; re-ran after restart | Poisoned delivery-month cache mis-filed QM one month early → daemon rolled a phantom calendar spread 1→2→4→8→16→32→64 and spammed IB with 115 rejected 64-lot rolls / 372 error-201s over ~36h; live book left at +64 QMV6 / −63 QMX6 against a 1-lot target. Churn breaker never fired (spread-roll path never registered a trade) |
 | BUG-29 | CRIT | FIXED + DEPLOYED + UNWOUND + VERIFIED LIVE (491bc04, 2026-08-10) | Spread roll encodes direction TWICE (combo legs AND parent BAG action); IB applies the parent multiplicatively so a parent SELL inverts every leg → every roll fired BACKWARDS, buying the expiring month and selling the incoming one. Re-ran the 1→2→4→8→16 escalation 45 min after the BUG-28 restart; live book +16 QMV6 / −15 QMX6 against a +1 target. This — not the month cache — is the true root cause of the BUG-28 runaway |
+| BUG-30 | MED | FIXED (working tree) — DEPLOY + VERIFY OWED | Churn breaker counted order ATTEMPTS, not fills. A passive spread-roll limit that never fills is retried every cycle *by design*, so an illiquid instrument in its roll window burns the cap of 6 in ~70 min and halts the ENTIRE daemon having traded nothing. Live: MSCISING 2026-08-20, 7 attempts all `Cancelled filled 0/1`, position unchanged at +1 SSG 202608, $0 cost — but the whole book stopped trading with the roll still pending. False positive introduced by BUG-28's over-correction |
 | BUG-27 | MED | OPEN | algo_exec chases `ticker.ask` while IB caps the limit (error 2161) → 30 min of unfillable aggressive orders (SXPP 08-05, lmt 842 vs cap 826.5); also reports `avg_price` 823.9 on a 0-filled Cancelled order |
 | BUG-2  | HIGH | OPEN | No visibility into full optimisation output |
 | BUG-14 | MED+ | OPEN | Fills landing after algo_exec gives up are never captured; no execution reconciliation (reqExecutions/orderRef) — Phase 1 |
@@ -63,6 +64,73 @@ Reorganized 2026-07-01 after the full-system audit (added BUG-11…BUG-19, OBS-1
 ## OPEN
 
 ### CRITICAL
+
+#### [BUG-30] Churn circuit-breaker counts order ATTEMPTS, not fills — an unfillable roll halts the entire daemon having traded nothing
+
+**Found 2026-08-20 01:41 UTC (live, Discord page).** `CHURN CIRCUIT-BREAKER (BUG-7):
+MSCISING×7 traded > 6× this session`. The daemon halted and wrote `risk_halt.txt`,
+stopping *all* trading across the book.
+
+**No churn occurred.** All seven MSCISING "trades" were spread-roll attempts that filled
+nothing (`daemon_cron.log:123336-123393`):
+
+```
+00:35  SPREAD ROLL 1 SSG 202608→202609  lmt 0.8500 (bid 0.80/ask 0.85) → Cancelled  filled 0/1
+00:46  SPREAD ROLL …                                                   → Cancelled  filled 0/1
+00:57  SPREAD SKIP: no spread quote for SSG 202608/202609
+01:07  SPREAD ROLL … (bid 0.75/ask 0.85)                               → Cancelled  filled 0/1
+01:18  SPREAD SKIP: no spread quote
+01:28  SPREAD ROLL …                                                   → Cancelled  filled 0/1
+01:40  SPREAD ROLL …                                                   → Cancelled  filled 0/1  → HALT
+```
+
+Every attempt returned IB error 202 (Order Canceled), `filled 0/1`. Verified against IB
+directly at 01:47 UTC: **+1 SSG 202608 (SGPQ26), avgCost 51234.0 unchanged, no open
+orders, no stray legs.** Position identical to the session start. Cost of the incident:
+$0 in commission, but the whole book stopped trading with the roll still pending.
+
+**Root cause.** `traded_instrs.add(instr)` fired immediately after `spread_roll_exec`
+returned, regardless of status (live_dynamic.py:1243), and likewise on the two
+`algo_exec` legs (:1409, :1465) where `Unfilled`/`Cancelled`/`Rejected` all counted as
+trades. So the cap could not distinguish "position moving, capital bleeding" from "passive
+limit not getting hit".
+
+Retrying *is* the design — `spread_roll_exec`'s docstring: "a failed/timed-out limit is
+simply cancelled — the remainder stays in the expiring month and is **retried on the next
+cycle/day**." The limit sits at the offside price for `SPREAD_PASSIVE_SECS = 60` and never
+crosses the spread; on a thin SGX calendar quoted 0.80/0.85 a passive 0.85 offer simply
+isn't hit. At `DAEMON_SLEEP_SECS = 600`, the intended retry cadence burns the cap of 6 in
+~70 minutes — **guaranteed**, for any illiquid instrument whose spread window
+(`0 ≤ days_to_roll ≤ 3`) overlaps a long overnight session.
+
+This is a regression introduced by BUG-28's fix: that commit added the spread path to the
+churn counter (correctly — the QM runaway had gone unnoticed for 115 attempts) but counted
+*attempts* rather than *fills*, over-correcting into a false positive.
+
+**Fix (working tree).** Count fills, not attempts:
+- Spread roll registers only when `sp_filled > 0`; both `algo_exec` legs only when
+  `result.filled_qty > 0`. BUG-28 protection is fully preserved — the QM runaway *was*
+  filling, and partial fills still count (they move capital).
+- New `attempted_instrs` set returned alongside `traded_instrs` (arity 5→6).
+- New warn-only `[NO-FILL-LOOP]` alert at `MAX_INSTR_NOFILL_ATTEMPTS = 8` consecutive
+  zero-fill attempts: a persistent no-fill loop is a liquidity/pricing signal worth seeing
+  the same night, but it must never halt the book.
+
+**Tests.** 3 regression tests in `test_execution.py`
+(`test_unfilled_spread_roll_does_not_count_toward_churn_cap`,
+`test_partially_filled_spread_roll_counts_toward_churn_cap`,
+`test_unfilled_rebalance_does_not_count_toward_churn_cap`). The first was confirmed to
+FAIL against the pre-fix code and pass after. Full suite: 251 passed.
+
+**Verification owed.** MSCISING still needs to roll (`days_to_roll = 3` at 202608;
+`FORCE_ROLL_DAYS = 1` escalates to MKT on 2026-08-22, contract last-trade 2026-08-28).
+Confirm on the next session that (a) the roll retries without tripping the breaker, and
+(b) it either fills passively or escalates to market on the 22nd.
+
+**Related:** the underlying "why won't this fill" question overlaps [BUG-27] (aggressive
+chase vs IB's limit cap) and [OBS-5] (spread limit rounded to 4 decimals, not IB minTick).
+
+---
 
 #### [BUG-29] Calendar spread roll double-negates its direction → every roll fires BACKWARDS (true root cause of the BUG-28 runaway)
 

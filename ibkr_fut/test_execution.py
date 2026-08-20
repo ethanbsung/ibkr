@@ -659,7 +659,7 @@ def test_rne_dry_run_no_pre_trade_check(
     ib = _rne_ib()
     ledger = MagicMock()
 
-    placed, skipped, _, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, ledger, execute=False
     )
 
@@ -701,7 +701,7 @@ def test_rne_pending_order_skipped(
     mock_hold.return_value = ("202609", None, 9999)
     ib = _rne_ib(pending_symbols=["MES"])
 
-    placed, skipped, _, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -725,7 +725,7 @@ def test_rne_pre_trade_fail_skips_algo(
     mock_is_open.return_value = True   # market open → don't defer
     ib = _rne_ib()
 
-    placed, skipped, _, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -857,7 +857,7 @@ def test_rne_no_ib_config_skips(
     mock_spec.return_value = None  # no IB config → skip
     ib = _rne_ib()
 
-    placed, skipped, _, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -879,7 +879,7 @@ def test_rne_no_roll_calendar_skips(
     mock_hold.return_value = (None, None, 9999)  # no roll calendar → skip
     ib = _rne_ib()
 
-    placed, skipped, _, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _, _ = reconcile_and_execute(
         ib, MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, MagicMock(), execute=True
     )
 
@@ -1048,7 +1048,7 @@ def test_rne_spread_roll_deferred_when_market_closed(
     mock_hold.return_value = ("202609", "202612", 2)
     held = {"ES": {"202609": 2}}
 
-    placed, skipped, _, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _, _ = reconcile_and_execute(
         _rne_ib(), MagicMock(), {"ES": 2}, held, _MOCK_DIAG,
         MagicMock(), execute=True)
 
@@ -1067,7 +1067,7 @@ def test_rne_risk_gate_blocks_rebalance_not_roll_close(
     mock_vol.return_value = (False, "too big")
     held = {"ES": {"202603": 2}}                     # stranded old month
 
-    placed, skipped, _, _, _ = reconcile_and_execute(
+    placed, skipped, _, _, _, _ = reconcile_and_execute(
         _rne_ib(), MagicMock(), {"ES": 100}, held, _MOCK_DIAG,
         MagicMock(), execute=True, capital=100_000.0)
 
@@ -2070,7 +2070,7 @@ def _main_execute_patches(monkeypatch, tmp_path):
         "load_ib_config": MagicMock(return_value=MagicMock()),
         "get_positions": MagicMock(return_value=({}, [])),
         "mismatch": MagicMock(return_value=(False, "")),
-        "reconcile": MagicMock(return_value=([], [], [], set(), set())),
+        "reconcile": MagicMock(return_value=([], [], [], set(), set(), set())),
         "save_last": MagicMock(),
         "discord": MagicMock(),
         "ledger": MagicMock(),
@@ -2266,7 +2266,7 @@ def test_rne_rejected_order_alerts_discord(
         reject_reason="IB error 201: margin insufficient")
     ledger = MagicMock()
 
-    _, _, _, _, unconverged = reconcile_and_execute(
+    _, _, _, _, unconverged, _ = reconcile_and_execute(
         _rne_ib(), MagicMock(), {"ES": 1}, {}, _MOCK_DIAG, ledger, execute=True)
 
     ledger.log_fill.assert_not_called()
@@ -2453,7 +2453,7 @@ def test_rne_deferred_instrument_reported_unconverged(
     mock_hold.return_value = ("202609", None, 9999)
     held = {"ES": {"202609": 1}}
 
-    _, _, _, _, unconverged = reconcile_and_execute(
+    _, _, _, _, unconverged, _ = reconcile_and_execute(
         _rne_ib(), MagicMock(), {"ES": 3}, held, _MOCK_DIAG,
         MagicMock(), execute=True)
 
@@ -2469,7 +2469,7 @@ def test_rne_filled_instrument_not_unconverged(
     mock_exec.return_value = _default_fill_result()
     held = {"ES": {"202609": 1}}
 
-    _, _, _, _, unconverged = reconcile_and_execute(
+    _, _, _, _, unconverged, _ = reconcile_and_execute(
         _rne_ib(), MagicMock(), {"ES": 3}, held, _MOCK_DIAG,
         MagicMock(), execute=True)
 
@@ -2629,7 +2629,7 @@ def test_spread_roll_registers_with_churn_cap(
     mock_spread.return_value = ("Filled", 1, -1.25)
     mock_exec.return_value = _default_fill_result()
 
-    _, _, _, traded_instrs, _ = reconcile_and_execute(
+    _, _, _, traded_instrs, _, _ = reconcile_and_execute(
         _rne_ib(), MagicMock(), {"ES": 1}, {"ES": {"202609": 1}},
         _MOCK_DIAG, MagicMock(), execute=True)
 
@@ -2762,3 +2762,85 @@ def test_spread_roll_passive_limit_rests_offside_by_direction(mock_time, mock_qu
         _, order = ib.placeOrder.call_args[0]
         assert order.lmtPrice == expected_px, (
             f"is_long={is_long} must rest at {expected_px}, got {order.lmtPrice}")
+
+
+# ── BUG-30: churn cap counts FILLS, not attempts ──────────────────────────────
+#
+# The BUG-28 fix made spread rolls register with the churn cap — but registered
+# every ATTEMPT. A passive spread limit that never fills is retried each cycle by
+# design (spread_roll_exec docstring), so an illiquid instrument burned the cap of
+# 6 in ~70 min and halted the whole daemon having traded nothing. Live: MSCISING
+# 2026-08-20, 7 attempts, all "Cancelled filled 0/1", position unchanged at +1.
+
+@patch("ibkr_fut.live_dynamic.is_contract_okay_to_trade", return_value=True)
+@patch("ibkr_fut.live_dynamic.spread_roll_exec")
+@patch("ibkr_fut.live_dynamic.algo_exec")
+@patch("ibkr_fut.live_dynamic.pre_trade_checks")
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
+@patch("ibkr_fut.live_dynamic.ib_spec")
+def test_unfilled_spread_roll_does_not_count_toward_churn_cap(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_spread, mock_open
+):
+    """A cancelled spread roll with zero fills must NOT register as churn."""
+    mock_spec.return_value = _MOCK_SPEC
+    mock_hold.return_value = ("202609", "202610", 1)
+    mock_ptc.return_value = (True, "", 5210.0)
+    mock_spread.return_value = ("Cancelled", 0, 0.0)   # the MSCISING signature
+    mock_exec.return_value = _default_fill_result()
+
+    _, _, _, traded_instrs, _, attempted = reconcile_and_execute(
+        _rne_ib(), MagicMock(), {"ES": 1}, {"ES": {"202609": 1}},
+        _MOCK_DIAG, MagicMock(), execute=True)
+
+    mock_spread.assert_called_once()
+    assert "ES" not in traded_instrs, "a zero-fill roll is not churn"
+    assert "ES" in attempted, "…but it must still be visible as an attempt"
+
+
+@patch("ibkr_fut.live_dynamic.is_contract_okay_to_trade", return_value=True)
+@patch("ibkr_fut.live_dynamic.spread_roll_exec")
+@patch("ibkr_fut.live_dynamic.algo_exec")
+@patch("ibkr_fut.live_dynamic.pre_trade_checks")
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
+@patch("ibkr_fut.live_dynamic.ib_spec")
+def test_partially_filled_spread_roll_counts_toward_churn_cap(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_spread, mock_open
+):
+    """A partial fill DID move capital — it must still trip the cap (BUG-28 intact)."""
+    mock_spec.return_value = _MOCK_SPEC
+    mock_hold.return_value = ("202609", "202610", 1)
+    mock_ptc.return_value = (True, "", 5210.0)
+    mock_spread.return_value = ("Cancelled", 2, -1.25)   # cancelled, but 2 filled
+    mock_exec.return_value = _default_fill_result()
+
+    _, _, _, traded_instrs, _, _ = reconcile_and_execute(
+        _rne_ib(), MagicMock(), {"ES": 3}, {"ES": {"202609": 3}},
+        _MOCK_DIAG, MagicMock(), execute=True)
+
+    assert "ES" in traded_instrs, "partial fills move capital → still churn"
+
+
+@patch("ibkr_fut.live_dynamic.is_contract_okay_to_trade", return_value=True)
+@patch("ibkr_fut.live_dynamic.algo_exec")
+@patch("ibkr_fut.live_dynamic.pre_trade_checks")
+@patch("ibkr_fut.live_dynamic.qualify")
+@patch("ibkr_fut.live_dynamic.get_roll_info")
+@patch("ibkr_fut.live_dynamic.ib_spec")
+def test_unfilled_rebalance_does_not_count_toward_churn_cap(
+    mock_spec, mock_hold, mock_qual, mock_ptc, mock_exec, mock_open
+):
+    """Same rule on the rebalance leg: Unfilled/Cancelled is not churn."""
+    mock_spec.return_value = _MOCK_SPEC
+    mock_hold.return_value = ("202609", None, 9999)   # no roll window
+    mock_ptc.return_value = (True, "", 5210.0)
+    mock_exec.return_value = _default_fill_result(filled_qty=0, avg_price=0.0, status="Unfilled")
+
+    _, _, _, traded_instrs, _, attempted = reconcile_and_execute(
+        _rne_ib(), MagicMock(), {"ES": 2}, {"ES": {"202609": 1}},
+        _MOCK_DIAG, MagicMock(), execute=True)
+
+    mock_exec.assert_called_once()
+    assert "ES" not in traded_instrs, "an unfilled rebalance is not churn"
+    assert "ES" in attempted
